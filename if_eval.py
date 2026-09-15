@@ -211,7 +211,7 @@ def print_results(rows):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--output_dir", default="results/if_eval")
+    parser.add_argument("--output_dir", default="../results/if_eval")
     parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     parser.add_argument(
