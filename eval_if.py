@@ -5,7 +5,7 @@ Install the evaluator directly from GitHub:
     python -m pip install "ifbench @ git+https://github.com/allenai/IFBench.git"
 
 Example:
-    python if_eval.py --model qwen2.5-ins
+    python eval_if.py --model qwen2.5-ins
 """
 
 import argparse

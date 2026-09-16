@@ -4,14 +4,14 @@ set -uo pipefail
 usage() {
     cat <<'EOF'
 Usage:
-  ./run_safe_eval.sh --models MODEL,MODEL,... [safe_eval.py options]
-  ./run_safe_eval.sh --folder DIR [safe_eval.py options]
+  ./eval_safe_run.sh --models MODEL,MODEL,... [eval_safe.py options]
+  ./eval_safe_run.sh --folder DIR [eval_safe.py options]
 
 Examples:
-  ./run_safe_eval.sh --models qwen2.5-ins,llama3-ins
-  ./run_safe_eval.sh --folder /models/checkpoints
-  ./run_safe_eval.sh --models /models/ckpt-100,/models/ckpt-200 --permit
-  ./run_safe_eval.sh --gpus 0,2 --models model-a,model-b,model-c
+  ./eval_safe_run.sh --models qwen2.5-ins,llama3-ins
+  ./eval_safe_run.sh --folder /models/checkpoints
+  ./eval_safe_run.sh --models /models/ckpt-100,/models/ckpt-200 --permit
+  ./eval_safe_run.sh --gpus 0,2 --models model-a,model-b,model-c
 
 --folder scans one level down and includes directories containing config.json.
 GPU selection, in order:
@@ -150,7 +150,7 @@ launch() {
     echo "  log: $log_file"
 
     CUDA_VISIBLE_DEVICES="$gpu" PYTHONUNBUFFERED=1 \
-        "$python_bin" "$script_dir/safe_eval.py" \
+        "$python_bin" "$script_dir/eval_safe.py" \
         --model "$model" "${eval_args[@]}" >"$log_file" 2>&1 &
 
     pid=$!

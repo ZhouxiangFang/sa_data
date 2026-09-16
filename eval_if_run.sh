@@ -20,14 +20,14 @@ fi
 usage() {
     printf '%s\n' \
         "Usage:" \
-        "  ./run_if_eval.sh --models MODEL [MODEL ...] [evaluation options]" \
-        "  ./run_if_eval.sh --model MODEL --model MODEL [evaluation options]" \
-        "  ./run_if_eval.sh --folder DIR [evaluation options]" \
+        "  ./eval_if_run.sh --models MODEL [MODEL ...] [evaluation options]" \
+        "  ./eval_if_run.sh --model MODEL --model MODEL [evaluation options]" \
+        "  ./eval_if_run.sh --folder DIR [evaluation options]" \
         "" \
         "Examples:" \
-        "  ./run_if_eval.sh --models qwen2.5-ins llama3-ins" \
-        "  ./run_if_eval.sh --models /path/ckpt-100 /path/ckpt-200 --limit 10" \
-        "  ./run_if_eval.sh --folder /path/to/models --limit 10" \
+        "  ./eval_if_run.sh --models qwen2.5-ins llama3-ins" \
+        "  ./eval_if_run.sh --models /path/ckpt-100 /path/ckpt-200 --limit 10" \
+        "  ./eval_if_run.sh --folder /path/to/models --limit 10" \
         "" \
         "--folder scans one level down for directories containing config.json." \
         "" \
@@ -132,7 +132,7 @@ for model in "${models[@]}"; do
     printf 'Evaluating model: %s\n' "$model"
     printf '%s\n\n' "============================================================"
 
-    if ! python "$script_dir/if_eval.py" \
+    if ! python "$script_dir/eval_if.py" \
         --model "$model" "${eval_args[@]}"; then
         failed_models+=("$model")
         printf 'Evaluation failed: %s\n' "$model" >&2

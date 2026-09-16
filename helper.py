@@ -7,6 +7,9 @@ import pandas as pd
 from datasets import load_dataset
 from vllm import SamplingParams
 
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(os.path.dirname(MODULE_DIR), "data")
+
 model_mapping = {
     "llama3": "meta-llama/Meta-Llama-3-8B",
     "llama3.1": "meta-llama/Meta-Llama-3.1-8B",
@@ -33,7 +36,7 @@ def filter_safe_responses(df: pd.DataFrame) -> pd.DataFrame:
     return df[~label.isin({'harmful', 'unsafe'})]
 
 def to_abbr(dataset_name, sub):
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'subcategory_stats.json')) as f:
+    with open(os.path.join(MODULE_DIR, 'subcategory_stats.json')) as f:
         abbr_map = {ds: {c: v['abbr'] for c, v in cats.items()} for ds, cats in json.load(f).items()}[dataset_name]
 
     if isinstance(sub, str):
@@ -183,7 +186,8 @@ def load_safety_dataset(dataset_name, type):
                 else x
             )
         elif dataset_name == 'ailuminate':
-            test_dataset = load_dataset("csv", data_files="../data/AILuminate.csv", split="train").to_pandas()
+            ailuminate_path = os.path.join(DATA_DIR, "AILuminate.csv")
+            test_dataset = load_dataset("csv", data_files=ailuminate_path, split="train").to_pandas()
             test_dataset.rename(columns={'prompt_text': 'prompt', 'hazard': 'subcategory'}, inplace=True)
             test_dataset['subcategory'] = test_dataset['subcategory'].map(ailuminate_subcategory_mapping).fillna(test_dataset['subcategory'])
         else:

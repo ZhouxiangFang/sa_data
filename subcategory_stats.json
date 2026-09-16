@@ -1,0 +1,708 @@
+{
+  "wildguardmix": {
+    "benign": {
+      "abbr": "benign",
+      "combined": {
+        "total": 17619,
+        "safe_response": 17580,
+        "unsafe_response": 39
+      },
+      "train": {
+        "total": 16648,
+        "safe_response": 16621,
+        "unsafe_response": 27
+      },
+      "test": {
+        "total": 971,
+        "safe_response": 959,
+        "unsafe_response": 12
+      }
+    },
+    "social_stereotypes_and_unfair_discrimination": {
+      "abbr": "stereo",
+      "combined": {
+        "total": 3693,
+        "safe_response": 2246,
+        "unsafe_response": 1447
+      },
+      "train": {
+        "total": 3617,
+        "safe_response": 2199,
+        "unsafe_response": 1418
+      },
+      "test": {
+        "total": 76,
+        "safe_response": 47,
+        "unsafe_response": 29
+      }
+    },
+    "disseminating_false_or_misleading_information_encouraging_disinformation_campaigns": {
+      "abbr": "misinfo",
+      "combined": {
+        "total": 2281,
+        "safe_response": 1316,
+        "unsafe_response": 965
+      },
+      "train": {
+        "total": 2237,
+        "safe_response": 1290,
+        "unsafe_response": 947
+      },
+      "test": {
+        "total": 44,
+        "safe_response": 26,
+        "unsafe_response": 18
+      }
+    },
+    "toxic_language_hate_speech": {
+      "abbr": "toxic",
+      "combined": {
+        "total": 1915,
+        "safe_response": 1083,
+        "unsafe_response": 832
+      },
+      "train": {
+        "total": 1874,
+        "safe_response": 1058,
+        "unsafe_response": 816
+      },
+      "test": {
+        "total": 41,
+        "safe_response": 25,
+        "unsafe_response": 16
+      }
+    },
+    "violence_and_physical_harm": {
+      "abbr": "violence",
+      "combined": {
+        "total": 1835,
+        "safe_response": 1026,
+        "unsafe_response": 809
+      },
+      "train": {
+        "total": 1795,
+        "safe_response": 1004,
+        "unsafe_response": 791
+      },
+      "test": {
+        "total": 40,
+        "safe_response": 22,
+        "unsafe_response": 18
+      }
+    },
+    "sensitive_information_organization_government": {
+      "abbr": "sensitive",
+      "combined": {
+        "total": 1804,
+        "safe_response": 1267,
+        "unsafe_response": 537
+      },
+      "train": {
+        "total": 1754,
+        "safe_response": 1234,
+        "unsafe_response": 520
+      },
+      "test": {
+        "total": 50,
+        "safe_response": 33,
+        "unsafe_response": 17
+      }
+    },
+    "private_information_individual": {
+      "abbr": "private",
+      "combined": {
+        "total": 1561,
+        "safe_response": 1120,
+        "unsafe_response": 441
+      },
+      "train": {
+        "total": 1480,
+        "safe_response": 1053,
+        "unsafe_response": 427
+      },
+      "test": {
+        "total": 81,
+        "safe_response": 67,
+        "unsafe_response": 14
+      }
+    },
+    "defamation_encouraging_unethical_or_unsafe_actions": {
+      "abbr": "unethical",
+      "combined": {
+        "total": 1475,
+        "safe_response": 821,
+        "unsafe_response": 654
+      },
+      "train": {
+        "total": 1429,
+        "safe_response": 792,
+        "unsafe_response": 637
+      },
+      "test": {
+        "total": 46,
+        "safe_response": 29,
+        "unsafe_response": 17
+      }
+    },
+    "sexual_content": {
+      "abbr": "sexual",
+      "combined": {
+        "total": 1418,
+        "safe_response": 773,
+        "unsafe_response": 645
+      },
+      "train": {
+        "total": 1371,
+        "safe_response": 742,
+        "unsafe_response": 629
+      },
+      "test": {
+        "total": 47,
+        "safe_response": 31,
+        "unsafe_response": 16
+      }
+    },
+    "fraud_assisting_illegal_activities": {
+      "abbr": "fraud",
+      "combined": {
+        "total": 1389,
+        "safe_response": 817,
+        "unsafe_response": 572
+      },
+      "train": {
+        "total": 1329,
+        "safe_response": 781,
+        "unsafe_response": 548
+      },
+      "test": {
+        "total": 60,
+        "safe_response": 36,
+        "unsafe_response": 24
+      }
+    },
+    "copyright_violations": {
+      "abbr": "copyright",
+      "combined": {
+        "total": 1175,
+        "safe_response": 873,
+        "unsafe_response": 302
+      },
+      "train": {
+        "total": 1144,
+        "safe_response": 848,
+        "unsafe_response": 296
+      },
+      "test": {
+        "total": 31,
+        "safe_response": 25,
+        "unsafe_response": 6
+      }
+    },
+    "mental_health_over-reliance_crisis": {
+      "abbr": "mental",
+      "combined": {
+        "total": 1175,
+        "safe_response": 748,
+        "unsafe_response": 427
+      },
+      "train": {
+        "total": 1128,
+        "safe_response": 715,
+        "unsafe_response": 413
+      },
+      "test": {
+        "total": 47,
+        "safe_response": 33,
+        "unsafe_response": 14
+      }
+    },
+    "cyberattack": {
+      "abbr": "cyberattack",
+      "combined": {
+        "total": 1114,
+        "safe_response": 643,
+        "unsafe_response": 471
+      },
+      "train": {
+        "total": 1066,
+        "safe_response": 620,
+        "unsafe_response": 446
+      },
+      "test": {
+        "total": 48,
+        "safe_response": 23,
+        "unsafe_response": 25
+      }
+    },
+    "causing_material_harm_by_disseminating_misinformation": {
+      "abbr": "material_harm",
+      "combined": {
+        "total": 907,
+        "safe_response": 535,
+        "unsafe_response": 372
+      },
+      "train": {
+        "total": 862,
+        "safe_response": 509,
+        "unsafe_response": 353
+      },
+      "test": {
+        "total": 45,
+        "safe_response": 26,
+        "unsafe_response": 19
+      }
+    },
+    "others": {
+      "abbr": "others",
+      "combined": {
+        "total": 298,
+        "safe_response": 159,
+        "unsafe_response": 139
+      },
+      "train": {
+        "total": 200,
+        "safe_response": 100,
+        "unsafe_response": 100
+      },
+      "test": {
+        "total": 98,
+        "safe_response": 59,
+        "unsafe_response": 39
+      }
+    }
+  },
+  "aegis": {
+    "Benign": {
+      "abbr": "benign",
+      "combined": {
+        "total": 5858,
+        "safe_response": 5858,
+        "unsafe_response": 0
+      },
+      "train": {
+        "total": 4682,
+        "safe_response": 4682,
+        "unsafe_response": 0
+      },
+      "test": {
+        "total": 1176,
+        "safe_response": 1176,
+        "unsafe_response": 0
+      }
+    },
+    "Criminal Planning/Confessions": {
+      "abbr": "criminal",
+      "combined": {
+        "total": 4938,
+        "safe_response": 3164,
+        "unsafe_response": 1774
+      },
+      "train": {
+        "total": 4029,
+        "safe_response": 2539,
+        "unsafe_response": 1490
+      },
+      "test": {
+        "total": 909,
+        "safe_response": 625,
+        "unsafe_response": 284
+      }
+    },
+    "Hate/Identity Hate": {
+      "abbr": "hate",
+      "combined": {
+        "total": 2360,
+        "safe_response": 1574,
+        "unsafe_response": 786
+      },
+      "train": {
+        "total": 2020,
+        "safe_response": 1349,
+        "unsafe_response": 671
+      },
+      "test": {
+        "total": 340,
+        "safe_response": 225,
+        "unsafe_response": 115
+      }
+    },
+    "Harassment": {
+      "abbr": "harassment",
+      "combined": {
+        "total": 2287,
+        "safe_response": 1532,
+        "unsafe_response": 755
+      },
+      "train": {
+        "total": 2001,
+        "safe_response": 1358,
+        "unsafe_response": 643
+      },
+      "test": {
+        "total": 286,
+        "safe_response": 174,
+        "unsafe_response": 112
+      }
+    },
+    "Violence": {
+      "abbr": "violence",
+      "combined": {
+        "total": 2256,
+        "safe_response": 1426,
+        "unsafe_response": 830
+      },
+      "train": {
+        "total": 1944,
+        "safe_response": 1233,
+        "unsafe_response": 711
+      },
+      "test": {
+        "total": 312,
+        "safe_response": 193,
+        "unsafe_response": 119
+      }
+    },
+    "PII/Privacy": {
+      "abbr": "privacy",
+      "combined": {
+        "total": 1417,
+        "safe_response": 974,
+        "unsafe_response": 443
+      },
+      "train": {
+        "total": 1249,
+        "safe_response": 866,
+        "unsafe_response": 383
+      },
+      "test": {
+        "total": 168,
+        "safe_response": 108,
+        "unsafe_response": 60
+      }
+    },
+    "Needs Caution": {
+      "abbr": "needs_caution",
+      "combined": {
+        "total": 1378,
+        "safe_response": 1103,
+        "unsafe_response": 275
+      },
+      "train": {
+        "total": 970,
+        "safe_response": 729,
+        "unsafe_response": 241
+      },
+      "test": {
+        "total": 408,
+        "safe_response": 374,
+        "unsafe_response": 34
+      }
+    },
+    "Profanity": {
+      "abbr": "profanity",
+      "combined": {
+        "total": 1357,
+        "safe_response": 883,
+        "unsafe_response": 474
+      },
+      "train": {
+        "total": 1124,
+        "safe_response": 727,
+        "unsafe_response": 397
+      },
+      "test": {
+        "total": 233,
+        "safe_response": 156,
+        "unsafe_response": 77
+      }
+    },
+    "Sexual": {
+      "abbr": "sexual",
+      "combined": {
+        "total": 1288,
+        "safe_response": 789,
+        "unsafe_response": 499
+      },
+      "train": {
+        "total": 1127,
+        "safe_response": 689,
+        "unsafe_response": 438
+      },
+      "test": {
+        "total": 161,
+        "safe_response": 100,
+        "unsafe_response": 61
+      }
+    },
+    "Controlled/Regulated Substances": {
+      "abbr": "controlled_substances",
+      "combined": {
+        "total": 1106,
+        "safe_response": 663,
+        "unsafe_response": 443
+      },
+      "train": {
+        "total": 894,
+        "safe_response": 532,
+        "unsafe_response": 362
+      },
+      "test": {
+        "total": 212,
+        "safe_response": 131,
+        "unsafe_response": 81
+      }
+    },
+    "Guns and Illegal Weapons": {
+      "abbr": "guns",
+      "combined": {
+        "total": 896,
+        "safe_response": 525,
+        "unsafe_response": 371
+      },
+      "train": {
+        "total": 787,
+        "safe_response": 471,
+        "unsafe_response": 316
+      },
+      "test": {
+        "total": 109,
+        "safe_response": 54,
+        "unsafe_response": 55
+      }
+    },
+    "Suicide and Self Harm": {
+      "abbr": "self_harm",
+      "combined": {
+        "total": 369,
+        "safe_response": 250,
+        "unsafe_response": 119
+      },
+      "train": {
+        "total": 274,
+        "safe_response": 172,
+        "unsafe_response": 102
+      },
+      "test": {
+        "total": 95,
+        "safe_response": 78,
+        "unsafe_response": 17
+      }
+    },
+    "Fraud/Deception": {
+      "abbr": "fraud",
+      "combined": {
+        "total": 294,
+        "safe_response": 206,
+        "unsafe_response": 88
+      },
+      "train": {
+        "total": 255,
+        "safe_response": 176,
+        "unsafe_response": 79
+      },
+      "test": {
+        "total": 39,
+        "safe_response": 30,
+        "unsafe_response": 9
+      }
+    },
+    "Political/Misinformation/Conspiracy": {
+      "abbr": "political_misinfo",
+      "combined": {
+        "total": 287,
+        "safe_response": 218,
+        "unsafe_response": 69
+      },
+      "train": {
+        "total": 243,
+        "safe_response": 184,
+        "unsafe_response": 59
+      },
+      "test": {
+        "total": 44,
+        "safe_response": 34,
+        "unsafe_response": 10
+      }
+    },
+    "Threat": {
+      "abbr": "threat",
+      "combined": {
+        "total": 180,
+        "safe_response": 110,
+        "unsafe_response": 70
+      },
+      "train": {
+        "total": 154,
+        "safe_response": 96,
+        "unsafe_response": 58
+      },
+      "test": {
+        "total": 26,
+        "safe_response": 14,
+        "unsafe_response": 12
+      }
+    },
+    "Sexual (minor)": {
+      "abbr": "sexual_minor",
+      "combined": {
+        "total": 166,
+        "safe_response": 104,
+        "unsafe_response": 62
+      },
+      "train": {
+        "total": 139,
+        "safe_response": 84,
+        "unsafe_response": 55
+      },
+      "test": {
+        "total": 27,
+        "safe_response": 20,
+        "unsafe_response": 7
+      }
+    },
+    "Malware": {
+      "abbr": "malware",
+      "combined": {
+        "total": 100,
+        "safe_response": 65,
+        "unsafe_response": 35
+      },
+      "train": {
+        "total": 87,
+        "safe_response": 55,
+        "unsafe_response": 32
+      },
+      "test": {
+        "total": 13,
+        "safe_response": 10,
+        "unsafe_response": 3
+      }
+    },
+    "Unauthorized Advice": {
+      "abbr": "unauthorized_advice",
+      "combined": {
+        "total": 99,
+        "safe_response": 93,
+        "unsafe_response": 6
+      },
+      "train": {
+        "total": 45,
+        "safe_response": 39,
+        "unsafe_response": 6
+      },
+      "test": {
+        "total": 54,
+        "safe_response": 54,
+        "unsafe_response": 0
+      }
+    },
+    "Other": {
+      "abbr": "other",
+      "combined": {
+        "total": 79,
+        "safe_response": 57,
+        "unsafe_response": 22
+      },
+      "train": {
+        "total": 58,
+        "safe_response": 38,
+        "unsafe_response": 20
+      },
+      "test": {
+        "total": 21,
+        "safe_response": 19,
+        "unsafe_response": 2
+      }
+    },
+    "Copyright/Trademark/Plagiarism": {
+      "abbr": "copyright",
+      "combined": {
+        "total": 70,
+        "safe_response": 52,
+        "unsafe_response": 18
+      },
+      "train": {
+        "total": 62,
+        "safe_response": 47,
+        "unsafe_response": 15
+      },
+      "test": {
+        "total": 8,
+        "safe_response": 5,
+        "unsafe_response": 3
+      }
+    },
+    "High Risk Gov Decision Making": {
+      "abbr": "government",
+      "combined": {
+        "total": 68,
+        "safe_response": 58,
+        "unsafe_response": 10
+      },
+      "train": {
+        "total": 60,
+        "safe_response": 52,
+        "unsafe_response": 8
+      },
+      "test": {
+        "total": 8,
+        "safe_response": 6,
+        "unsafe_response": 2
+      }
+    },
+    "Immoral/Unethical": {
+      "abbr": "immoral",
+      "combined": {
+        "total": 31,
+        "safe_response": 31,
+        "unsafe_response": 0
+      },
+      "train": {
+        "total": 2,
+        "safe_response": 2,
+        "unsafe_response": 0
+      },
+      "test": {
+        "total": 29,
+        "safe_response": 29,
+        "unsafe_response": 0
+      }
+    },
+    "Illegal Activity": {
+      "abbr": "illegal",
+      "combined": {
+        "total": 26,
+        "safe_response": 26,
+        "unsafe_response": 0
+      },
+      "train": {
+        "total": 1,
+        "safe_response": 1,
+        "unsafe_response": 0
+      },
+      "test": {
+        "total": 25,
+        "safe_response": 25,
+        "unsafe_response": 0
+      }
+    },
+    "Manipulation": {
+      "abbr": "manipulation",
+      "combined": {
+        "total": 6,
+        "safe_response": 3,
+        "unsafe_response": 3
+      },
+      "train": {
+        "total": 4,
+        "safe_response": 3,
+        "unsafe_response": 1
+      },
+      "test": {
+        "total": 2,
+        "safe_response": 0,
+        "unsafe_response": 2
+      }
+    }
+  }
+}
