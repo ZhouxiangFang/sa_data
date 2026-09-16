@@ -17,12 +17,15 @@ Examples:
 GPU selection, in order:
   --gpus, GPUS, CUDA_VISIBLE_DEVICES, or every GPU reported by nvidia-smi.
 Extra models wait in a queue and use the next GPU that finishes.
+MAX_USED_MB sets the availability threshold (default: 2000 MB).
+GPU_POLL_SECONDS sets the retry interval (default: 10 seconds).
 EOF
 }
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 python_bin="${PYTHON_BIN:-python}"
 log_dir="${LOG_DIR:-$script_dir/../log}"
+run_timestamp=$(date +%Y%m%d_%H%M%S)
 
 models=()
 folders=()
@@ -122,6 +125,11 @@ if (( ${#gpus[@]} == 0 )); then
     exit 1
 fi
 
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "nvidia-smi is required to check GPU availability." >&2
+    exit 1
+fi
+
 # Temporary workaround for this machine's NVIDIA driver/library mismatch.
 driver_lib=/home/zf28/align/.nvidia-595.84/compute-lib
 if grep -q '595\.84' /proc/driver/nvidia/version 2>/dev/null; then
@@ -132,9 +140,37 @@ if grep -q '595\.84' /proc/driver/nvidia/version 2>/dev/null; then
     export LD_LIBRARY_PATH="$driver_lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 
+max_used_mb="${MAX_USED_MB:-2000}"
+poll_seconds="${GPU_POLL_SECONDS:-10}"
+if [[ ! "$max_used_mb" =~ ^[0-9]+$ || ! "$poll_seconds" =~ ^[1-9][0-9]*$ ]]; then
+    echo "MAX_USED_MB must be nonnegative and GPU_POLL_SECONDS must be positive." >&2
+    exit 2
+fi
+
+gpu_memory_used() {
+    nvidia-smi --id="$1" --query-gpu=memory.used \
+        --format=csv,noheader,nounits 2>/dev/null | head -n 1 | tr -d '[:space:]'
+}
+
+# Validate every requested GPU before entering the queue.
+declare -A seen_gpus=()
+for gpu in "${gpus[@]}"; do
+    if [[ -n "${seen_gpus[$gpu]:-}" ]]; then
+        echo "GPU $gpu was supplied more than once." >&2
+        exit 2
+    fi
+    seen_gpus[$gpu]=1
+    used=$(gpu_memory_used "$gpu") || used=""
+    if [[ ! "$used" =~ ^[0-9]+$ ]]; then
+        echo "Unable to query GPU $gpu with nvidia-smi." >&2
+        exit 1
+    fi
+done
+
 mkdir -p -- "$log_dir"
 
-declare -A job_gpu job_model job_log
+declare -A job_gpu=() job_model=() job_log=()
+declare -A active_gpu=() reported_busy=()
 failures=()
 next_model=0
 
@@ -144,7 +180,7 @@ launch() {
     name="${model%/}"
     name="${name##*/}"
     name="${name//[^A-Za-z0-9._-]/_}"
-    log_file="$log_dir/safe_eval_${index}_gpu${gpu}_${name}_$$.log"
+    log_file="$log_dir/eval_safe_${name}_${run_timestamp}.log"
 
     echo "Starting on GPU $gpu: $model"
     echo "  log: $log_file"
@@ -157,6 +193,7 @@ launch() {
     job_gpu[$pid]="$gpu"
     job_model[$pid]="$model"
     job_log[$pid]="$log_file"
+    active_gpu[$gpu]=1
 }
 
 stop_jobs() {
@@ -166,38 +203,46 @@ stop_jobs() {
 }
 trap stop_jobs INT TERM
 
-# Initially fill each GPU slot.
-for gpu in "${gpus[@]}"; do
-    (( next_model < ${#models[@]} )) || break
-    launch "$gpu" "$next_model"
-    ((next_model += 1))
-done
+# Poll for completed jobs and idle GPUs until the queue is empty.
+while (( next_model < ${#models[@]} || ${#job_gpu[@]} > 0 )); do
+    made_progress=0
 
-# Whenever a job finishes, start the next queued model on that GPU.
-while (( ${#job_gpu[@]} > 0 )); do
-    finished_pid=""
-    if wait -n -p finished_pid; then
-        job_status=0
-    else
-        job_status=$?
-    fi
+    for pid in "${!job_gpu[@]}"; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            gpu="${job_gpu[$pid]}"
+            model="${job_model[$pid]}"
+            if wait "$pid"; then
+                echo "Finished on GPU $gpu: $model"
+            else
+                echo "Failed on GPU $gpu: $model" >&2
+                echo "  log: ${job_log[$pid]}" >&2
+                failures+=("$model")
+            fi
+            unset 'job_gpu[$pid]' 'job_model[$pid]' 'job_log[$pid]'
+            unset 'active_gpu[$gpu]'
+            made_progress=1
+        fi
+    done
 
-    gpu="${job_gpu[$finished_pid]}"
-    model="${job_model[$finished_pid]}"
+    for gpu in "${gpus[@]}"; do
+        (( next_model < ${#models[@]} )) || break
+        [[ -z "${active_gpu[$gpu]:-}" ]] || continue
 
-    if (( job_status == 0 )); then
-        echo "Finished on GPU $gpu: $model"
-    else
-        echo "Failed on GPU $gpu: $model" >&2
-        echo "  log: ${job_log[$finished_pid]}" >&2
-        failures+=("$model")
-    fi
+        used=$(gpu_memory_used "$gpu") || used=""
+        if [[ "$used" =~ ^[0-9]+$ ]] && (( used < max_used_mb )); then
+            unset 'reported_busy[$gpu]'
+            launch "$gpu" "$next_model"
+            ((next_model += 1))
+            made_progress=1
+        elif [[ -z "${reported_busy[$gpu]:-}" ]]; then
+            echo "GPU $gpu is busy (${used:-unknown} MB used); waiting."
+            reported_busy[$gpu]=1
+        fi
+    done
 
-    unset 'job_gpu[$finished_pid]' 'job_model[$finished_pid]' 'job_log[$finished_pid]'
-
-    if (( next_model < ${#models[@]} )); then
-        launch "$gpu" "$next_model"
-        ((next_model += 1))
+    if (( next_model < ${#models[@]} || ${#job_gpu[@]} > 0 )) && \
+       (( made_progress == 0 )); then
+        sleep "$poll_seconds"
     fi
 done
 
