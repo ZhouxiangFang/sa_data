@@ -58,7 +58,7 @@ for model in "${models[@]}"; do
     esac
 done
 
-dataset="${1:-$script_dir/../data/git_data_10k.csv}"
+dataset="${1:-$script_dir/../data/git_data_20k.csv}"
 checkpoint_root="${2:-/home/${USER}/models}"
 extra_args=("${@:3}")
 

@@ -112,7 +112,7 @@ def parse_args():
         default=None,
         help="Number of examples to sample. By default, use the full CSV.",
     )
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--per_device_train_batch_size", type=int, default=1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
