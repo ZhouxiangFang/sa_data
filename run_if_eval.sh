@@ -22,10 +22,14 @@ usage() {
         "Usage:" \
         "  ./run_if_eval.sh --models MODEL [MODEL ...] [evaluation options]" \
         "  ./run_if_eval.sh --model MODEL --model MODEL [evaluation options]" \
+        "  ./run_if_eval.sh --folder DIR [evaluation options]" \
         "" \
         "Examples:" \
         "  ./run_if_eval.sh --models qwen2.5-ins llama3-ins" \
         "  ./run_if_eval.sh --models /path/ckpt-100 /path/ckpt-200 --limit 10" \
+        "  ./run_if_eval.sh --folder /path/to/models --limit 10" \
+        "" \
+        "--folder scans one level down for directories containing config.json." \
         "" \
         "Shared evaluation options:" \
         "  --output_dir DIR" \
@@ -35,6 +39,7 @@ usage() {
 }
 
 models=()
+folders=()
 eval_args=()
 
 while [[ $# -gt 0 ]]; do
@@ -58,6 +63,18 @@ while [[ $# -gt 0 ]]; do
             models+=("${1#--model=}")
             shift
             ;;
+        --folder)
+            if [[ $# -lt 2 ]]; then
+                echo "--folder requires a value" >&2
+                exit 2
+            fi
+            folders+=("$2")
+            shift 2
+            ;;
+        --folder=*)
+            folders+=("${1#--folder=}")
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -69,11 +86,43 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Add model directories located directly inside each folder.
+for folder in "${folders[@]}"; do
+    if [[ ! -d "$folder" ]]; then
+        echo "Folder not found: $folder" >&2
+        exit 2
+    fi
+
+    found=0
+    for model_dir in "$folder"/*; do
+        if [[ -d "$model_dir" && -f "$model_dir/config.json" ]]; then
+            models+=("$model_dir")
+            ((found += 1))
+        fi
+    done
+    echo "Found $found model(s) in $folder"
+done
+
 if [[ ${#models[@]} -eq 0 ]]; then
-    echo "No models supplied." >&2
+    echo "No models found. Use --models, --model, or --folder." >&2
     usage >&2
     exit 2
 fi
+
+# Avoid evaluating a model twice when inputs overlap.
+unique_models=()
+declare -A seen_models=()
+for model in "${models[@]}"; do
+    if [[ -z "$model" ]]; then
+        echo "Model names must not be empty." >&2
+        exit 2
+    fi
+    if [[ -z "${seen_models[$model]:-}" ]]; then
+        unique_models+=("$model")
+        seen_models[$model]=1
+    fi
+done
+models=("${unique_models[@]}")
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 failed_models=()
