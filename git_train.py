@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -135,6 +136,10 @@ def main():
     model_id = model_mapping[args.model]
     template_tokenizer_id = model_mapping[instruct_tokenizer_mapping[args.model]]
     train_df = load_csv_dataset(args.dataset)
+    # Preserve the CSV's size label even when training filters or samples rows.
+    size_match = re.search(r"_(\d+(?:\.\d+)?k)$", args.dataset.stem)
+    data_size = size_match.group(1) if size_match else f"{len(train_df) / 1000:g}k"
+    output_dir = args.output_dir / f"{args.model}_git{data_size}"
 
     # Use base weights and tokenization with the official instruct format.
     tokenizer = AutoTokenizer.from_pretrained(
@@ -192,8 +197,6 @@ def main():
         }
     )
 
-    model_name = model_id.rsplit("/", 1)[-1]
-    output_dir = args.output_dir / f"{model_name}-git"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.local_rank in (-1, 0):

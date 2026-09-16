@@ -46,14 +46,11 @@ def load_lima():
     return clean_rows(rows, LIMA)
 
 
-def load_message_dataset(dataset_name, excluded_categories=()):
+def load_message_dataset(dataset_name):
     """Load examples containing exactly one user/assistant exchange."""
     dataset = load_dataset(dataset_name, split="train")
-    excluded_categories = {category.lower() for category in excluded_categories}
     rows = []
     for example in dataset:
-        if example.get("category", "").lower() in excluded_categories:
-            continue
         messages = example["messages"]
         if len(messages) != 2:
             continue
@@ -80,9 +77,9 @@ def parse_args():
         description="Build a single-turn general instruction-tuning dataset."
     )
     parser.add_argument("--lima", type=int, default=1000)
-    parser.add_argument("--no_robots", type=int, default=5000)
-    parser.add_argument("--tulu", type=int, default=2000)
-    parser.add_argument("--dolly", type=int, default=2000)
+    parser.add_argument("--no_robots", type=int, default=8705)
+    parser.add_argument("--tulu", type=int, default=5000)
+    parser.add_argument("--dolly", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--output",
@@ -103,7 +100,7 @@ def main():
     datasets = [
         sample_rows(load_lima(), args.lima, args.seed, LIMA),
         sample_rows(
-            load_message_dataset(NO_ROBOTS, excluded_categories={"coding"}),
+            load_message_dataset(NO_ROBOTS),
             args.no_robots,
             args.seed,
             NO_ROBOTS,

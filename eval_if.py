@@ -208,6 +208,20 @@ def print_results(rows):
         print(f"  {row['benchmark']:<8} {row['prompt_loose'] * 100:6.2f}%")
 
 
+def save_responses(rows, output_dir, model_name):
+    """Save prompts and generated responses from both benchmarks."""
+    os.makedirs(output_dir, exist_ok=True)
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", model_name)
+    output_file = os.path.join(output_dir, f"{safe_name}_if_responses.csv")
+    with open(output_file, "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(
+            file, fieldnames=["prompt", "responses", "prompt_source"]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    return output_file
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
@@ -227,15 +241,26 @@ def main():
     llm = LLM(model=model_id, tensor_parallel_size=args.tensor_parallel_size)
 
     rows = []
+    response_rows = []
     for benchmark, examples in benchmarks.items():
         print(f"\nEvaluating {benchmark} ({len(examples)} prompts)")
         responses = generate(llm, tokenizer, examples, args.max_tokens)
+        response_rows.extend(
+            {
+                "prompt": example["prompt"],
+                "responses": response,
+                "prompt_source": benchmark,
+            }
+            for example, response in zip(examples, responses)
+        )
         rows.append(evaluate(benchmark, examples, responses, args.model, model_id))
 
     add_average(rows)
     output_file = save_csv(rows, args.output_dir, model_name)
+    responses_file = save_responses(response_rows, args.output_dir, model_name)
     print_results(rows)
     print(f"\nSaved: {output_file}")
+    print(f"Saved: {responses_file}")
 
 
 if __name__ == "__main__":
