@@ -47,6 +47,11 @@ master_port="${MASTER_PORT:-29500}"
 ds_config="${DS_CONFIG:-$script_dir/ds_config.json}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 
+if [[ ! "$max_used_mb" =~ ^[0-9]+$ ]] || (( max_used_mb <= 0 )); then
+    echo "MAX_USED_MB must be a positive integer; got: $max_used_mb" >&2
+    exit 2
+fi
+
 if [[ "$gpu_group" == auto ]]; then
     if ! gpu_memory=$(nvidia-smi \
         --query-gpu=index,memory.used \

@@ -14,6 +14,7 @@ model_mapping = {
     "qwen3": "Qwen/Qwen3-8B-Base",
     "olmo2": "allenai/OLMo-2-1124-7B",
     "olmo3": "allenai/Olmo-3-7B",
+    "mistral": "mistralai/Mistral-7B-v0.3",
     "llama3-ins": "meta-llama/Meta-Llama-3-8B-Instruct",
     "llama3.1-ins": "meta-llama/Meta-Llama-3.1-8B-Instruct",
     "qwen2.5-ins": "Qwen/Qwen2.5-7B-Instruct",
@@ -21,7 +22,8 @@ model_mapping = {
     "qwen2.5-32b-ins": "Qwen/Qwen2.5-32B-Instruct",
     "qwq-32b-ins": "Qwen/QwQ-32B",
     "olmo2-ins": "allenai/OLMo-2-1124-7B-Instruct",
-    "olmo3-ins": "allenai/Olmo-3-7B-Think",
+    "olmo3-ins": "allenai/Olmo-3-7B-Instruct",
+    "mistral-ins": "mistralai/Mistral-7B-Instruct-v0.3",
     "wildguard": "allenai/wildguard"
 }
 
