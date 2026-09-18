@@ -196,7 +196,13 @@ def save_csv(rows, output_dir, model_name):
     with open(output_file, "w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=columns)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(
+            {
+                **row,
+                **{name: f"{row[name]:.4f}" for name in SCORE_NAMES},
+            }
+            for row in rows
+        )
 
     return output_file
 

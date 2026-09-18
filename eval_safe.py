@@ -72,7 +72,7 @@ def resolve_model(model):
 
 
 def percentage(part, total):
-    return round(part / total * 100, 2) if total else 0.0
+    return round(part / total * 100, 4) if total else 0.0
 
 
 def overall_results(datasets):
@@ -98,12 +98,12 @@ def overall_results(datasets):
                 "total": int(results["total"].sum()),
                 "harmful": int(results["harmful"].sum()),
                 "na_responses": int(results["na_responses"].sum()),
-                "harmful_score_pct": round(results["harmful_score_pct"].mean(), 2),
+                "harmful_score_pct": round(results["harmful_score_pct"].mean(), 4),
             }
         ]
     )
     results = pd.concat([results, average], ignore_index=True)
-    results["harmful_score_pct"] = results["harmful_score_pct"].map("{:.2f}".format)
+    results["harmful_score_pct"] = results["harmful_score_pct"].map("{:.4f}".format)
     return results
 
 
@@ -126,7 +126,7 @@ def subcategory_results(name, dataset):
     )
     results["harmful_score_pct"] = (
         results["harmful"] / results["count"] * 100
-    ).round(2)
+    ).round(4)
     results["abbr"] = (
         results["subcategory"].apply(lambda value: ", ".join(to_abbr(name, value)))
         if name in {"wildguardmix", "aegis"}
@@ -146,7 +146,7 @@ def subcategory_results(name, dataset):
     )
     columns = ["subcategory", "abbr", "count", "harmful", "harmful_score_pct"]
     results = pd.concat([summary, results], ignore_index=True)[columns]
-    results["harmful_score_pct"] = results["harmful_score_pct"].map("{:.2f}".format)
+    results["harmful_score_pct"] = results["harmful_score_pct"].map("{:.4f}".format)
     return results
 
 

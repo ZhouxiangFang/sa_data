@@ -9,42 +9,144 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 usage() {
     cat <<'EOF'
 Usage:
-  ./align_run.sh [MODELS] [DATASETS] [NUM_TRAIN] [HARMFUL_RATE] [extra align.py args...]
+  ./align_run.sh --models MODEL [MODEL ...] [options] [align.py args...]
+  ./align_run.sh --folder CHECKPOINT_DIR [options] [align.py args...]
 
-Arguments:
-  MODELS        Comma-separated models (default: qwen2.5-ins)
-  DATASETS      Comma-separated datasets (default: wildguardmix,aegis)
-  NUM_TRAIN     Total examples per job (default: 800)
-  HARMFUL_RATE  Dataset-subcategory fraction (default: 0.5)
+Launcher options:
+  --models MODEL [MODEL ...]      Space- or comma-separated models
+  --folder DIR                    Add immediate child directories with config.json
+  --datasets DATASET [DATASET...] Space- or comma-separated datasets
+  --num_train N                   Total examples per job (default: 800)
+  --harmful_rate RATE             Subcategory fraction (default: 0.5)
+  -h, --help                      Show this help
 
 Examples:
-  ./align_run.sh
-  ./align_run.sh qwen2.5-ins,llama3.1-ins wildguardmix,aegis 800 0.5
-  ./align_run.sh qwen2.5-ins wildguardmix 400 0.5 --epochs 2 --lr 1e-5
+  ./align_run.sh --models qwen2.5-ins llama3.1-ins
+  ./align_run.sh --models qwen2.5-ins,llama3.1-ins --datasets wildguardmix aegis
+  ./align_run.sh --folder /scratch/zf28/ckpts --datasets wildguardmix
+  ./align_run.sh --folder /scratch/zf28/ckpts --models qwen2.5-ins \
+      --num_train 800 --harmful_rate 0.5 --epochs 2 --lr 1e-5
 
 GPU_GROUP=auto uses both 0,1,2,3 and 4,5,6,7. It can instead be set to one
 of those groups. MAX_USED_MB defaults to 2000 and GPU_POLL_SECONDS to 30.
 EOF
 }
 
-if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
-    usage
-    exit 0
+# ---- concrete experiment configuration ----
+models=()
+folders=()
+datasets=()
+extra_args=()
+num_train=800
+harmful_rate=0.5
+
+append_csv_values() {
+    local target_name="$1" raw="$2" value
+    local -n target="$target_name"
+    local -a values
+    IFS=',' read -r -a values <<< "$raw"
+    for value in "${values[@]}"; do
+        [[ -n "$value" ]] || { echo "Empty value in: $raw" >&2; return 2; }
+        target+=("$value")
+    done
+}
+
+while (( $# > 0 )); do
+    case "$1" in
+        --models|--datasets)
+            option="$1"
+            shift
+            (( $# > 0 )) && [[ "$1" != --* ]] || {
+                echo "$option needs at least one value." >&2
+                exit 2
+            }
+            while (( $# > 0 )) && [[ "$1" != --* ]]; do
+                if [[ "$option" == --models ]]; then
+                    append_csv_values models "$1" || exit $?
+                else
+                    append_csv_values datasets "$1" || exit $?
+                fi
+                shift
+            done
+            ;;
+        --models=*|--datasets=*)
+            option="${1%%=*}"
+            if [[ "$option" == --models ]]; then
+                append_csv_values models "${1#*=}" || exit $?
+            else
+                append_csv_values datasets "${1#*=}" || exit $?
+            fi
+            shift
+            ;;
+        --folder)
+            (( $# >= 2 )) || { echo "--folder needs a directory." >&2; exit 2; }
+            folders+=("$2")
+            shift 2
+            ;;
+        --folder=*) folders+=("${1#*=}"); shift ;;
+        --num_train)
+            (( $# >= 2 )) || { echo "--num_train needs a value." >&2; exit 2; }
+            num_train="$2"
+            shift 2
+            ;;
+        --num_train=*) num_train="${1#*=}"; shift ;;
+        --harmful_rate)
+            (( $# >= 2 )) || { echo "--harmful_rate needs a value." >&2; exit 2; }
+            harmful_rate="$2"
+            shift 2
+            ;;
+        --harmful_rate=*) harmful_rate="${1#*=}"; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --)
+            shift
+            extra_args+=("$@")
+            break
+            ;;
+        *) extra_args+=("$1"); shift ;;
+    esac
+done
+
+if (( ${#datasets[@]} == 0 )); then
+    datasets=(wildguardmix aegis)
 fi
 
-# ---- concrete experiment configuration ----
-model_list="${1:-qwen2.5-ins}"
-dataset_list="${2:-wildguardmix,aegis}"
-num_train="${3:-800}"
-harmful_rate="${4:-0.5}"
-extra_args=("${@:5}")
+# A folder contributes each immediate checkpoint directory containing config.json.
+for raw_folder in "${folders[@]}"; do
+    folder="${raw_folder%/}"
+    [[ -n "$folder" ]] || folder=/
+    [[ -d "$folder" ]] || { echo "Folder not found: $folder" >&2; exit 2; }
 
-IFS=',' read -r -a models <<< "$model_list"
-IFS=',' read -r -a datasets <<< "$dataset_list"
+    found=0
+    for model_dir in "$folder"/*; do
+        if [[ -d "$model_dir" && -f "$model_dir/config.json" ]]; then
+            models+=("$model_dir")
+            ((found += 1))
+        fi
+    done
+    echo "Found $found checkpoint(s) in $folder"
+done
 
+if (( ${#models[@]} == 0 )); then
+    if (( ${#folders[@]} > 0 )); then
+        echo "No checkpoints found in the supplied folder(s)." >&2
+        exit 2
+    fi
+    models=(qwen2.5-ins)
+fi
+
+# Preserve the first occurrence when a model was supplied directly and found
+# through a folder, or when folders overlap.
+unique_models=()
+declare -A seen_models=()
 for model in "${models[@]}"; do
     [[ -n "$model" ]] || { echo "Model names must not be empty." >&2; exit 2; }
+    if [[ -z "${seen_models[$model]:-}" ]]; then
+        unique_models+=("$model")
+        seen_models[$model]=1
+    fi
 done
+models=("${unique_models[@]}")
+
 for dataset in "${datasets[@]}"; do
     case "$dataset" in
         wildguardmix|aegis) ;;
@@ -253,7 +355,7 @@ run_queue() {
     return "$queue_status"
 }
 
-echo "Configuration: models=$model_list datasets=$dataset_list num_train=$num_train harmful_rate=$harmful_rate"
+echo "Configuration: models=${models[*]} datasets=${datasets[*]} num_train=$num_train harmful_rate=$harmful_rate"
 echo "Required subcategory examples: $category_required"
 echo "Queued ${#job_models[@]} job(s) on GPU groups: ${gpu_groups[*]}"
 

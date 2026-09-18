@@ -338,6 +338,11 @@ def filename_component(value: str) -> str:
     return component or "run"
 
 
+def checkpoint_model_component(model: str) -> str:
+    """Return the model portion used in automatically named checkpoints."""
+    return filename_component(Path(model).name)
+
+
 def main() -> None:
     args = parse_args()
     is_main_process = args.local_rank in (-1, 0)
@@ -388,7 +393,7 @@ def main() -> None:
     )
 
     checkpoint_name = args.run_name or (
-        f"{filename_component(args.model)}_{args.alignment_dataset}_"
+        f"{checkpoint_model_component(args.model)}_{args.alignment_dataset}_"
         f"{filename_component(args.abbr)}_{args.num_train}"
     )
     checkpoint_name = filename_component(checkpoint_name)
