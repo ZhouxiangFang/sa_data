@@ -21,23 +21,19 @@ import os
 import re
 from pathlib import Path
 
-import pandas as pd
 import torch
 import torch.distributed as dist
-from datasets import Dataset, load_dataset
+from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
-from helper import load_safety_dataset, model_mapping, print_config
+from helper import BENIGN_DATA_TYPES, build_training_data, model_mapping, print_config
 
 
 logging.getLogger("vllm").setLevel(logging.WARNING)
 logging.getLogger("Gloo").setLevel(logging.WARNING)
 
 MODULE_DIR = Path(__file__).resolve().parent
-SAFE_LABELS = {"safe", "unharmful"}
-HARMFUL_LABELS = {"harmful", "unsafe"}
-BENIGN_DATA_TYPES = ("vanilla_benign", "adversarial_benign", "mix")
 
 
 def parse_args() -> argparse.Namespace:
@@ -164,172 +160,6 @@ def parse_args() -> argparse.Namespace:
     if not args.deepspeed.is_file():
         parser.error(f"DeepSpeed config not found: {args.deepspeed}")
     return args
-
-
-def normalize_label(series: pd.Series) -> pd.Series:
-    return series.astype("string").str.lower().str.strip()
-
-
-def clean_pairs(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop missing or empty prompt/response pairs."""
-    df = df.dropna(subset=["prompt", "response"]).copy()
-    df["prompt"] = df["prompt"].astype(str).str.strip()
-    df["response"] = df["response"].astype(str).str.strip()
-    return df[(df["prompt"] != "") & (df["response"] != "")]
-
-
-def load_harmful_subcategory(dataset_name: str, abbr: str) -> pd.DataFrame:
-    """Load prompts in one subcategory with safe response targets."""
-    df = load_safety_dataset(dataset_name, "train")
-    prompt_label_column = (
-        "prompt_harm_label" if dataset_name == "wildguardmix" else "prompt_label"
-    )
-    required = {
-        "prompt",
-        "response",
-        "response_harm_label",
-        prompt_label_column,
-        "sub_abbrs",
-    }
-    missing = sorted(required.difference(df.columns))
-    if missing:
-        raise ValueError(f"{dataset_name} is missing required columns: {missing}")
-
-    is_subcategory = df["sub_abbrs"].apply(
-        lambda abbreviations: isinstance(abbreviations, (list, tuple, set))
-        and abbr in abbreviations
-    )
-    prompt_labels = SAFE_LABELS if abbr.lower() == "benign" else HARMFUL_LABELS
-    has_target_prompt_label = normalize_label(df[prompt_label_column]).isin(
-        prompt_labels
-    )
-    is_safe_response = normalize_label(df["response_harm_label"]).isin(SAFE_LABELS)
-    return clean_pairs(df[is_subcategory & has_target_prompt_label & is_safe_response])
-
-
-def load_wildjailbreak_benign(data_type: str) -> pd.DataFrame:
-    """Load benign prompt/completion pairs from WildJailbreak."""
-    df = load_dataset(
-        "allenai/wildjailbreak",
-        "train",
-        split="train",
-        delimiter="\t",
-        keep_default_na=False,
-    ).to_pandas()
-    selected_types = (
-        ["vanilla_benign", "adversarial_benign"]
-        if data_type == "mix"
-        else [data_type]
-    )
-    df = df[df["data_type"].isin(selected_types)].copy()
-    df["prompt"] = df.apply(
-        lambda row: (
-            row["adversarial"]
-            if row["data_type"] == "adversarial_benign"
-            else row["vanilla"]
-        ),
-        axis=1,
-    )
-    df.rename(columns={"completion": "response"}, inplace=True)
-    return clean_pairs(df)
-
-
-def sample_pairs(
-    df: pd.DataFrame,
-    count: int,
-    source: str,
-    seed: int,
-    tokenizer,
-    max_length: int,
-) -> tuple[pd.DataFrame, int]:
-    """Sample pairs whose formatted prompt leaves room for completion tokens."""
-    if count == 0:
-        return pd.DataFrame(columns=["prompt", "response"]), 0
-    if count > len(df):
-        raise ValueError(
-            f"Requested {count:,} examples from {source}, but only {len(df):,} are available"
-        )
-
-    shuffled = df.sample(frac=1, random_state=seed)
-    selected_indices: list[int] = []
-    overlong_count = 0
-    # Work in bounded batches so a large WildJailbreak pool does not create a
-    # second full in-memory copy of every formatted prompt.
-    batch_size = max(256, min(2048, count * 2))
-    for start in range(0, len(shuffled), batch_size):
-        batch = shuffled.iloc[start : start + batch_size]
-        conversations = [
-            [{"role": "user", "content": prompt}] for prompt in batch["prompt"]
-        ]
-        formatted_prompts = tokenizer.apply_chat_template(
-            conversations,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        lengths = tokenizer(
-            formatted_prompts,
-            add_special_tokens=False,
-            return_length=True,
-            truncation=False,
-        )["length"]
-        for index, length in zip(batch.index, lengths):
-            if length < max_length:
-                selected_indices.append(index)
-                if len(selected_indices) == count:
-                    selected = df.loc[selected_indices, ["prompt", "response"]]
-                    return selected.reset_index(drop=True), overlong_count
-            else:
-                overlong_count += 1
-
-    raise ValueError(
-        f"Requested {count:,} examples from {source}, but only "
-        f"{len(selected_indices):,} have a formatted prompt shorter than "
-        f"--max_length {max_length:,}"
-    )
-
-
-def build_training_data(
-    args: argparse.Namespace, tokenizer
-) -> tuple[pd.DataFrame, int, int, int]:
-    # Round to the nearest example; the benign count absorbs any remainder.
-    harmful_count = int(args.num_train * args.harmful_rate + 0.5)
-    benign_count = args.num_train - harmful_count
-
-    harmful_pool = (
-        load_harmful_subcategory(args.alignment_dataset, args.abbr)
-        if harmful_count
-        else pd.DataFrame(columns=["prompt", "response"])
-    )
-    benign_pool = (
-        load_wildjailbreak_benign(args.benign_data_type)
-        if benign_count
-        else pd.DataFrame(columns=["prompt", "response"])
-    )
-
-    harmful, harmful_overlong = sample_pairs(
-        harmful_pool,
-        harmful_count,
-        f"subcategory {args.abbr!r} in {args.alignment_dataset}",
-        args.seed,
-        tokenizer,
-        args.max_length,
-    )
-    benign, benign_overlong = sample_pairs(
-        benign_pool,
-        benign_count,
-        f"WildJailbreak {args.benign_data_type!r}",
-        args.seed + 1,
-        tokenizer,
-        args.max_length,
-    )
-    train_df = pd.concat([harmful, benign], ignore_index=True)
-    train_df = train_df.sample(frac=1, random_state=args.seed).reset_index(drop=True)
-    return (
-        train_df,
-        len(harmful_pool),
-        len(benign_pool),
-        harmful_overlong + benign_overlong,
-    )
 
 
 def filename_component(value: str) -> str:
