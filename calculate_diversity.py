@@ -7,7 +7,10 @@ an alignment run, use its model, num_train, harmful_rate, benign_data_type,
 max_length and seed. Additional rounds use seed + round (default: one round).
 
 Only sampled prompts are POS-tagged; tags are reused across groups and rounds.
-Self-BLEU is lower for more diverse syntax; POS n-gram diversity is higher.
+POS sequences (e.g. "DT NN VBZ") are embedded with Qwen3-Embedding-0.6B for
+the cosine-kernel Vendi Score. Embeddings are reused across groups and datasets.
+Self-BLEU is lower for more diverse syntax; POS n-gram diversity and Vendi Score
+are higher. Vendi Score is the effective number of distinct embedded structures.
 Test splits remain available for prompt-only analysis, without training filters.
 
 Examples:
@@ -23,6 +26,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 import nltk
+import numpy as np
 import pandas as pd
 from nltk.translate.bleu_score import brevity_penalty
 
@@ -37,6 +41,65 @@ SUPPORTED = {
     'train': ('wildguardmix', 'aegis'),
     'test': ('wildguardmix', 'aegis', 'wildjailbreak', 'ailuminate'),
 }
+EMBEDDING_MODEL_ID = 'Qwen/Qwen3-Embedding-0.6B'
+
+
+class PosEmbedder:
+    """Embed space-separated POS tags once per distinct sequence."""
+
+    def __init__(self, batch_size=32, device=None):
+        if batch_size < 1:
+            raise ValueError('Embedding batch size must be positive')
+        self.batch_size = batch_size
+        self.device = device
+        self.model = None
+        self.cache = {}
+
+    def encode(self, pos_seqs):
+        texts = [' '.join(seq) for seq in pos_seqs]
+        missing = list(dict.fromkeys(text for text in texts if text not in self.cache))
+        if missing:
+            # Delay model loading until embeddings are actually needed.
+            if self.model is None:
+                from sentence_transformers import SentenceTransformer
+
+                self.model = SentenceTransformer(
+                    EMBEDDING_MODEL_ID, device=self.device,
+                    tokenizer_kwargs={'padding_side': 'left'},
+                )
+            print(f'  Embedding {len(missing):,} unique POS sequences...')
+            embeddings = self.model.encode(
+                missing, batch_size=self.batch_size, prompt='',
+                convert_to_numpy=True, normalize_embeddings=True,
+                show_progress_bar=True,
+            )
+            self.cache.update(zip(missing, embeddings))
+        # Repeated sequences must retain their frequency in each scored sample.
+        return np.asarray([self.cache[text] for text in texts])
+
+
+def vendi_score(embeddings):
+    """exp(entropy(eigenvalues(K / N))), with K the cosine similarity matrix.
+
+    This is the standard q=1 Vendi Score: identical embeddings score 1, while N
+    orthogonal embeddings score N. Compute the smaller of the sample and feature
+    Gram matrices; their nonzero eigenvalues agree.
+    Definition: https://github.com/vertaix/Vendi-Score
+    """
+    embeddings = np.asarray(embeddings, dtype=np.float64)
+    if embeddings.ndim != 2 or not all(embeddings.shape):
+        raise ValueError('Vendi Score requires a non-empty 2D embedding array')
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    if not np.isfinite(embeddings).all() or not np.isfinite(norms).all() or (norms == 0).any():
+        raise ValueError('Vendi Score requires finite, nonzero embeddings')
+    embeddings = embeddings / norms
+    n, dimension = embeddings.shape
+    gram = embeddings @ embeddings.T if n <= dimension else embeddings.T @ embeddings
+    eigenvalues = np.linalg.eigvalsh(gram / n)
+    # A cosine Gram matrix is PSD; tiny negative eigenvalues are rounding error.
+    eigenvalues = eigenvalues[eigenvalues > 0]
+    eigenvalues /= eigenvalues.sum()
+    return float(np.exp(-np.sum(eigenvalues * np.log(eigenvalues))))
 
 
 def pos_tag_corpus(texts, num_proc=4, batch_size=1000):
@@ -136,7 +199,8 @@ def category_names(df, dataset_name):
 def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
                               harmful_rate=1.0, benign_data_type='vanilla_benign',
                               max_length=4096, max_n=4, n_rounds=1, seed=42,
-                              num_proc=4, split='train', abbrs=None, benign_pool=None):
+                              num_proc=4, split='train', abbrs=None, benign_pool=None,
+                              pos_embedder=None):
     """Score fixed-size alignment mixtures; skip groups with insufficient data.
 
     The overall row samples the union of eligible dataset rows, preserving their
@@ -215,6 +279,10 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
     tags = dict(zip(prompts, pos_tag_corpus(prompts, num_proc=num_proc)))
     if any(not seq for seq in tags.values()):
         raise ValueError('A sampled prompt produced no POS tags; cannot score the full sample')
+    if pos_embedder is None:
+        pos_embedder = PosEmbedder()
+    embeddings = pos_embedder.encode(tags.values())
+    prompt_indices = {prompt: i for i, prompt in enumerate(prompts)}
 
     rows = []
     for abbr, (category, count, rounds) in samples.items():
@@ -222,14 +290,17 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
         scores = []
         for sample in rounds:
             seqs = [tags[prompt] for prompt in sample]
+            sample_embeddings = embeddings[[prompt_indices[prompt] for prompt in sample]]
             scores.append((syntactic_self_bleu(seqs, max_n),
-                           pos_ngram_diversity(seqs, max_n)))
+                           pos_ngram_diversity(seqs, max_n),
+                           vendi_score(sample_embeddings)))
         rows.append({
             'subcategory': category, 'abbr': abbr, 'count': count,
             'scored_on': num_train, 'subcategory_count': harmful_count,
             'benign_count': benign_count,
             'self_bleu': round(sum(score[0] for score in scores) / n_rounds, 4),
             'pos_ngram_diversity': round(sum(score[1] for score in scores) / n_rounds, 4),
+            'vendi_score': round(sum(score[2] for score in scores) / n_rounds, 4),
         })
     return pd.DataFrame(rows)
 
@@ -251,6 +322,10 @@ def parse_args():
     parser.add_argument('--n_rounds', type=int, default=1)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--num_proc', type=int, default=4)
+    parser.add_argument('--embed_batch_size', type=int, default=32,
+                        help='Batch size for Qwen POS embeddings (default: 32)')
+    parser.add_argument('--embed_device', default=None,
+                        help='Embedding device, e.g. cuda:0 or cpu (default: auto)')
     parser.add_argument('--output_dir', type=Path, default=Path('../results/diversity'))
     args = parser.parse_args()
     if any(dataset not in SUPPORTED[args.split] for dataset in args.datasets):
@@ -259,6 +334,8 @@ def parse_args():
         parser.error('--num_train must be >= 2; length, order, rounds and processes must be positive')
     if not 0 <= args.harmful_rate <= 1:
         parser.error('--harmful_rate must be between 0 and 1')
+    if args.embed_batch_size < 1:
+        parser.error('--embed_batch_size must be positive')
     return args
 
 
@@ -274,6 +351,7 @@ def main():
         raise ValueError('Use an instruct model with a chat template, as required by align.py')
     benign_count = args.num_train - int(args.num_train * args.harmful_rate + 0.5)
     benign_pool = load_wildjailbreak_benign(args.benign_data_type) if benign_count else None
+    pos_embedder = PosEmbedder(batch_size=args.embed_batch_size, device=args.embed_device)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for dataset_name in args.datasets:
         print(f'Loading {dataset_name} ({args.split})')
@@ -283,8 +361,10 @@ def main():
             benign_data_type=args.benign_data_type, max_length=args.max_length,
             max_n=args.max_n, n_rounds=args.n_rounds, seed=args.seed, num_proc=args.num_proc,
             split=args.split, abbrs=args.abbr, benign_pool=benign_pool,
+            pos_embedder=pos_embedder,
         )
-        print('self_bleu: LOWER = more diverse | pos_ngram_diversity: HIGHER = more diverse')
+        print('self_bleu: LOWER = more diverse | '
+              'pos_ngram_diversity, vendi_score: HIGHER = more diverse')
         print(result.to_string(index=False))
         output = args.output_dir / f'{dataset_name}_{args.split}_diversity.csv'
         result.to_csv(output, index=False)
