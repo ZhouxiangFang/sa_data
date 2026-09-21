@@ -1,12 +1,14 @@
 """Syntactic diversity of alignment samples, overall and per subcategory.
 
 Training samples use exactly the filtering, tokenizer length limit, rounding,
-shuffle and seeds used by align.py. Each sample totals 800 examples by default.
+shuffle and seeds used by align.py. CLI samples total 600 examples by default.
 Set --harmful_rate below 1 to include WildJailbreak benign examples. To reproduce
 an alignment run, use its model, num_train, harmful_rate, benign_data_type,
-max_length and seed. Additional rounds use seed + round (default: one round).
+max_length and seed. Additional rounds use seed + round (default: 10 rounds).
 
-Only sampled prompts are POS-tagged; tags are reused across groups and rounds.
+All source-pool prompts, including benign data when used, are POS-tagged before
+sampling; tags are reused across groups and rounds. Each metric reports the
+mean across rounds, using the same sample for all metrics within a round.
 POS sequences (e.g. "DT NN VBZ") are embedded with Qwen3-Embedding-0.6B for
 the cosine-kernel Vendi Score. Embeddings are reused across groups and datasets.
 Self-BLEU is lower for more diverse syntax; POS n-gram diversity and Vendi Score
@@ -29,6 +31,7 @@ import nltk
 import numpy as np
 import pandas as pd
 from nltk.translate.bleu_score import brevity_penalty
+from tqdm.auto import tqdm
 
 from helper import (
     BENIGN_DATA_TYPES,
@@ -198,7 +201,7 @@ def category_names(df, dataset_name):
 
 def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
                               harmful_rate=1.0, benign_data_type='vanilla_benign',
-                              max_length=4096, max_n=4, n_rounds=1, seed=42,
+                              max_length=4096, max_n=4, n_rounds=10, seed=42,
                               num_proc=4, split='train', abbrs=None, benign_pool=None,
                               pos_embedder=None):
     """Score fixed-size alignment mixtures; skip groups with insufficient data.
@@ -247,7 +250,15 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
     if benign_count and len(benign_pool) < benign_count:
         raise ValueError(f'WildJailbreak has fewer than {benign_count} benign pairs')
 
-    # Sample first, then tag the union once. Preserve repeated prompts in scores.
+    # Tag the complete source pools before any sampling. Deduplicate tagging
+    # work, but preserve repeated prompts when reconstructing scored samples.
+    source_prompts = overall['prompt'].tolist()
+    if benign_count:
+        source_prompts.extend(benign_pool['prompt'].tolist())
+    source_prompts = list(dict.fromkeys(source_prompts))
+    print(f'  POS-tagging {len(source_prompts):,} unique source-pool prompts...')
+    tags = dict(zip(source_prompts, pos_tag_corpus(source_prompts, num_proc=num_proc)))
+
     samples = {}
     for abbr, category, pool in groups:
         args = argparse.Namespace(
@@ -275,20 +286,18 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
 
     prompts = list(dict.fromkeys(prompt for _, _, rounds in samples.values()
                                 for sample in rounds for prompt in sample))
-    print(f'  POS-tagging {len(prompts):,} unique sampled prompts...')
-    tags = dict(zip(prompts, pos_tag_corpus(prompts, num_proc=num_proc)))
-    if any(not seq for seq in tags.values()):
+    if any(not tags[prompt] for prompt in prompts):
         raise ValueError('A sampled prompt produced no POS tags; cannot score the full sample')
     if pos_embedder is None:
         pos_embedder = PosEmbedder()
-    embeddings = pos_embedder.encode(tags.values())
+    embeddings = pos_embedder.encode([tags[prompt] for prompt in prompts])
     prompt_indices = {prompt: i for i, prompt in enumerate(prompts)}
 
     rows = []
     for abbr, (category, count, rounds) in samples.items():
         print(f'  Scoring {category}: {num_train} examples x {n_rounds} round(s)')
         scores = []
-        for sample in rounds:
+        for sample in tqdm(rounds, desc=f'{dataset_name} / {category}', unit='round'):
             seqs = [tags[prompt] for prompt in sample]
             sample_embeddings = embeddings[[prompt_indices[prompt] for prompt in sample]]
             scores.append((syntactic_self_bleu(seqs, max_n),
@@ -311,15 +320,16 @@ def parse_args():
     parser.add_argument('--datasets', nargs='+', type=str.lower, default=['wildguardmix'])
     parser.add_argument('--split', choices=SUPPORTED, default='train')
     parser.add_argument('--abbr', nargs='+', help='Only score these subcategory abbreviations')
-    parser.add_argument('--num_train', '--group_size', dest='num_train', type=int, default=800,
-                        help='Total examples per group, including benign data (default: 800)')
+    parser.add_argument('--num_train', '--group_size', dest='num_train', type=int, default=600,
+                        help='Total examples per group, including benign data (default: 600)')
     parser.add_argument('--harmful_rate', type=float, default=1.0,
                         help='Subcategory fraction; 1 excludes WildJailbreak, 0.5 mixes equally')
     parser.add_argument('--benign_data_type', choices=BENIGN_DATA_TYPES, default='vanilla_benign')
     parser.add_argument('--model', default='qwen2.5-ins', help='Tokenizer model, as in align.py')
     parser.add_argument('--max_length', type=int, default=4096)
     parser.add_argument('--max_n', type=int, default=4)
-    parser.add_argument('--n_rounds', type=int, default=1)
+    parser.add_argument('--n_rounds', type=int, default=10,
+                        help='Sampling repetitions per metric; report their mean (default: 10)')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--num_proc', type=int, default=4)
     parser.add_argument('--embed_batch_size', type=int, default=32,
@@ -366,7 +376,7 @@ def main():
         print('self_bleu: LOWER = more diverse | '
               'pos_ngram_diversity, vendi_score: HIGHER = more diverse')
         print(result.to_string(index=False))
-        output = args.output_dir / f'{dataset_name}_{args.split}_diversity.csv'
+        output = args.output_dir / f'{dataset_name}_{args.split}_diversity_{args.num_train}_{args.harmful_rate}.csv'
         result.to_csv(output, index=False)
         print(f'Saved: {output}')
 
