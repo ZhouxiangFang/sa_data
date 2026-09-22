@@ -2,7 +2,8 @@
 
 Example (run from any directory):
     python sa_data/plot_bars_diversity.py \
-        results/diversity/wildguardmix_train_diversity_800_1.0.csv --corr all
+        results/diversity/wildguardmix_train_diversity_800_1.0.csv \
+        --suffix 800_vanilla_benign --corr all
 
 The three metrics are Self-BLEU, POS n-gram diversity, and Vendi score.
 Bar charts display Self-BLEU and POS diversity as percentages and Vendi in
@@ -13,10 +14,12 @@ plot_bars_overall.py. Correlations use negative Self-BLEU so larger always
 means more diverse. Average correlations are computed against equally weighted
 model-mean harmful scores on subcategories available for every model; they
 are not averages of correlation coefficients. The pooled overall diversity
-reference is excluded from correlations. CSV exports contain plotted pairs
+reference is excluded from correlations. The benign subcategory and any --exclude
+subcategories are plotted but excluded from correlation coefficients and fitted
+lines. CSV exports contain plotted pairs
 and coefficients, including sample counts and p-values.
 Run names encode dataset, subcategory, and size, but not the mixture fraction;
-use --results-dir to select results from the intended training configuration.
+use --suffix to select grouped result folders for the intended configuration.
 """
 
 import argparse
@@ -59,19 +62,34 @@ def load_diversity(path):
     return data
 
 
-def load_safety(results_dir, dataset, train_size, abbreviations):
-    """Match training subcategory and size to each model's overall result."""
+def load_safety(results_dir, dataset, train_size, abbreviations, suffix=None):
+    """Read grouped results matching a suffix, or legacy flat runs by size."""
     pattern = re.compile(rf"^(.+)_{re.escape(dataset)}_(.+)_{train_size}$")
+    group_suffix = "_" + (suffix or f"{train_size}_vanilla_benign")
+    candidates = []
     rows = []
     for directory in sorted(results_dir.iterdir()):
+        if not directory.is_dir():
+            continue
+        if directory.name.endswith(group_suffix):
+            model = directory.name[:-len(group_suffix)]
+            for abbr in sorted(abbreviations):
+                category = f"{dataset}_{abbr}"
+                run_dir = directory / category
+                if run_dir.is_dir():
+                    candidates.append((model, abbr, f"{directory.name}/{category}",
+                                       run_dir / f"{category}_overall.csv"))
+        if suffix is not None:
+            continue
         match = pattern.fullmatch(directory.name)
-        if not directory.is_dir() or not match:
+        if not match:
             continue
         model, abbr = match.groups()
-        if abbr not in abbreviations:
-            continue
+        if abbr in abbreviations:
+            candidates.append((model, abbr, directory.name,
+                               directory / f"{directory.name}_overall.csv"))
+    for model, abbr, run, path in candidates:
         # Use the run's exact filename, never an arbitrary glob match.
-        path = directory / f"{directory.name}_overall.csv"
         if not path.exists():
             print(f"Warning: missing {path}; skipping run")
             continue
@@ -84,7 +102,7 @@ def load_safety(results_dir, dataset, train_size, abbreviations):
             raise ValueError(f"{path}: invalid harmful percentage {score}")
         # Display model names in the same way as plot_bars_overall.py.
         model = re.sub(r"(?:_git20k|-git20k|-20k)$", "", model)
-        rows.append({"model": model, "abbr": abbr, "run": directory.name,
+        rows.append({"model": model, "abbr": abbr, "run": run,
                      "harmful_score_pct": score})
     result = pd.DataFrame(rows, columns=["model", "abbr", "run", "harmful_score_pct"])
     if result.duplicated(["model", "abbr"]).any():
@@ -108,11 +126,21 @@ def join_scores(diversity, safety):
     return pd.concat([pairs, average], ignore_index=True)
 
 
-def finite_pairs(scores, metric):
+def correlation_mask(scores):
+    """Keep benign and explicitly excluded subcategories out of statistics."""
+    included = ~scores["abbr"].str.lower().eq("benign")
+    if "included_in_correlation" in scores:
+        included &= scores["included_in_correlation"]
+    return included
+
+
+def finite_pairs(scores, metric, for_correlation=False):
     sign = METRICS[metric][1]
     x = sign * scores[metric].to_numpy(dtype=float)
     y = scores["harmful_score_pct"].to_numpy(dtype=float)
     valid = np.isfinite(x) & np.isfinite(y)
+    if for_correlation:
+        valid &= correlation_mask(scores).to_numpy()
     return x[valid], y[valid], scores.loc[valid, "abbr"].tolist()
 
 
@@ -120,7 +148,7 @@ def correlation_table(pairs, methods):
     rows = []
     for model, scores in pairs.groupby("model", sort=False):
         for metric in METRICS:
-            x, y, _ = finite_pairs(scores, metric)
+            x, y, _ = finite_pairs(scores, metric, for_correlation=True)
             for method in methods:
                 coefficient = pvalue = np.nan
                 if len(x) >= 3 and np.ptp(x) > 0 and np.ptp(y) > 0:
@@ -190,12 +218,19 @@ def plot_scatter(scores, correlations, title, context, path):
     fig, axes = plt.subplots(1, 3, figsize=(21, 7))
     for ax, (metric, (label, sign, color)) in zip(axes, METRICS.items()):
         x, y, abbreviations = finite_pairs(scores, metric)
-        ax.scatter(x, y, color=color, s=48, zorder=3)
+        excluded_abbrs = set(scores.loc[~correlation_mask(scores), "abbr"])
+        excluded = np.array([abbr in excluded_abbrs for abbr in abbreviations], dtype=bool)
+        ax.scatter(x[~excluded], y[~excluded], color=color, s=48, zorder=3)
+        if excluded.any():
+            ax.scatter(x[excluded], y[excluded], facecolors="none", edgecolors="0.3",
+                       marker="D", s=70, zorder=4, label="excluded from correlation (outlier)")
+            ax.legend(loc="lower right", fontsize=9)
         for xi, yi, abbr in zip(x, y, abbreviations):
             ax.annotate(abbr, (xi, yi), xytext=(4, 4), textcoords="offset points", fontsize=8)
-        if len(x) >= 3 and np.ptp(x) > 0 and np.ptp(y) > 0:
-            line_x = np.linspace(x.min(), x.max(), 100)
-            ax.plot(line_x, np.polyval(np.polyfit(x, y, 1), line_x),
+        corr_x, corr_y, _ = finite_pairs(scores, metric, for_correlation=True)
+        if len(corr_x) >= 3 and np.ptp(corr_x) > 0 and np.ptp(corr_y) > 0:
+            line_x = np.linspace(corr_x.min(), corr_x.max(), 100)
+            ax.plot(line_x, np.polyval(np.polyfit(corr_x, corr_y, 1), line_x),
                     color=color, alpha=0.65, linewidth=1.5)
         stats = correlations.loc[correlations["metric"] == metric]
         summary = []
@@ -207,7 +242,7 @@ def plot_scatter(scores, correlations, title, context, path):
         ax.set_title(label, fontsize=20, pad=12)
         ax.set_xlabel(
             f"{'Negative ' if sign < 0 else ''}{label} (more diverse →)\n"
-            f"Correlation across {len(x)} subcategories", fontsize=14,
+            f"Correlation across {len(corr_x)} subcategories (outliers excluded)", fontsize=14,
         )
         ax.set_ylabel("Overall harmful score (%) ↓", fontsize=14)
         ax.margins(x=0.18)
@@ -250,7 +285,7 @@ def plot_correlations(table, metric, method, context, path):
     coverage = (f"Correlations across {counts.iloc[0]} subcategories"
                 if counts.nunique() == 1 else
                 f"Correlations across {counts.min()}–{counts.max()} subcategories (varies by model)")
-    ax.set_xlabel(f"{context}\n{coverage}", fontsize=14, labelpad=12)
+    ax.set_xlabel(f"{context}\n{coverage}; outliers excluded", fontsize=14, labelpad=12)
     style_axis(ax)
     save_figure(fig, path)
 
@@ -262,15 +297,21 @@ def main():
     parser.add_argument("--csv", type=Path, dest="csv_option", help="Alternative to positional CSV")
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
     parser.add_argument("--output-dir", type=Path,
-                        help="Default: ROOT/figs/diversity/<input CSV stem>")
+                        help="Default: ROOT/figs/diversity/<input CSV stem>; --suffix is appended")
+    parser.add_argument("--suffix",
+                        help="Result folder suffix, e.g. 800_vanilla_benign; also appended to output folder")
     parser.add_argument("--dataset", help="Training dataset; inferred from CSV filename")
     parser.add_argument("--train-size", type=int,
                         help="Safety-run training size; defaults to CSV scored_on")
     parser.add_argument("--corr", choices=[*CORRELATIONS, "all"], default="pearson")
-    parser.add_argument("--exclude", nargs="*", default=["benign"],
-                        help="Subcategory abbreviations to drop (default: benign; "
-                             "pass --exclude with no values to keep all)")
+    parser.add_argument("--exclude", nargs="*", default=[],
+                        help="Additional subcategories to exclude from correlations, "
+                             "while keeping them plotted and in CSVs; benign is always excluded")
     args = parser.parse_args()
+    if args.suffix is not None:
+        args.suffix = args.suffix.lstrip("_")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.suffix):
+            parser.error("--suffix must be a nonempty folder-name suffix without path separators")
     if args.csv and args.csv_option:
         parser.error("Supply the CSV either positionally or with --csv")
     csv_path = args.csv or args.csv_option
@@ -281,10 +322,14 @@ def main():
         )
     try:
         diversity = load_diversity(csv_path)
-        diversity = diversity.loc[~diversity["abbr"].isin(args.exclude)].reset_index(drop=True)
         dataset = args.dataset or csv_path.stem.split("_diversity")[0]
         dataset = dataset.removesuffix("_train")
         size = args.train_size
+        if args.suffix and re.match(r"^[1-9][0-9]*_", args.suffix):
+            suffix_size = int(args.suffix.split("_", 1)[0])
+            if size is not None and size != suffix_size:
+                raise ValueError("--train-size must match the training size in --suffix")
+            size = suffix_size
         if size is None:
             sizes = pd.to_numeric(diversity["scored_on"], errors="raise").unique()
             if len(sizes) != 1 or not np.isfinite(sizes[0]) or sizes[0] != int(sizes[0]):
@@ -292,13 +337,18 @@ def main():
             size = int(sizes[0])
         if size <= 0:
             raise ValueError("--train-size must be positive")
-        safety = load_safety(args.results_dir, dataset, size, set(diversity["abbr"]) - {"overall"})
+        safety = load_safety(args.results_dir, dataset, size,
+                             set(diversity["abbr"]) - {"overall"}, args.suffix)
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
 
     output_dir = args.output_dir or ROOT / "figs" / "diversity" / csv_path.stem
+    if args.suffix:
+        output_dir = output_dir.with_name(f"{output_dir.name}_{args.suffix}")
     output_dir.mkdir(parents=True, exist_ok=True)
     context_parts = [dataset]
+    if args.suffix:
+        context_parts.append(f"results: {args.suffix}")
     if "scored_on" in diversity and diversity["scored_on"].nunique() == 1:
         context_parts.append(f"{int(diversity['scored_on'].iloc[0]):,} diversity examples")
     if {"subcategory_count", "scored_on"} <= set(diversity):
@@ -311,10 +361,12 @@ def main():
     diversity.to_csv(output_dir / "diversity_scores.csv", index=False)
     if safety.empty:
         print(f"No {dataset} safety runs with training size {size}; saved diversity plots only. "
-              "Use --train-size to explicitly compare with another run size.")
+              "Check --suffix, --results-dir, or --train-size for the intended runs.")
         return
 
     pairs = join_scores(diversity, safety)
+    excluded_abbrs = {"benign", *(abbr.lower() for abbr in args.exclude)}
+    pairs["included_in_correlation"] = ~pairs["abbr"].str.lower().isin(excluded_abbrs)
     print(f"Matched {len(safety)} runs across {safety['model'].nunique()} models "
           f"and {safety['abbr'].nunique()} subcategories")
     methods = list(CORRELATIONS) if args.corr == "all" else [args.corr]

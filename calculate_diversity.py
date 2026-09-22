@@ -9,6 +9,7 @@ max_length and seed. Additional rounds use seed + round (default: 10 rounds).
 All source-pool prompts, including benign data when used, are POS-tagged before
 sampling; tags are reused across groups and rounds. Each metric reports the
 mean across rounds, using the same sample for all metrics within a round.
+The CSV's sample_rounds column records the number of rounds for each row.
 POS sequences (e.g. "DT NN VBZ") are embedded with Qwen3-Embedding-0.6B for
 the cosine-kernel Vendi Score. Embeddings are reused across groups and datasets.
 Self-BLEU is lower for more diverse syntax; POS n-gram diversity and Vendi Score
@@ -306,7 +307,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
         rows.append({
             'subcategory': category, 'abbr': abbr, 'count': count,
             'scored_on': num_train, 'subcategory_count': harmful_count,
-            'benign_count': benign_count,
+            'benign_count': benign_count, 'sample_rounds': len(rounds),
             'self_bleu': round(sum(score[0] for score in scores) / n_rounds, 4),
             'pos_ngram_diversity': round(sum(score[1] for score in scores) / n_rounds, 4),
             'vendi_score': round(sum(score[2] for score in scores) / n_rounds, 4),
