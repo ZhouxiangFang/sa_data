@@ -18,7 +18,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
-from helper import model_mapping
+from helper import BENIGN_DATA_TYPES, model_mapping
 
 
 SCORE_NAMES = [
@@ -40,6 +40,49 @@ def resolve_model(name):
         return path, os.path.basename(os.path.normpath(path))
 
     return name, name.replace("/", "_")
+
+
+def result_location(
+    output_dir, checkpoint_name, model_name=None, num_train=None, benign_data_type=None
+):
+    """Group aligned runs by model/count/type with dataset/subcategory filenames."""
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", checkpoint_name)
+    match = re.fullmatch(
+        r"(?P<model>.+)_(?P<count>[1-9][0-9]*)_"
+        r"(?P<benign>vanilla_benign|adversarial_benign|mix)_"
+        r"(?P<category>(?:wildguardmix|aegis)_.+?)(?P<variant>_permit)?",
+        safe_name,
+    ) or re.fullmatch(
+        # Accept checkpoints saved before the training metadata moved up front.
+        r"(?P<model>.+)_(?P<category>(?:wildguardmix|aegis)_.+?)_"
+        r"(?P<count>[1-9][0-9]*)(?:_(?P<benign>vanilla_benign|adversarial_benign|mix))?"
+        r"(?P<variant>_permit)?",
+        safe_name,
+    )
+    if not match:
+        if num_train is not None or benign_data_type is not None:
+            raise ValueError(
+                "Cannot infer dataset/subcategory from checkpoint name. Expected "
+                "<model>_<num_train>_<benign_data_type>_<dataset>_<subcategory>."
+            )
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", model_name or safe_name)
+        return output_dir, safe_name
+
+    if model_name is None:
+        # Older checkpoints embedded the model path in their basename.
+        model_name = re.sub(r"^.*-models-[0-9]+k-", "", match["model"])
+    model_name = re.sub(r"[^A-Za-z0-9._-]", "_", model_name)
+    num_train = int(match["count"]) if num_train is None else num_train
+    if num_train <= 0:
+        raise ValueError("num_train must be positive")
+    benign_data_type = benign_data_type or match["benign"] or "vanilla_benign"
+    if benign_data_type not in BENIGN_DATA_TYPES:
+        raise ValueError(f"Unsupported benign data type: {benign_data_type}")
+    variant = match["variant"] or ""
+    directory = os.path.join(
+        output_dir, f"{model_name}_{num_train}_{benign_data_type}{variant}"
+    )
+    return directory, match["category"] + variant
 
 
 def load_benchmarks(limit=None):
@@ -181,8 +224,8 @@ def add_average(rows):
 
 def save_csv(rows, output_dir, model_name):
     """Save one summary CSV containing both benchmarks and their average."""
-    os.makedirs(output_dir, exist_ok=True)
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", model_name)
+    os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, f"{safe_name}_if_summary.csv")
 
     columns = [
@@ -216,8 +259,8 @@ def print_results(rows):
 
 def save_responses(rows, output_dir, model_name):
     """Save prompts and generated responses from both benchmarks."""
-    os.makedirs(output_dir, exist_ok=True)
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", model_name)
+    os.makedirs(output_dir, exist_ok=True)
     output_file = os.path.join(output_dir, f"{safe_name}_if_responses.csv")
     with open(output_file, "w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(
@@ -231,16 +274,42 @@ def save_responses(rows, output_dir, model_name):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--output_dir", default="../results/if_eval")
+    parser.add_argument(
+        "--model_name",
+        help="Base model name for result folders; inferred from the checkpoint.",
+    )
+    parser.add_argument(
+        "--num_train", type=int,
+        help="Training count for result folders; inferred from the checkpoint.",
+    )
+    parser.add_argument(
+        "--benign_data_type", choices=BENIGN_DATA_TYPES,
+        help=("Benign data type for result folders; inferred from the checkpoint, "
+              "otherwise vanilla_benign."),
+    )
+    parser.add_argument(
+        "--output_dir",
+        default=os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "results", "if_eval",
+        ),
+        help="Result root (default: results/if_eval next to sa_data, independent of working directory).",
+    )
     parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     parser.add_argument(
         "--limit", type=int, help="Use only the first N examples for a quick test"
     )
     args = parser.parse_args()
+    if args.num_train is not None and args.num_train <= 0:
+        parser.error("--num_train must be positive")
 
     model_id, model_name = resolve_model(args.model)
+    output_dir, filename_prefix = result_location(
+        args.output_dir, model_name, args.model_name, args.num_train, args.benign_data_type
+    )
     print(f"Model: {args.model} -> {model_id}")
+    print(f"Result directory: {output_dir}")
 
     benchmarks = load_benchmarks(args.limit)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -262,8 +331,8 @@ def main():
         rows.append(evaluate(benchmark, examples, responses, args.model, model_id))
 
     add_average(rows)
-    output_file = save_csv(rows, args.output_dir, model_name)
-    responses_file = save_responses(response_rows, args.output_dir, model_name)
+    output_file = save_csv(rows, output_dir, filename_prefix)
+    responses_file = save_responses(response_rows, output_dir, filename_prefix)
     print_results(rows)
     print(f"\nSaved: {output_file}")
     print(f"Saved: {responses_file}")

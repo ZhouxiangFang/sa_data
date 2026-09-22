@@ -16,7 +16,8 @@ Launcher options:
   --models MODEL [MODEL ...]      Space- or comma-separated models
   --folder DIR                    Add immediate child directories with config.json
   --datasets DATASET [DATASET...] Space- or comma-separated datasets
-  --num_train N                   Total examples per job (default: 800)
+  --num_train N                   Total examples per job (default: 1200)
+  --epochs N                      Training epochs per job (default: 2)
   --harmful_rate RATE             Subcategory fraction (default: 0.5)
   -h, --help                      Show this help
 
@@ -25,7 +26,7 @@ Examples:
   ./align_run.sh --models qwen2.5-ins,llama3.1-ins --datasets wildguardmix aegis
   ./align_run.sh --folder /scratch/zf28/ckpts --datasets wildguardmix
   ./align_run.sh --folder /scratch/zf28/ckpts --models qwen2.5-ins \
-      --num_train 800 --harmful_rate 0.5 --epochs 2 --lr 1e-5
+      --num_train 1200 --harmful_rate 0.5 --epochs 2 --lr 1e-5
 
 GPU_GROUP=auto uses both 0,1,2,3 and 4,5,6,7. It can instead be set to one
 of those groups. MAX_USED_MB defaults to 2000 and GPU_POLL_SECONDS to 30.
@@ -37,7 +38,7 @@ models=()
 folders=()
 datasets=()
 extra_args=()
-num_train=800
+num_train=1200
 harmful_rate=0.5
 
 append_csv_values() {

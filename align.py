@@ -62,8 +62,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num_train",
         type=int,
-        default=800,
-        help="Total number of harmful plus benign training examples (default: 800).",
+        default=1200,
+        help="Total number of harmful plus benign training examples (default: 1200).",
     )
     parser.add_argument(
         "--harmful_rate",
@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument(
         "--learning_rate", "--lr", dest="learning_rate", type=float, default=5e-6
     )
@@ -123,7 +123,7 @@ def parse_args() -> argparse.Namespace:
         "--run_name",
         help=(
             "Optional output subdirectory name. The default is "
-            "<model>_<dataset>_<subcategory>_<total>."
+            "<model>_<num_train>_<benign_data_type>_<dataset>_<subcategory>."
         ),
     )
     parser.add_argument(
@@ -222,11 +222,10 @@ def main() -> None:
         }
     )
 
-    checkpoint_name = args.run_name or (
-        f"{checkpoint_model_component(args.model)}_{args.alignment_dataset}_"
-        f"{filename_component(args.abbr)}_{args.num_train}"
+    checkpoint_name = filename_component(args.run_name) if args.run_name else (
+        f"{checkpoint_model_component(args.model)}_{args.num_train}_"
+        f"{args.benign_data_type}_{args.alignment_dataset}_{filename_component(args.abbr)}"
     )
-    checkpoint_name = filename_component(checkpoint_name)
     output_dir = args.output_dir / checkpoint_name
     if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite_output_dir:
         raise FileExistsError(

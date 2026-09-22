@@ -15,6 +15,10 @@ Examples:
   ./eval_safe_run.sh --folder /models/checkpoints
   ./eval_safe_run.sh --gpus 0,2 --models model-a,model-b,model-c
 
+Results default to ../results relative to this script. Override with --output_dir DIR.
+Aligned checkpoints save to <model>_<num_train>_<benign_data_type>/<dataset>_<subcategory>/.
+Baseline models save to <model>/; filenames retain the model or dataset/subcategory prefix.
+
 GPU priority: --gpus, GPUS, CUDA_VISIBLE_DEVICES, then nvidia-smi.
 MAX_USED_MB defaults to 500; GPU_POLL_SECONDS defaults to 10.
 EOF
@@ -23,7 +27,7 @@ EOF
 models=()
 folders=()
 gpus=()
-eval_args=()
+eval_args=(--output_dir "$script_dir/../results")
 
 while (( $# > 0 )); do
     case "$1" in

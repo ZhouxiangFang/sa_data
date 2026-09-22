@@ -13,6 +13,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 from helper import (
+    BENIGN_DATA_TYPES,
     generate_responses,
     load_safety_dataset,
     model_mapping,
@@ -69,6 +70,50 @@ def resolve_model(model):
         model_id = os.path.abspath(model)
         return model_id, os.path.basename(os.path.normpath(model_id))
     return model_mapping.get(model.lower(), model), model.replace("/", "_")
+
+
+def result_location(
+    output_dir, checkpoint_name, model_name=None, num_train=None, benign_data_type=None
+):
+    """Group aligned runs by model/count/type, then dataset/subcategory."""
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", checkpoint_name)
+    match = re.fullmatch(
+        r"(?P<model>.+)_(?P<count>[1-9][0-9]*)_"
+        r"(?P<benign>vanilla_benign|adversarial_benign|mix)_"
+        r"(?P<category>(?:wildguardmix|aegis)_.+?)(?P<variant>_permit)?",
+        safe_name,
+    ) or re.fullmatch(
+        # Accept checkpoints saved before the training metadata moved up front.
+        r"(?P<model>.+)_(?P<category>(?:wildguardmix|aegis)_.+?)_"
+        r"(?P<count>[1-9][0-9]*)(?:_(?P<benign>vanilla_benign|adversarial_benign|mix))?"
+        r"(?P<variant>_permit)?",
+        safe_name,
+    )
+    if not match:
+        if num_train is not None or benign_data_type is not None:
+            raise ValueError(
+                "Cannot infer dataset/subcategory from checkpoint name. Expected "
+                "<model>_<num_train>_<benign_data_type>_<dataset>_<subcategory>."
+            )
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", model_name or safe_name)
+        return os.path.join(output_dir, safe_name), safe_name
+
+    if model_name is None:
+        # Older checkpoints embedded the model path in their basename.
+        model_name = re.sub(r"^.*-models-[0-9]+k-", "", match["model"])
+    model_name = re.sub(r"[^A-Za-z0-9._-]", "_", model_name)
+    num_train = int(match["count"]) if num_train is None else num_train
+    if num_train <= 0:
+        raise ValueError("num_train must be positive")
+    benign_data_type = benign_data_type or match["benign"] or "vanilla_benign"
+    if benign_data_type not in BENIGN_DATA_TYPES:
+        raise ValueError(f"Unsupported benign data type: {benign_data_type}")
+    variant = match["variant"] or ""
+    directory = os.path.join(
+        output_dir, f"{model_name}_{num_train}_{benign_data_type}{variant}"
+    )
+    directory = os.path.join(directory, match["category"])
+    return directory, match["category"] + variant
 
 
 def percentage(part, total):
@@ -200,14 +245,34 @@ def parse_args():
         help="Model name, Hugging Face repo ID, or local checkpoint path.",
     )
     parser.add_argument(
-        "--output_dir", default="../results", help="Directory for CSV results."
+        "--model_name",
+        help="Base model name for result folders; inferred from the checkpoint.",
+    )
+    parser.add_argument(
+        "--num_train", type=int,
+        help="Training count for result folders; inferred from the checkpoint.",
+    )
+    parser.add_argument(
+        "--benign_data_type", choices=BENIGN_DATA_TYPES,
+        help=("Benign data type for result folders; inferred from the checkpoint, "
+              "otherwise vanilla_benign."),
+    )
+    parser.add_argument(
+        "--output_dir",
+        default=os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results"
+        ),
+        help="Result root (default: results next to sa_data, independent of working directory).",
     )
     parser.add_argument(
         "--permit",
         action="store_true",
         help="Let the model decide whether to comply with each request.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.num_train is not None and args.num_train <= 0:
+        parser.error("--num_train must be positive")
+    return args
 
 
 def main():
@@ -216,6 +281,10 @@ def main():
     guard_id = model_mapping.get(args.guard.lower(), args.guard)
     if args.permit:
         model_name += "_permit"
+    output_dir, filename_prefix = result_location(
+        args.output_dir, model_name, args.model_name, args.num_train, args.benign_data_type
+    )
+    print(f"Result directory: {output_dir}")
 
     for name, value in vars(args).items():
         print(f"{name}: {value}")
@@ -262,7 +331,7 @@ def main():
 
     del guard
     torch.cuda.empty_cache()
-    save_results(datasets, os.path.join(args.output_dir, model_name), model_name)
+    save_results(datasets, output_dir, filename_prefix)
 
 
 if __name__ == "__main__":

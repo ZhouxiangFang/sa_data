@@ -16,6 +16,11 @@ Examples:
   ./eval_if_run.sh --folder /models/checkpoints --limit 10
   ./eval_if_run.sh --gpus 0,2 --models qwen2.5-ins llama3-ins
 
+Results default to ../results/if_eval relative to this script. Override with --output_dir DIR.
+Aligned checkpoints save to <model>_<num_train>_<benign_data_type>/ with
+<dataset>_<subcategory>_if_{summary,responses}.csv filenames. Baseline files
+save directly in the result root as <model>_if_{summary,responses}.csv.
+
 GPU priority: --gpus, GPUS, CUDA_VISIBLE_DEVICES, then nvidia-smi.
 MAX_USED_MB defaults to 500; GPU_POLL_SECONDS defaults to 10.
 EOF
@@ -24,7 +29,7 @@ EOF
 models=()
 folders=()
 gpus=()
-eval_args=()
+eval_args=(--output_dir "$script_dir/../results/if_eval")
 tensor_parallel_size=1
 
 while (( $# > 0 )); do
