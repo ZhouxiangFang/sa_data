@@ -1,6 +1,8 @@
 """Plot harmful and prompt-loose IF scores for six models and their mean.
 
 Run from any directory: python sa_data/plot_bars_overall.py
+Figures default to figs/<baseline>_<size> (for example, figs/git20k_800),
+inferred from the loaded runs. Use --output-dir to choose an explicit folder.
 Harmful scores use the precomputed Avg row (a macro-average over safety
 datasets); IFBench and IFEval prompt_loose fractions are converted to percent.
 IF scores are averaged equally across IFBench and IFEval. Official and
@@ -94,6 +96,24 @@ def load_scores(results_dir, if_eval_dir):
     return data, versions
 
 
+def default_output_dir(data, versions):
+    """Infer the figure folder from baseline names and safety training size."""
+    baselines = {
+        row.run[len(row.model):].lstrip("_-")
+        for row in data.loc[data["version"] == "-20k"].itertuples()
+    }
+    sizes = {
+        int(version.rsplit("_", 1)[1])
+        for version in versions if version not in ("-ins", "-20k")
+    }
+    if len(baselines) != 1 or len(sizes) != 1:
+        raise ValueError(
+            "Cannot infer one output folder from mixed baselines or training "
+            "sizes; specify --output-dir"
+        )
+    return ROOT / "figs" / f"{next(iter(baselines))}_{next(iter(sizes))}"
+
+
 def plot_bars(scores, versions, title, output_path):
     baselines = ["-ins", "-20k"]
     subcategories = scores.reindex([
@@ -171,29 +191,33 @@ def main():
         "--if-eval-dir", type=Path,
         help="IF summary directory (default: RESULTS_DIR/if_eval)",
     )
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "figs")
+    parser.add_argument(
+        "--output-dir", type=Path,
+        help="Output folder (default: ROOT/figs/<baseline>_<size>, inferred from runs)",
+    )
     args = parser.parse_args()
     try:
         data, versions = load_scores(
             args.results_dir, args.if_eval_dir or args.results_dir / "if_eval"
         )
+        output_dir = args.output_dir or default_output_dir(data, versions)
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     for model in MODELS:
         scores = data.loc[data["model"] == model].set_index("version")
-        plot_bars(scores, versions, model, args.output_dir / f"{model}_overall.png")
+        plot_bars(scores, versions, model, output_dir / f"{model}_overall.png")
 
     score_columns = [column for column in data if column.endswith("_pct")]
     average = data.groupby("version")[score_columns].mean().reindex(versions)
     plot_bars(
         average, versions, f"Average across {len(MODELS)} models (equal weight)",
-        args.output_dir / "average_overall.png",
+        output_dir / "average_overall.png",
     )
     # Export the exact plotted numbers, including the six-model means.
     average = average.reset_index().assign(model="Average", run="")
-    table_path = args.output_dir / "overall_scores.csv"
+    table_path = output_dir / "overall_scores.csv"
     pd.concat([data, average], ignore_index=True).to_csv(
         table_path, index=False, float_format="%.2f"
     )
