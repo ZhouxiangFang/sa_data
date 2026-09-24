@@ -6,7 +6,6 @@ import json
 import os
 import pandas as pd
 from datasets import load_dataset
-from vllm import SamplingParams
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(os.path.dirname(MODULE_DIR), "data")
@@ -151,6 +150,7 @@ def print_config(args):
     print("\n")
 
 def generate_responses(llm, tokenizer, queries, max_tokens=1024, temperature=0, top_p=1, seed=42, use_tqdm=False, enable_thinking=False):
+    from vllm import SamplingParams
 
     prompts = [
         tokenizer.apply_chat_template([{"role": "user", "content": query}], tokenize=False, add_generation_prompt=True,
@@ -353,13 +353,28 @@ def sample_pairs(
     )
 
 
+def mixture_counts(total, harmful_rate, general_rate=0.0):
+    """Round harmful/general counts; benign receives the remaining examples."""
+    if total <= 0:
+        raise ValueError("--num_train must be positive")
+    if not (0 <= harmful_rate <= 1 and 0 <= general_rate <= 1):
+        raise ValueError("--harmful_rate and --general_rate must be between 0 and 1")
+    if harmful_rate + general_rate > 1:
+        raise ValueError("--harmful_rate + --general_rate must not exceed 1")
+    harmful = int(total * harmful_rate + 0.5)
+    general = min(int(total * general_rate + 0.5), total - harmful)
+    return harmful, total - harmful - general, general
+
+
 def build_training_data(
-    args: argparse.Namespace, tokenizer, *, harmful_pool=None, benign_pool=None
+    args: argparse.Namespace, tokenizer, *, harmful_pool=None, benign_pool=None,
+    general_pool=None,
 ) -> tuple[pd.DataFrame, int, int, int]:
     """Build the alignment mixture, optionally reusing already filtered pools."""
-    # Round to the nearest example; the benign count absorbs any remainder.
-    harmful_count = int(args.num_train * args.harmful_rate + 0.5)
-    benign_count = args.num_train - harmful_count
+    # Older callers (e.g. diversity scoring) keep their two-source mixture.
+    harmful_count, benign_count, general_count = mixture_counts(
+        args.num_train, args.harmful_rate, getattr(args, "general_rate", 0.0)
+    )
 
     harmful_pool = harmful_pool if harmful_pool is not None else (
         load_harmful_subcategory(args.alignment_dataset, args.abbr)
@@ -371,6 +386,11 @@ def build_training_data(
         if benign_count
         else pd.DataFrame(columns=["prompt", "response"])
     )
+    if general_pool is None:
+        general_pool = (
+            clean_pairs(pd.read_csv(args.general_dataset))
+            if general_count else pd.DataFrame(columns=["prompt", "response"])
+        )
 
     harmful, harmful_overlong = sample_pairs(
         harmful_pool,
@@ -388,11 +408,20 @@ def build_training_data(
         tokenizer,
         args.max_length,
     )
-    train_df = pd.concat([harmful, benign], ignore_index=True)
+    general, general_overlong = sample_pairs(
+        general_pool,
+        general_count,
+        "general instruction data",
+        args.seed + 2,
+        tokenizer,
+        args.max_length,
+    )
+    train_df = pd.concat([harmful, benign, general], ignore_index=True)
     train_df = train_df.sample(frac=1, random_state=args.seed).reset_index(drop=True)
+    train_df.attrs["general_available"] = len(general_pool)
     return (
         train_df,
         len(harmful_pool),
         len(benign_pool),
-        harmful_overlong + benign_overlong,
+        harmful_overlong + benign_overlong + general_overlong,
     )

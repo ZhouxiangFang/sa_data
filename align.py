@@ -1,4 +1,4 @@
-"""Safety-tune a model on one safety subcategory plus benign examples.
+"""Safety-tune on harmful safety, benign safety, and general instructions.
 
 Defaults are sized for full fine-tuning a 7B/8B model on four 48 GB A6000s::
 
@@ -6,10 +6,11 @@ Defaults are sized for full fine-tuning a 7B/8B model on four 48 GB A6000s::
     deepspeed --num_gpus 4 align.py \
         --model qwen2.5-ins \
         --alignment_dataset wildguardmix \
-        --abbr cyberattack \
-        --harmful_rate 0.5
+        --abbr cyberattack
 
-Only safe/unharmful assistant responses are used as training targets. With four
+The default 1,800 examples mix the three sources 1:1:1 (600 each). General
+instructions default to data/git_data_20k.csv. Safety targets use only
+safe/unharmful responses. All sampling and shuffling use --seed. With four
 GPUs, the default micro-batch of 1 and eight accumulation steps give an
 effective batch size of 32 examples.
 """
@@ -27,20 +28,25 @@ from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
-from helper import BENIGN_DATA_TYPES, build_training_data, model_mapping, print_config
+from helper import (
+    BENIGN_DATA_TYPES, build_training_data, mixture_counts, model_mapping, print_config,
+)
 
 
 logging.getLogger("vllm").setLevel(logging.WARNING)
 logging.getLogger("Gloo").setLevel(logging.WARNING)
 
 MODULE_DIR = Path(__file__).resolve().parent
+DEFAULT_NUM_TRAIN = 1800
+DEFAULT_RATE = 1 / 3
+DEFAULT_GENERAL_DATASET = MODULE_DIR.parent / "data" / "git_data_20k.csv"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Safety-tune on prompts from one dataset subcategory and "
-            "benign prompt/response pairs from allenai/wildjailbreak."
+            "benign pairs from allenai/wildjailbreak, plus general instructions."
         )
     )
     parser.add_argument(
@@ -62,14 +68,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num_train",
         type=int,
-        default=1200,
-        help="Total number of harmful plus benign training examples (default: 1200).",
+        default=DEFAULT_NUM_TRAIN,
+        help="Total examples across all three sources (default: 1800).",
     )
     parser.add_argument(
         "--harmful_rate",
         type=float,
-        required=True,
-        help="Fraction of examples that use harmful prompts, between 0 and 1.",
+        default=DEFAULT_RATE,
+        help="Fraction from the selected safety subcategory (default: 1/3).",
+    )
+    parser.add_argument(
+        "--general_rate", type=float, default=DEFAULT_RATE,
+        help="General instruction fraction (default: 1/3); benign uses the remainder.",
+    )
+    parser.add_argument(
+        "--general_dataset", type=Path, default=DEFAULT_GENERAL_DATASET,
+        help="General instruction prompt/response CSV (default: data/git_data_20k.csv).",
     )
     parser.add_argument(
         "--benign_data_type",
@@ -133,10 +147,15 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
 
-    if args.num_train <= 0:
-        parser.error("--num_train must be positive")
-    if not 0.0 <= args.harmful_rate <= 1.0:
-        parser.error("--harmful_rate must be between 0 and 1")
+    try:
+        _, _, general_count = mixture_counts(
+            args.num_train, args.harmful_rate, args.general_rate
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    args.general_dataset = args.general_dataset.expanduser()
+    if general_count and not args.general_dataset.is_file():
+        parser.error(f"General instruction CSV not found: {args.general_dataset}")
     if args.epochs <= 0:
         parser.error("--epochs must be positive")
     if args.learning_rate <= 0:
@@ -168,11 +187,6 @@ def filename_component(value: str) -> str:
     return component or "run"
 
 
-def checkpoint_model_component(model: str) -> str:
-    """Return the model portion used in automatically named checkpoints."""
-    return filename_component(Path(model).name)
-
-
 def main() -> None:
     args = parse_args()
     is_main_process = args.local_rank in (-1, 0)
@@ -195,8 +209,9 @@ def main() -> None:
             f"{model_id} has no chat template. Use an instruct model or set a chat template."
         )
 
-    harmful_count = int(args.num_train * args.harmful_rate + 0.5)
-    benign_count = args.num_train - harmful_count
+    harmful_count, benign_count, general_count = mixture_counts(
+        args.num_train, args.harmful_rate, args.general_rate
+    )
     train_df, harmful_available, benign_available, overlong_count = (
         build_training_data(args, tokenizer)
     )
@@ -206,7 +221,9 @@ def main() -> None:
             f"Training mixture: {harmful_count:,} {prompt_kind} prompts from "
             f"{args.alignment_dataset}/{args.abbr} ({harmful_available:,} available) + "
             f"{benign_count:,} benign prompts from WildJailbreak/"
-            f"{args.benign_data_type} ({benign_available:,} available)"
+            f"{args.benign_data_type} ({benign_available:,} available) + "
+            f"{general_count:,} general instructions from {args.general_dataset} "
+            f"({train_df.attrs['general_available']:,} available)"
         )
         print(f"Overlong candidates skipped while sampling: {overlong_count:,}")
 
@@ -223,7 +240,7 @@ def main() -> None:
     )
 
     checkpoint_name = filename_component(args.run_name) if args.run_name else (
-        f"{checkpoint_model_component(args.model)}_{args.num_train}_"
+        f"{filename_component(Path(args.model).name)}_{args.num_train}_"
         f"{args.benign_data_type}_{args.alignment_dataset}_{filename_component(args.abbr)}"
     )
     output_dir = args.output_dir / checkpoint_name

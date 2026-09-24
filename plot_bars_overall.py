@@ -1,8 +1,11 @@
 """Plot harmful and prompt-loose IF scores for six models and their mean.
 
 Run from any directory: python sa_data/plot_bars_overall.py
+Select a result configuration with --suffix 800_vanilla_benign; official
+and self-trained instruct baselines are always included.
 Figures default to figs/<baseline>_<size> (for example, figs/git20k_800),
-inferred from the loaded runs. Use --output-dir to choose an explicit folder.
+inferred from the loaded runs, or figs/<baseline>_<suffix> when selected.
+Use --output-dir to choose an explicit folder.
 Harmful scores use the precomputed Avg row (a macro-average over safety
 datasets); IFBench and IFEval prompt_loose fractions are converted to percent.
 IF scores are averaged equally across IFBench and IFEval. Official and
@@ -12,6 +15,7 @@ secondary IF metric. The average figure gives each model equal weight.
 """
 
 import argparse
+import re
 from pathlib import Path
 
 import matplotlib
@@ -30,7 +34,7 @@ METRICS = {
 }
 
 
-def discover_runs(results_dir, model):
+def discover_runs(results_dir, model, suffix=None):
     """Map shared x-axis version labels to actual result directory names."""
     runs = {"-ins": f"{model}-ins"}
     # Existing files use _git20k; also accept the user's -20k convention.
@@ -41,10 +45,35 @@ def discover_runs(results_dir, model):
     runs["-20k"] = candidates[0]
     prefix = candidates[0] + "_"
     for path in sorted(results_dir.iterdir()):
-        if path.is_dir() and path.name.startswith(prefix):
-            runs[path.name[len(prefix):]] = path.name
+        if not path.is_dir() or not path.name.startswith(prefix):
+            continue
+        if suffix is not None and not path.name.endswith("_" + suffix):
+            continue
+        version = path.name[len(prefix):]
+        if (path / f"{path.name}_overall.csv").is_file():
+            selected = {version: path.name}
+        else:
+            # Grouped layout: MODEL_BASELINE_SIZE_CONFIG/DATASET_CATEGORY.
+            size = version.split("_", 1)[0]
+            if not size.isdigit():
+                raise ValueError(f"{path}: expected a training size before the configuration")
+            selected = {
+                f"{category.name}_{size}": f"{path.name}/{category.name}"
+                for category in sorted(path.iterdir())
+                if category.is_dir()
+                and (category / f"{category.name}_overall.csv").is_file()
+            }
+        for label, run in selected.items():
+            if label in runs:
+                raise ValueError(
+                    f"{model}: multiple runs for {label!r}; select one with --suffix"
+                )
+            runs[label] = run
     if len(runs) == 2:
-        raise ValueError(f"{model}: no subcategory runs found under {results_dir}")
+        selection = f" matching suffix {suffix!r}" if suffix is not None else ""
+        raise ValueError(
+            f"{model}: no subcategory runs{selection} found under {results_dir}"
+        )
     return runs
 
 
@@ -59,11 +88,11 @@ def read_score(path, row_column, row_name, score_column, scale=1.0):
     return score
 
 
-def load_scores(results_dir, if_eval_dir):
+def load_scores(results_dir, if_eval_dir, suffix=None):
     rows = []
     versions = None
     for model in MODELS:
-        runs = discover_runs(results_dir, model)
+        runs = discover_runs(results_dir, model, suffix)
         if versions is None:
             versions = list(runs)
         elif set(runs) != set(versions):
@@ -73,7 +102,7 @@ def load_scores(results_dir, if_eval_dir):
                 f"extra={sorted(set(runs) - set(versions))}"
             )
         for version, run in runs.items():
-            overall = results_dir / run / f"{run}_overall.csv"
+            overall = results_dir / run / f"{Path(run).name}_overall.csv"
             summary = if_eval_dir / f"{run}_if_summary.csv"
             rows.append({
                 "model": model,
@@ -96,7 +125,7 @@ def load_scores(results_dir, if_eval_dir):
     return data, versions
 
 
-def default_output_dir(data, versions):
+def default_output_dir(data, versions, suffix=None):
     """Infer the figure folder from baseline names and safety training size."""
     baselines = {
         row.run[len(row.model):].lstrip("_-")
@@ -111,7 +140,7 @@ def default_output_dir(data, versions):
             "Cannot infer one output folder from mixed baselines or training "
             "sizes; specify --output-dir"
         )
-    return ROOT / "figs" / f"{next(iter(baselines))}_{next(iter(sizes))}"
+    return ROOT / "figs" / f"{next(iter(baselines))}_{suffix or next(iter(sizes))}"
 
 
 def plot_bars(scores, versions, title, output_path):
@@ -188,19 +217,28 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
     parser.add_argument(
+        "--suffix",
+        help="Result folder suffix, e.g. 800_vanilla_benign (always includes both instruct baselines)",
+    )
+    parser.add_argument(
         "--if-eval-dir", type=Path,
         help="IF summary directory (default: RESULTS_DIR/if_eval)",
     )
     parser.add_argument(
         "--output-dir", type=Path,
-        help="Output folder (default: ROOT/figs/<baseline>_<size>, inferred from runs)",
+        help="Output folder (default: ROOT/figs/<baseline>_<suffix or size>)",
     )
     args = parser.parse_args()
+    if args.suffix is not None:
+        args.suffix = args.suffix.lstrip("_")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.suffix):
+            parser.error("--suffix must be a nonempty folder-name suffix without path separators")
     try:
         data, versions = load_scores(
-            args.results_dir, args.if_eval_dir or args.results_dir / "if_eval"
+            args.results_dir, args.if_eval_dir or args.results_dir / "if_eval",
+            args.suffix,
         )
-        output_dir = args.output_dir or default_output_dir(data, versions)
+        output_dir = args.output_dir or default_output_dir(data, versions, args.suffix)
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
 

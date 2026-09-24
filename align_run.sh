@@ -16,9 +16,12 @@ Launcher options:
   --models MODEL [MODEL ...]      Space- or comma-separated models
   --folder DIR                    Add immediate child directories with config.json
   --datasets DATASET [DATASET...] Space- or comma-separated datasets
-  --num_train N                   Total examples per job (default: 1200)
+  --num_train N                   Total examples per job (default: 1800)
   --epochs N                      Training epochs per job (default: 2)
-  --harmful_rate RATE             Subcategory fraction (default: 0.5)
+  --harmful_rate RATE             Safety subcategory fraction (default: 1/3)
+  --general_rate RATE             General instruction fraction (default: 1/3)
+  --general_dataset CSV           General instruction data (default: data/git_data_20k.csv)
+  --seed N                       Sampling/training seed, passed to align.py (default: 42)
   -h, --help                      Show this help
 
 Examples:
@@ -26,7 +29,10 @@ Examples:
   ./align_run.sh --models qwen2.5-ins,llama3.1-ins --datasets wildguardmix aegis
   ./align_run.sh --folder /scratch/zf28/ckpts --datasets wildguardmix
   ./align_run.sh --folder /scratch/zf28/ckpts --models qwen2.5-ins \
-      --num_train 1200 --harmful_rate 0.5 --epochs 2 --lr 1e-5
+      --num_train 1800 --general_dataset ../data/git_data_20k.csv --epochs 2 --lr 1e-5
+
+Benign safety examples fill the remaining fraction: the default mixture is
+600 harmful safety + 600 benign safety + 600 general instructions (1:1:1).
 
 GPU_GROUP=auto uses both 0,1,2,3 and 4,5,6,7. It can instead be set to one
 of those groups. MAX_USED_MB defaults to 2000 and GPU_POLL_SECONDS to 30.
@@ -38,8 +44,10 @@ models=()
 folders=()
 datasets=()
 extra_args=()
-num_train=1200
-harmful_rate=0.5
+num_train=1800
+harmful_rate=0.3333333333333333
+general_rate=0.3333333333333333
+general_dataset="$script_dir/../data/git_data_20k.csv"
 
 append_csv_values() {
     local target_name="$1" raw="$2" value
@@ -97,6 +105,18 @@ while (( $# > 0 )); do
             shift 2
             ;;
         --harmful_rate=*) harmful_rate="${1#*=}"; shift ;;
+        --general_rate)
+            (( $# >= 2 )) || { echo "--general_rate needs a value." >&2; exit 2; }
+            general_rate="$2"
+            shift 2
+            ;;
+        --general_rate=*) general_rate="${1#*=}"; shift ;;
+        --general_dataset)
+            (( $# >= 2 )) || { echo "--general_dataset needs a CSV path." >&2; exit 2; }
+            general_dataset="$2"
+            shift 2
+            ;;
+        --general_dataset=*) general_dataset="${1#*=}"; shift ;;
         -h|--help) usage; exit 0 ;;
         --)
             shift
@@ -155,25 +175,6 @@ for dataset in "${datasets[@]}"; do
     esac
 done
 
-# Match align.py's validation and rounding for the number of examples drawn
-# from the selected dataset subcategory.
-count_values=$(python3 -c '
-import math
-import sys
-
-try:
-    total = int(sys.argv[1])
-    rate = float(sys.argv[2])
-except ValueError as error:
-    raise SystemExit(f"Invalid NUM_TRAIN/HARMFUL_RATE: {error}")
-if total <= 0:
-    raise SystemExit("NUM_TRAIN must be positive")
-if not math.isfinite(rate) or not 0.0 <= rate <= 1.0:
-    raise SystemExit("HARMFUL_RATE must be between 0 and 1")
-print(f"{total}\t{rate:g}\t{int(total * rate + 0.5)}")
-' "$num_train" "$harmful_rate") || exit $?
-IFS=$'\t' read -r num_train harmful_rate category_required <<< "$count_values"
-
 # ---- conda environment ----
 if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     conda_script=/home/zf28/miniconda3/etc/profile.d/conda.sh
@@ -193,6 +194,21 @@ for program in python nvidia-smi deepspeed; do
         exit 1
     }
 done
+
+# Use the same validation/counts as align.py before queuing any GPU jobs.
+category_required=$(python -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from helper import mixture_counts
+try:
+    harmful, _, general = mixture_counts(int(sys.argv[2]), float(sys.argv[3]), float(sys.argv[4]))
+    if general and not Path(sys.argv[5]).expanduser().is_file():
+        raise ValueError(f"General instruction CSV not found: {sys.argv[5]}")
+except ValueError as error:
+    raise SystemExit(str(error))
+print(harmful)
+' "$script_dir" "$num_train" "$harmful_rate" "$general_rate" "$general_dataset") || exit $?
 
 # Same CUDA setup used by git_train.sh.
 if [[ -n "${CONDA_PREFIX:-}" ]]; then
@@ -342,7 +358,9 @@ run_job() {
         --alignment_dataset "$dataset" \
         --abbr "$abbr" \
         --num_train "$num_train" \
-        --harmful_rate "$harmful_rate" 2>&1 | tee -a "$log_file"
+        --harmful_rate "$harmful_rate" \
+        --general_rate "$general_rate" \
+        --general_dataset "$general_dataset" 2>&1 | tee -a "$log_file"
 }
 
 run_queue() {
@@ -356,7 +374,7 @@ run_queue() {
     return "$queue_status"
 }
 
-echo "Configuration: models=${models[*]} datasets=${datasets[*]} num_train=$num_train harmful_rate=$harmful_rate"
+echo "Configuration: models=${models[*]} datasets=${datasets[*]} num_train=$num_train harmful_rate=$harmful_rate general_rate=$general_rate general_dataset=$general_dataset"
 echo "Required subcategory examples: $category_required"
 echo "Queued ${#job_models[@]} job(s) on GPU groups: ${gpu_groups[*]}"
 
