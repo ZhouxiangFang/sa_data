@@ -241,7 +241,7 @@ def main() -> None:
 
     checkpoint_name = filename_component(args.run_name) if args.run_name else (
         f"{filename_component(Path(args.model).name)}_{args.num_train}_"
-        f"{args.benign_data_type}_{args.alignment_dataset}_{filename_component(args.abbr)}"
+        f"{args.alignment_dataset}_{filename_component(args.abbr)}"
     )
     output_dir = args.output_dir / checkpoint_name
     if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite_output_dir:

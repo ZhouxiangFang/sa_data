@@ -27,8 +27,8 @@ Launcher options:
 Examples:
   ./align_run.sh --models qwen2.5-ins llama3.1-ins
   ./align_run.sh --models qwen2.5-ins,llama3.1-ins --datasets wildguardmix aegis
-  ./align_run.sh --folder /scratch/zf28/ckpts --datasets wildguardmix
-  ./align_run.sh --folder /scratch/zf28/ckpts --models qwen2.5-ins \
+  ./align_run.sh --folder /home/zf28/models/20k --datasets wildguardmix
+  ./align_run.sh --folder /home/zf28/models/20k --models qwen2.5-ins \
       --num_train 1800 --general_dataset ../data/git_data_20k.csv --epochs 2 --lr 1e-5
 
 Benign safety examples fill the remaining fraction: the default mixture is

@@ -75,11 +75,11 @@ def resolve_model(model):
 def result_location(
     output_dir, checkpoint_name, model_name=None, num_train=None, benign_data_type=None
 ):
-    """Group aligned runs by model/count/type, then dataset/subcategory."""
+    """Group aligned runs by model/count/dataset, then dataset/subcategory."""
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", checkpoint_name)
     match = re.fullmatch(
         r"(?P<model>.+)_(?P<count>[1-9][0-9]*)_"
-        r"(?P<benign>vanilla_benign|adversarial_benign|mix)_"
+        r"(?:(?P<benign>vanilla_benign|adversarial_benign|mix)_)?"
         r"(?P<category>(?:wildguardmix|aegis)_.+?)(?P<variant>_permit)?",
         safe_name,
     ) or re.fullmatch(
@@ -93,7 +93,7 @@ def result_location(
         if num_train is not None or benign_data_type is not None:
             raise ValueError(
                 "Cannot infer dataset/subcategory from checkpoint name. Expected "
-                "<model>_<num_train>_<benign_data_type>_<dataset>_<subcategory>."
+                "<model>_<num_train>_[<benign_data_type>_]<dataset>_<subcategory>."
             )
         safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", model_name or safe_name)
         return os.path.join(output_dir, safe_name), safe_name
@@ -109,8 +109,9 @@ def result_location(
     if benign_data_type not in BENIGN_DATA_TYPES:
         raise ValueError(f"Unsupported benign data type: {benign_data_type}")
     variant = match["variant"] or ""
+    dataset_name = match["category"].split("_", 1)[0]
     directory = os.path.join(
-        output_dir, f"{model_name}_{num_train}_{benign_data_type}{variant}"
+        output_dir, f"{model_name}_{num_train}_{dataset_name}{variant}"
     )
     directory = os.path.join(directory, match["category"])
     return directory, match["category"] + variant
@@ -254,8 +255,8 @@ def parse_args():
     )
     parser.add_argument(
         "--benign_data_type", choices=BENIGN_DATA_TYPES,
-        help=("Benign data type for result folders; inferred from the checkpoint, "
-              "otherwise vanilla_benign."),
+        help=("Benign data type; inferred from the checkpoint, otherwise vanilla_benign. "
+              "Result folders are grouped by dataset name."),
     )
     parser.add_argument(
         "--output_dir",

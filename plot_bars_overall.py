@@ -1,9 +1,10 @@
 """Plot harmful and prompt-loose IF scores for six models and their mean.
 
 Run from any directory: python sa_data/plot_bars_overall.py
-Select a result configuration with --suffix 800_vanilla_benign; official
+Select a result configuration with --suffix 800_wildguardmix; official
 and self-trained instruct baselines are always included.
-Figures default to figs/<baseline>_<size> (for example, figs/git20k_800),
+Figures default to figs/<baseline>_<size>_<dataset> (for example,
+figs/git20k_800_wildguardmix),
 inferred from the loaded runs, or figs/<baseline>_<suffix> when selected.
 Use --output-dir to choose an explicit folder.
 Harmful scores use the precomputed Avg row (a macro-average over safety
@@ -126,7 +127,7 @@ def load_scores(results_dir, if_eval_dir, suffix=None):
 
 
 def default_output_dir(data, versions, suffix=None):
-    """Infer the figure folder from baseline names and safety training size."""
+    """Infer the figure folder from baseline, training size, and dataset."""
     baselines = {
         row.run[len(row.model):].lstrip("_-")
         for row in data.loc[data["version"] == "-20k"].itertuples()
@@ -135,12 +136,17 @@ def default_output_dir(data, versions, suffix=None):
         int(version.rsplit("_", 1)[1])
         for version in versions if version not in ("-ins", "-20k")
     }
-    if len(baselines) != 1 or len(sizes) != 1:
+    datasets = {
+        version.split("_", 1)[0]
+        for version in versions if version not in ("-ins", "-20k")
+    }
+    if len(baselines) != 1 or len(sizes) != 1 or len(datasets) != 1:
         raise ValueError(
             "Cannot infer one output folder from mixed baselines or training "
-            "sizes; specify --output-dir"
+            "sizes or datasets; specify --output-dir"
         )
-    return ROOT / "figs" / f"{next(iter(baselines))}_{suffix or next(iter(sizes))}"
+    output_suffix = suffix or f"{next(iter(sizes))}_{next(iter(datasets))}"
+    return ROOT / "figs" / f"{next(iter(baselines))}_{output_suffix}"
 
 
 def plot_bars(scores, versions, title, output_path):
@@ -218,7 +224,7 @@ def main():
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
     parser.add_argument(
         "--suffix",
-        help="Result folder suffix, e.g. 800_vanilla_benign (always includes both instruct baselines)",
+        help="Result folder suffix, e.g. 800_wildguardmix (always includes both instruct baselines)",
     )
     parser.add_argument(
         "--if-eval-dir", type=Path,
@@ -226,7 +232,7 @@ def main():
     )
     parser.add_argument(
         "--output-dir", type=Path,
-        help="Output folder (default: ROOT/figs/<baseline>_<suffix or size>)",
+        help="Output folder (default: ROOT/figs/<baseline>_<suffix or size_dataset>)",
     )
     args = parser.parse_args()
     if args.suffix is not None:

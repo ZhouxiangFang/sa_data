@@ -17,7 +17,7 @@ Examples:
   ./eval_if_run.sh --gpus 0,2 --models qwen2.5-ins llama3-ins
 
 Results default to ../results/if_eval relative to this script. Override with --output_dir DIR.
-Aligned checkpoints save to <model>_<num_train>_<benign_data_type>/ with
+Aligned checkpoints save to <model>_<num_train>_<dataset_name>/ with
 <dataset>_<subcategory>_if_{summary,responses}.csv filenames. Baseline files
 save directly in the result root as <model>_if_{summary,responses}.csv.
 

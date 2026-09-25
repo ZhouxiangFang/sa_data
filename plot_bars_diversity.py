@@ -3,7 +3,7 @@
 Example (run from any directory):
     python sa_data/plot_bars_diversity.py \
         results/diversity/wildguardmix_train_diversity_800_1.0.csv \
-        --suffix 800_vanilla_benign --corr all
+        --suffix 800_wildguardmix --corr all
 
 The three metrics are Self-BLEU, POS n-gram diversity, and Vendi score.
 Bar charts display Self-BLEU and POS diversity as percentages and Vendi in
@@ -20,6 +20,8 @@ lines. CSV exports contain plotted pairs
 and coefficients, including sample counts and p-values.
 Run names encode dataset, subcategory, and size, but not the mixture fraction;
 use --suffix to select grouped result folders for the intended configuration.
+Output folders append the selected size and any variant to the CSV stem,
+omitting the dataset already named in the stem and legacy benign-data types.
 """
 
 import argparse
@@ -65,7 +67,7 @@ def load_diversity(path):
 def load_safety(results_dir, dataset, train_size, abbreviations, suffix=None):
     """Read grouped results matching a suffix, or legacy flat runs by size."""
     pattern = re.compile(rf"^(.+)_{re.escape(dataset)}_(.+)_{train_size}$")
-    group_suffix = "_" + (suffix or f"{train_size}_vanilla_benign")
+    group_suffix = "_" + (suffix or f"{train_size}_{dataset}")
     candidates = []
     rows = []
     for directory in sorted(results_dir.iterdir()):
@@ -290,6 +292,14 @@ def plot_correlations(table, metric, method, context, path):
     save_figure(fig, path)
 
 
+def figure_suffix(suffix, dataset):
+    """Keep size and variant without repeating dataset or benign-data type."""
+    return re.sub(
+        rf"_(?:vanilla_benign|adversarial_benign|mix|{re.escape(dataset)})(?=_|$)",
+        "", suffix,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -297,13 +307,13 @@ def main():
     parser.add_argument("--csv", type=Path, dest="csv_option", help="Alternative to positional CSV")
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
     parser.add_argument("--output-dir", type=Path,
-                        help="Default: ROOT/figs/diversity/<input CSV stem>; --suffix is appended")
+                        help="Default: ROOT/figs/diversity/<input CSV stem>; selected size/variant is appended")
     parser.add_argument("--suffix",
-                        help="Result folder suffix, e.g. 800_vanilla_benign; also appended to output folder")
+                        help="Result folder suffix, e.g. 800_wildguardmix; size/variant is appended to output folder")
     parser.add_argument("--dataset", help="Training dataset; inferred from CSV filename")
     parser.add_argument("--train-size", type=int,
                         help="Safety-run training size; defaults to CSV scored_on")
-    parser.add_argument("--corr", choices=[*CORRELATIONS, "all"], default="pearson")
+    parser.add_argument("--corr", choices=[*CORRELATIONS, "all"], default="all")
     parser.add_argument("--exclude", nargs="*", default=[],
                         help="Additional subcategories to exclude from correlations, "
                              "while keeping them plotted and in CSVs; benign is always excluded")
@@ -344,7 +354,9 @@ def main():
 
     output_dir = args.output_dir or ROOT / "figs" / "diversity" / csv_path.stem
     if args.suffix:
-        output_dir = output_dir.with_name(f"{output_dir.name}_{args.suffix}")
+        output_dir = output_dir.with_name(
+            f"{output_dir.name}_{figure_suffix(args.suffix, dataset)}"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     context_parts = [dataset]
     if args.suffix:
