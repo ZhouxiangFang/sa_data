@@ -10,7 +10,10 @@ Bar charts display Self-BLEU and POS diversity as percentages and Vendi in
 its original units, with one decimal place and a zoomed linear y-axis.
 CSV exports retain the original metric units.
 Safety uses the precomputed Avg harmful_score_pct (lower is safer), matching
-plot_bars_overall.py. Correlations use negative Self-BLEU so larger always
+plot_bars_overall.py. Four additional average_diversity_vs_harmful_<test>.png
+plots use each test dataset's harmful score, averaged equally across models.
+Their plotted scores and correlations are exported in average_diversity_safety_*
+CSVs with a test_dataset column. Correlations use negative Self-BLEU so larger always
 means more diverse. Average correlations are computed against equally weighted
 model-mean harmful scores on subcategories available for every model; they
 are not averages of correlation coefficients. The pooled overall diversity
@@ -46,6 +49,12 @@ METRICS = {
     "vendi_score": ("Vendi score", 1, "#009E73"),
 }
 CORRELATIONS = {"pearson": pearsonr, "spearman": spearmanr, "kendall": kendalltau}
+TEST_DATASETS = {
+    "wildguardmix": "WildGuardMix",
+    "aegis": "Aegis",
+    "wildjailbreak": "WildJailbreak",
+    "ailuminate": "AILuminate",
+}
 
 
 def load_diversity(path):
@@ -64,8 +73,9 @@ def load_diversity(path):
     return data
 
 
-def load_safety(results_dir, dataset, train_size, abbreviations, suffix=None):
-    """Read grouped results matching a suffix, or legacy flat runs by size."""
+def load_safety(results_dir, dataset, train_size, abbreviations, suffix=None,
+                test_dataset="Avg"):
+    """Read one test score from grouped results or legacy flat runs by size."""
     pattern = re.compile(rf"^(.+)_{re.escape(dataset)}_(.+)_{train_size}$")
     group_suffix = "_" + (suffix or f"{train_size}_{dataset}")
     candidates = []
@@ -96,9 +106,9 @@ def load_safety(results_dir, dataset, train_size, abbreviations, suffix=None):
             print(f"Warning: missing {path}; skipping run")
             continue
         data = pd.read_csv(path)
-        scores = data.loc[data["dataset"] == "Avg", "harmful_score_pct"]
+        scores = data.loc[data["dataset"] == test_dataset, "harmful_score_pct"]
         if len(scores) != 1:
-            raise ValueError(f"{path}: expected exactly one Avg row")
+            raise ValueError(f"{path}: expected exactly one {test_dataset} row")
         score = float(scores.iloc[0])
         if not np.isfinite(score) or not 0 <= score <= 100:
             raise ValueError(f"{path}: invalid harmful percentage {score}")
@@ -216,7 +226,7 @@ def plot_diversity(data, metric, context, path):
     save_figure(fig, path)
 
 
-def plot_scatter(scores, correlations, title, context, path):
+def plot_scatter(scores, correlations, title, context, path, test_dataset="Avg"):
     fig, axes = plt.subplots(1, 3, figsize=(21, 7))
     for ax, (metric, (label, sign, color)) in zip(axes, METRICS.items()):
         x, y, abbreviations = finite_pairs(scores, metric)
@@ -246,7 +256,9 @@ def plot_scatter(scores, correlations, title, context, path):
             f"{'Negative ' if sign < 0 else ''}{label} (more diverse →)\n"
             f"Correlation across {len(corr_x)} subcategories (outliers excluded)", fontsize=14,
         )
-        ax.set_ylabel("Overall harmful score (%) ↓", fontsize=14)
+        safety_label = ("Overall" if test_dataset == "Avg"
+                        else TEST_DATASETS[test_dataset])
+        ax.set_ylabel(f"{safety_label} harmful score (%) ↓", fontsize=14)
         ax.margins(x=0.18)
         if len(y):
             span = max(float(np.ptp(y)), 1.0)
@@ -254,6 +266,8 @@ def plot_scatter(scores, correlations, title, context, path):
             ax.set_ylim(max(0, y.min() - span * 0.15),
                         y.max() + span * (0.18 + 0.10 * len(stats)))
         style_axis(ax)
+    if test_dataset != "Avg":
+        context += f"; test: {TEST_DATASETS[test_dataset]}"
     fig.suptitle(f"{title}: diversity vs. post-training harmful score\n{context}", fontsize=21)
     save_figure(fig, path)
 
@@ -347,8 +361,13 @@ def main():
             size = int(sizes[0])
         if size <= 0:
             raise ValueError("--train-size must be positive")
-        safety = load_safety(args.results_dir, dataset, size,
-                             set(diversity["abbr"]) - {"overall"}, args.suffix)
+        safety_by_test = {
+            test: load_safety(args.results_dir, dataset, size,
+                              set(diversity["abbr"]) - {"overall"}, args.suffix,
+                              test_dataset=test)
+            for test in ["Avg", *TEST_DATASETS]
+        }
+        safety = safety_by_test["Avg"]
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
 
@@ -394,6 +413,28 @@ def main():
         for method in methods:
             plot_correlations(table, metric, method, context,
                               output_dir / f"corr_{metric}_vs_harmful_{method}.png")
+    test_pairs, test_correlations = [], []
+    for test in TEST_DATASETS:
+        joined = join_scores(diversity, safety_by_test[test])
+        average = joined.loc[joined["model"] == "Average"].copy()
+        if average.empty:
+            continue
+        average["included_in_correlation"] = ~average["abbr"].str.lower().isin(excluded_abbrs)
+        correlations = correlation_table(average, methods)
+        plot_scatter(
+            average, correlations, f"Average across {safety['model'].nunique()} models",
+            context, output_dir / f"average_diversity_vs_harmful_{test}.png",
+            test_dataset=test,
+        )
+        test_pairs.append(average.assign(test_dataset=test))
+        test_correlations.append(correlations.assign(test_dataset=test))
+    if test_pairs:
+        pd.concat(test_pairs, ignore_index=True).to_csv(
+            output_dir / "average_diversity_safety_scores_by_test.csv", index=False,
+        )
+        pd.concat(test_correlations, ignore_index=True).to_csv(
+            output_dir / "average_diversity_safety_correlations_by_test.csv", index=False,
+        )
     print(f"Saved score and correlation CSVs in {output_dir}")
 
 

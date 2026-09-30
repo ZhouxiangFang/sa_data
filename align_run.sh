@@ -16,6 +16,7 @@ Launcher options:
   --models MODEL [MODEL ...]      Space- or comma-separated models
   --folder DIR                    Add immediate child directories with config.json
   --datasets DATASET [DATASET...] Space- or comma-separated datasets
+                                 Default: wildguardmix aegis; also supports gretel
   --num_train N                   Total examples per job (default: 1800)
   --epochs N                      Training epochs per job (default: 2)
   --harmful_rate RATE             Safety subcategory fraction (default: 1/3)
@@ -27,6 +28,7 @@ Launcher options:
 Examples:
   ./align_run.sh --models qwen2.5-ins llama3.1-ins
   ./align_run.sh --models qwen2.5-ins,llama3.1-ins --datasets wildguardmix aegis
+  ./align_run.sh --models qwen2.5-ins --datasets gretel
   ./align_run.sh --folder /home/zf28/models/20k --datasets wildguardmix
   ./align_run.sh --folder /home/zf28/models/20k --models qwen2.5-ins \
       --num_train 1800 --general_dataset ../data/git_data_20k.csv --epochs 2 --lr 1e-5
@@ -170,7 +172,7 @@ models=("${unique_models[@]}")
 
 for dataset in "${datasets[@]}"; do
     case "$dataset" in
-        wildguardmix|aegis) ;;
+        wildguardmix|aegis|gretel) ;;
         *) echo "Unsupported dataset: $dataset" >&2; exit 2 ;;
     esac
 done
@@ -229,7 +231,7 @@ if grep -q '595\.84' /proc/driver/nvidia/version 2>/dev/null; then
 fi
 
 # ---- select subcategories with enough training examples ----
-stats_file="$script_dir/subcategory_stats.json"
+stats_file="$script_dir/../data/subcategory_stats.json"
 job_models=()
 job_datasets=()
 job_abbrs=()

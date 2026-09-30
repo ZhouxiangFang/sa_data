@@ -41,7 +41,7 @@ def filter_safe_responses(df: pd.DataFrame) -> pd.DataFrame:
     return df[~label.isin({'harmful', 'unsafe'})]
 
 def to_abbr(dataset_name, sub):
-    with open(os.path.join(MODULE_DIR, 'subcategory_stats.json')) as f:
+    with open(os.path.join(DATA_DIR, 'subcategory_stats.json')) as f:
         abbr_map = {ds: {c: v['abbr'] for c, v in cats.items()} for ds, cats in json.load(f).items()}[dataset_name]
 
     if isinstance(sub, str):
@@ -55,7 +55,7 @@ def to_abbr(dataset_name, sub):
         abbrs.append(abbr_map.get(k, k))
     return abbrs
 
-safety_test_datasets = ["wildguardmix", "aegis", "wildjailbreak", "ailuminate"]
+safety_test_datasets = ["wildguardmix", "aegis", "wildjailbreak", "ailuminate", "gretel"]
 
 wildguard_subcategories = [
     "benign",
@@ -175,6 +175,24 @@ def generate_responses(llm, tokenizer, queries, max_tokens=1024, temperature=0, 
 
 def load_safety_dataset(dataset_name, type):
     dataset_name = dataset_name.lower()
+    if dataset_name == 'gretel' and type in ('train', 'test'):
+        # As with Aegis, reserve both validation and test for evaluation.
+        split = 'train' if type == 'train' else 'validation+test'
+        dataset = load_dataset(
+            'gretelai/gretel-safety-alignment-en-v1', 'default', split=split
+        ).to_pandas()
+        # Discard the original response before renaming the safe target.
+        dataset = dataset[
+            ['risk_category', 'persona', 'tactic', 'prompt', 'safe_response']
+        ].rename(columns={'risk_category': 'subcategory', 'safe_response': 'response'})
+        dataset = clean_pairs(dataset)
+        # These labels describe the dataset's unsafe requests and safe targets;
+        # they are not independent classifier judgments.
+        dataset['prompt_harm_label'] = 'harmful'
+        dataset['response_harm_label'] = 'safe'
+        dataset['sub_abbrs'] = dataset['subcategory'].apply(lambda s: to_abbr(dataset_name, s))
+        return dataset
+
     if type == 'test':
         if dataset_name == 'wildguardmix':
             test_dataset = load_dataset('allenai/wildguardmix', 'wildguardtest', split='test').to_pandas()
@@ -247,7 +265,7 @@ def select_harmful_subcategory(
 ) -> pd.DataFrame:
     """Apply the alignment filters to an already loaded dataset."""
     prompt_label_column = (
-        "prompt_harm_label" if dataset_name == "wildguardmix" else "prompt_label"
+        "prompt_harm_label" if dataset_name in ("wildguardmix", "gretel") else "prompt_label"
     )
     required = {
         "prompt",

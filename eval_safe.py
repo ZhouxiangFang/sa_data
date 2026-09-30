@@ -80,11 +80,11 @@ def result_location(
     match = re.fullmatch(
         r"(?P<model>.+)_(?P<count>[1-9][0-9]*)_"
         r"(?:(?P<benign>vanilla_benign|adversarial_benign|mix)_)?"
-        r"(?P<category>(?:wildguardmix|aegis)_.+?)(?P<variant>_permit)?",
+        r"(?P<category>(?:wildguardmix|aegis|gretel)_.+?)(?P<variant>_permit)?",
         safe_name,
     ) or re.fullmatch(
         # Accept checkpoints saved before the training metadata moved up front.
-        r"(?P<model>.+)_(?P<category>(?:wildguardmix|aegis)_.+?)_"
+        r"(?P<model>.+)_(?P<category>(?:wildguardmix|aegis|gretel)_.+?)_"
         r"(?P<count>[1-9][0-9]*)(?:_(?P<benign>vanilla_benign|adversarial_benign|mix))?"
         r"(?P<variant>_permit)?",
         safe_name,
@@ -175,7 +175,7 @@ def subcategory_results(name, dataset):
     ).round(4)
     results["abbr"] = (
         results["subcategory"].apply(lambda value: ", ".join(to_abbr(name, value)))
-        if name in {"wildguardmix", "aegis"}
+        if name in {"wildguardmix", "aegis", "gretel"}
         else results["subcategory"]
     )
 
@@ -216,8 +216,9 @@ def save_results(datasets, output_dir, model_name):
         breakdown.to_csv(breakdown_path, index=False)
         print(f"Saved: {breakdown_path}")
 
+        metadata_columns = [column for column in ("persona", "tactic") if column in dataset]
         responses = dataset[
-            ["prompt", "subcategory", "generated_response", "is_unsafe"]
+            ["prompt", "subcategory", "generated_response", "is_unsafe"] + metadata_columns
         ].copy()
         source = (
             dataset["sub_abbrs"]
@@ -228,7 +229,8 @@ def save_results(datasets, output_dir, model_name):
             lambda value: ", ".join(value) if isinstance(value, list) else str(value)
         )
         responses = responses[
-            ["subcategory", "abbr", "prompt", "generated_response", "is_unsafe"]
+            ["subcategory", "abbr"] + metadata_columns
+            + ["prompt", "generated_response", "is_unsafe"]
         ]
         responses_path = os.path.join(output_dir, f"{model_name}_{name}_responses.csv")
         responses.to_csv(responses_path, index=False)
@@ -299,8 +301,9 @@ def main():
         print(f"\nLoading dataset: {name}")
         dataset = load_safety_dataset(name, "test")
         columns = ["prompt", "subcategory"]
-        if "sub_abbrs" in dataset:
-            columns.append("sub_abbrs")
+        columns.extend(
+            column for column in ("sub_abbrs", "persona", "tactic") if column in dataset
+        )
         dataset = dataset[columns].copy().reset_index(drop=True)
 
         queries = dataset["prompt"].tolist()

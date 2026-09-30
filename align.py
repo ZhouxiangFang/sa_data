@@ -13,6 +13,9 @@ instructions default to data/git_data_20k.csv. Safety targets use only
 safe/unharmful responses. All sampling and shuffling use --seed. With four
 GPUs, the default micro-batch of 1 and eight accumulation steps give an
 effective batch size of 32 examples.
+
+Use --alignment_dataset gretel --abbr information_hazards for Gretel's
+risk categories. Gretel safe_response supplies the response training target.
 """
 
 import argparse
@@ -56,14 +59,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--alignment_dataset",
-        choices=("wildguardmix", "aegis"),
+        choices=("wildguardmix", "aegis", "gretel"),
         required=True,
         help="Dataset containing the selected safety subcategory.",
     )
     parser.add_argument(
         "--abbr",
         required=True,
-        help="Subcategory abbreviation from subcategory_stats.json.",
+        help=(
+            "Subcategory abbreviation from data/subcategory_stats.json. "
+            "For Gretel, use its configured abbreviation (e.g. 'information_hazards')."
+        ),
     )
     parser.add_argument(
         "--num_train",

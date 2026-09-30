@@ -42,7 +42,7 @@ from helper import (
 )
 
 SUPPORTED = {
-    'train': ('wildguardmix', 'aegis'),
+    'train': ('wildguardmix', 'aegis', 'gretel'),
     'test': ('wildguardmix', 'aegis', 'wildjailbreak', 'ailuminate'),
 }
 EMBEDDING_MODEL_ID = 'Qwen/Qwen3-Embedding-0.6B'
