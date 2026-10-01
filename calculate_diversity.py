@@ -20,6 +20,7 @@ Examples:
     python calculate_diversity.py --datasets wildguardmix aegis
     python calculate_diversity.py --datasets aegis --harmful_rate 0.5
     python calculate_diversity.py --datasets wildguardmix --abbr cyberattack
+    python calculate_diversity.py --datasets gretel --abbr information_hazards
 """
 
 import argparse
@@ -39,11 +40,13 @@ from helper import (
     build_training_data,
     load_wildjailbreak_benign,
     select_harmful_subcategory,
+    safety_test_datasets,
+    to_abbr,
 )
 
 SUPPORTED = {
     'train': ('wildguardmix', 'aegis', 'gretel'),
-    'test': ('wildguardmix', 'aegis', 'wildjailbreak', 'ailuminate'),
+    'test': tuple(safety_test_datasets),
 }
 EMBEDDING_MODEL_ID = 'Qwen/Qwen3-Embedding-0.6B'
 
@@ -185,15 +188,12 @@ def split_subcategories(value):
 
 def category_names(df, dataset_name):
     """Map abbreviations used by align.py to display names."""
-    if dataset_name in ('wildguardmix', 'aegis'):
-        from helper import to_abbr
-
     names = {}
     categories = dict.fromkeys(cat for value in df['subcategory']
                                for cat in split_subcategories(value))
     for category in categories:
         abbreviations = (to_abbr(dataset_name, category)
-                         if dataset_name in ('wildguardmix', 'aegis')
+                         if dataset_name in SUPPORTED['train']
                          else [category])
         for abbr in abbreviations:
             names.setdefault(abbr, category)

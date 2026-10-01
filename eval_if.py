@@ -50,11 +50,11 @@ def result_location(
     match = re.fullmatch(
         r"(?P<model>.+)_(?P<count>[1-9][0-9]*)_"
         r"(?:(?P<benign>vanilla_benign|adversarial_benign|mix)_)?"
-        r"(?P<category>(?:wildguardmix|aegis)_.+?)(?P<variant>_permit)?",
+        r"(?P<category>(?:wildguardmix|aegis|gretel)_.+?)(?P<variant>_permit)?",
         safe_name,
     ) or re.fullmatch(
         # Accept checkpoints saved before the training metadata moved up front.
-        r"(?P<model>.+)_(?P<category>(?:wildguardmix|aegis)_.+?)_"
+        r"(?P<model>.+)_(?P<category>(?:wildguardmix|aegis|gretel)_.+?)_"
         r"(?P<count>[1-9][0-9]*)(?:_(?P<benign>vanilla_benign|adversarial_benign|mix))?"
         r"(?P<variant>_permit)?",
         safe_name,

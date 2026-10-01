@@ -52,6 +52,7 @@ CORRELATIONS = {"pearson": pearsonr, "spearman": spearmanr, "kendall": kendallta
 TEST_DATASETS = {
     "wildguardmix": "WildGuardMix",
     "aegis": "Aegis",
+    "gretel": "Gretel",
     "wildjailbreak": "WildJailbreak",
     "ailuminate": "AILuminate",
 }
@@ -107,6 +108,10 @@ def load_safety(results_dir, dataset, train_size, abbreviations, suffix=None,
             continue
         data = pd.read_csv(path)
         scores = data.loc[data["dataset"] == test_dataset, "harmful_score_pct"]
+        if scores.empty and test_dataset != "Avg":
+            # Older evaluations may predate a newly added test dataset.
+            print(f"Warning: {path} has no {test_dataset} row; skipping this test dataset for the run")
+            continue
         if len(scores) != 1:
             raise ValueError(f"{path}: expected exactly one {test_dataset} row")
         score = float(scores.iloc[0])
@@ -347,7 +352,7 @@ def main():
     try:
         diversity = load_diversity(csv_path)
         dataset = args.dataset or csv_path.stem.split("_diversity")[0]
-        dataset = dataset.removesuffix("_train")
+        dataset = dataset.removesuffix("_train").removesuffix("_test")
         size = args.train_size
         if args.suffix and re.match(r"^[1-9][0-9]*_", args.suffix):
             suffix_size = int(args.suffix.split("_", 1)[0])
@@ -415,6 +420,8 @@ def main():
                               output_dir / f"corr_{metric}_vs_harmful_{method}.png")
     test_pairs, test_correlations = [], []
     for test in TEST_DATASETS:
+        if safety_by_test[test].empty:
+            continue
         joined = join_scores(diversity, safety_by_test[test])
         average = joined.loc[joined["model"] == "Average"].copy()
         if average.empty:
@@ -422,7 +429,7 @@ def main():
         average["included_in_correlation"] = ~average["abbr"].str.lower().isin(excluded_abbrs)
         correlations = correlation_table(average, methods)
         plot_scatter(
-            average, correlations, f"Average across {safety['model'].nunique()} models",
+            average, correlations, f"Average across {safety_by_test[test]['model'].nunique()} models",
             context, output_dir / f"average_diversity_vs_harmful_{test}.png",
             test_dataset=test,
         )

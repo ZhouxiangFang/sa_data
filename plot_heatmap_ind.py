@@ -1,6 +1,7 @@
 import os
 import argparse
 import glob
+import json
 import re
 import numpy as np
 import pandas as pd
@@ -26,25 +27,13 @@ plt.rcParams.update({
     "ytick.labelsize": TICK_FONTSIZE,
 })
 
-SHORT_TO_FULL = {
-    "benign": "benign",
-    "material_harm": "causing_material_harm_by_disseminating_misinformation",
-    "copyright": "copyright_violations",
-    "cyberattack": "cyberattack",
-    "unethical": "defamation_encouraging_unethical_or_unsafe_actions",
-    "misinfo": "disseminating_false_or_misleading_information_encouraging_disinformation_campaigns",
-    "fraud": "fraud_assisting_illegal_activities",
-    "mental": "mental_health_over-reliance_crisis",
-    "others": "others",
-    "private": "private_information_individual",
-    "sensitive": "sensitive_information_organization_government",
-    "sexual": "sexual_content",
-    "stereo": "social_stereotypes_and_unfair_discrimination",
-    "toxic": "toxic_language_hate_speech",
-    "violence": "violence_and_physical_harm",
-}
-FULL_TO_SHORT = {v: k for k, v in SHORT_TO_FULL.items()}
-ORDERED_SHORTS = list(SHORT_TO_FULL.keys())
+def category_mapping(dataset):
+    """Use the same category names and abbreviations as training/evaluation."""
+    with open(os.path.join(ROOT, "data", "subcategory_stats.json")) as handle:
+        stats = json.load(handle)
+    if dataset not in stats:
+        raise ValueError(f"No subcategory statistics for {dataset!r}")
+    return {entry["abbr"]: full for full, entry in sorted(stats[dataset].items())}
 
 
 def find_dataset_csv(dirpath, dataset):
@@ -83,7 +72,7 @@ def train_result_dir(n, model, dataset, short, suffix=None):
 
 def collect_train_shortnames(n, model, dataset, suffix=None):
     if suffix is not None:
-        return [short for short in ORDERED_SHORTS
+        return [short for short in category_mapping(dataset)
                 if os.path.isdir(train_result_dir(n, model, dataset, short, suffix))]
     prefix = f"{model}_{dataset}_"
     suffix = f"_{n}"
@@ -95,19 +84,21 @@ def collect_train_shortnames(n, model, dataset, suffix=None):
 
 
 def build_matrices(n, init_scores, model, dataset, suffix=None):
+    names = category_mapping(dataset)
     available = set(collect_train_shortnames(n, model, dataset, suffix))
-    train_shorts = [s for s in ORDERED_SHORTS if s in available]
-    test_shorts = train_shorts
+    train_shorts = [s for s in names if s in available]
+    run_scores = {}
+    for short in train_shorts:
+        csv = find_dataset_csv(train_result_dir(n, model, dataset, short, suffix), dataset)
+        run_scores[short] = load_scores(csv) if csv else {}
+    test_categories = set(init_scores).union(*(set(scores) for scores in run_scores.values()))
+    test_shorts = [s for s, full in names.items() if full in test_categories]
     abs_matrix = np.full((len(test_shorts), len(train_shorts)), np.nan)
     diff_matrix = np.full((len(test_shorts), len(train_shorts)), np.nan)
     for j, short in enumerate(train_shorts):
-        d = train_result_dir(n, model, dataset, short, suffix)
-        csv = find_dataset_csv(d, dataset)
-        if csv is None:
-            continue
-        scores = load_scores(csv)
+        scores = run_scores[short]
         for i, test_short in enumerate(test_shorts):
-            full = SHORT_TO_FULL[test_short]
+            full = names[test_short]
             if full in scores:
                 abs_matrix[i, j] = scores[full]
                 if full in init_scores:
@@ -122,7 +113,7 @@ VMAX_ABS = 35.0
 
 
 def _draw_heatmap(ax, matrix, train_shorts, test_shorts, im_kwargs, fmt, text_thresh, dark_high,
-                  test_counts=None, n=None):
+                  dataset, test_counts=None, n=None):
     im = ax.imshow(matrix, aspect="equal", **im_kwargs)
     for i in range(matrix.shape[0]):
         for j in range(matrix.shape[1]):
@@ -150,32 +141,33 @@ def _draw_heatmap(ax, matrix, train_shorts, test_shorts, im_kwargs, fmt, text_th
         label.set_transform(label.get_transform() + offset)
     ax.set_yticks(range(len(test_shorts)))
     if test_counts is not None:
-        ylabels = [f"{s} ({test_counts.get(SHORT_TO_FULL[s], '?')})" for s in test_shorts]
+        names = category_mapping(dataset)
+        ylabels = [f"{s} ({test_counts.get(names[s], '?')})" for s in test_shorts]
     else:
         ylabels = test_shorts
     ax.set_yticklabels(ylabels)
     xlabel = "training data subcategory"
     if n is not None:
-        xlabel += f" ({n} training examples per subcategory)"
+        xlabel += f"\n({n} training examples per subcategory)"
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("test data subcategory" + (" (test size in parentheses)" if test_counts is not None else ""))
+    ax.set_ylabel("test data subcategory" + ("\n(test size in parentheses)" if test_counts is not None else ""))
     return im
 
 
 def plot_diff_heatmap(matrix, train_shorts, test_shorts, n, model, dataset, out_path, test_counts=None):
     cell = 0.55
     grid = cell * max(len(train_shorts), len(test_shorts))
-    fig, ax = plt.subplots(figsize=(grid + 4, grid + 1.5))
+    fig, ax = plt.subplots(figsize=(max(11, grid + 4), max(7.5, grid + 1.5)))
     norm = TwoSlopeNorm(vcenter=0.0, vmin=VMIN_DIFF, vmax=VMAX_DIFF)
     text_thresh = max(abs(VMIN_DIFF), abs(VMAX_DIFF)) * 0.6
     im = _draw_heatmap(ax, matrix, train_shorts, test_shorts,
                        dict(cmap="bwr", norm=norm), "{:+.1f}", text_thresh,
-                       dark_high=False, test_counts=test_counts, n=n)
-    ax.set_title(f"{model}: {dataset} harmful score (%,↓) changes after training")
+                       dark_high=False, dataset=dataset, test_counts=test_counts, n=n)
+    ax.set_title(f"{model}: {dataset}\nHarmful score (%,↓) changes after training")
     cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
     cbar.set_label("Δ harmful score (%)", fontsize=LABEL_FONTSIZE)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"saved {out_path}")
 
@@ -184,13 +176,14 @@ def plot_abs_heatmap(matrix, train_shorts, test_shorts, n, model, dataset, out_p
                      init_scores=None, test_counts=None, suffix=None, ins_scores=None,
                      overall_avgs=None):
     # Show the official instruct and pre-training baselines before trained runs.
+    names = category_mapping(dataset)
     baseline_labels = []
     baseline_columns = []
     for label, scores in (("ins", ins_scores), ("git", init_scores)):
         if scores is not None:
             baseline_labels.append(label)
             baseline_columns.append(np.array([
-                scores.get(SHORT_TO_FULL[s], np.nan) for s in test_shorts
+                scores.get(names[s], np.nan) for s in test_shorts
             ]).reshape(-1, 1))
     col_offset = len(baseline_labels)
     if baseline_columns:
@@ -199,12 +192,12 @@ def plot_abs_heatmap(matrix, train_shorts, test_shorts, n, model, dataset, out_p
 
     cell = 0.55
     grid = cell * max(len(train_shorts), len(test_shorts))
-    fig, ax = plt.subplots(figsize=(grid + 4, grid + 1.5))
+    fig, ax = plt.subplots(figsize=(max(11, grid + 4), max(7.5, grid + 1.5)))
     norm = Normalize(vmin=VMIN_ABS, vmax=VMAX_ABS)
     text_thresh = VMAX_ABS * 0.6
     im = _draw_heatmap(ax, matrix, train_shorts, test_shorts,
                        dict(cmap="Reds", norm=norm), "{:.1f}", text_thresh,
-                       dark_high=True, test_counts=test_counts, n=n)
+                       dark_high=True, dataset=dataset, test_counts=test_counts, n=n)
 
     # Separator between the baseline columns and the trained columns.
     if col_offset:
@@ -223,22 +216,23 @@ def plot_abs_heatmap(matrix, train_shorts, test_shorts, n, model, dataset, out_p
         for j in top_idx:
             labels[j + col_offset].set_fontweight("bold")
         ranked = [f"{train_shorts[j + col_offset]} ({overall_avgs[j]:.2f})" for j in top_idx]
-        ax.set_title(f"{model}: {dataset} harmful score (%,↓) comparisons")
+        ax.set_title(f"{model}: {dataset}\nHarmful score (%,↓) comparisons")
     else:
-        ax.set_title(f"{model}: {dataset} harmful score (%,↓) comparisons")
+        ax.set_title(f"{model}: {dataset}\nHarmful score (%,↓) comparisons")
 
     cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
     cbar.set_label("harmful score (%,↓)", fontsize=LABEL_FONTSIZE)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"saved {out_path}")
 
 
 def plot_average_heatmaps(runs, n, dataset, suffix, include_abs):
     # Align by category, using only categories shared by every model.
-    train = [s for s in ORDERED_SHORTS if all(s in run["train"] for run in runs)]
-    test = [s for s in ORDERED_SHORTS if all(s in run["test"] for run in runs)]
+    names = category_mapping(dataset)
+    train = [s for s in names if all(s in run["train"] for run in runs)]
+    test = [s for s in names if all(s in run["test"] for run in runs)]
     if not train or not test:
         raise ValueError("No shared subcategories available for the average heatmap")
 
@@ -250,12 +244,12 @@ def plot_average_heatmaps(runs, n, dataset, suffix, include_abs):
         return np.mean(np.stack(aligned), axis=0)
 
     def mean_scores(key):
-        return {SHORT_TO_FULL[s]: float(np.mean([
-            run[key].get(SHORT_TO_FULL[s], np.nan) for run in runs
+        return {names[s]: float(np.mean([
+            run[key].get(names[s], np.nan) for run in runs
         ])) for s in test}
 
     counts = runs[0]["counts"]
-    if any(any(run["counts"].get(SHORT_TO_FULL[s]) != counts.get(SHORT_TO_FULL[s])
+    if any(any(run["counts"].get(names[s]) != counts.get(names[s])
                for s in test) for run in runs):
         counts = None
     title = f"Average of {len(runs)} models"
@@ -282,13 +276,19 @@ def main():
                         help="Dataset name used in results directories/CSVs.")
     parser.add_argument("--n", type=int, nargs="+",
                         help="Number of training examples (default: suffix size, or 400).")
-    parser.add_argument("--suffix", default="1800_wildguardmix",
-                        help="Grouped result folder suffix (default: 1800_wildguardmix).")
+    parser.add_argument("--suffix",
+                        help="Grouped result folder suffix (default: 1800_<dataset>).")
     parser.add_argument("--abs", action=argparse.BooleanOptionalAction, default=True,
                         help="Plot the absolute heatmap alongside the difference (default: enabled).")
     args = parser.parse_args()
     models = [args.model] if args.model else MODELS
     dataset = args.dataset
+    if args.suffix is None:
+        args.suffix = f"1800_{dataset}"
+    try:
+        category_mapping(dataset)
+    except ValueError as error:
+        parser.error(str(error))
     if args.suffix is not None:
         args.suffix = args.suffix.lstrip("_")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.suffix):
