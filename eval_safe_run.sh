@@ -14,7 +14,10 @@ Examples:
   ./eval_safe_run.sh --models qwen2.5-ins,llama3-ins
   ./eval_safe_run.sh --folder /models/checkpoints
   ./eval_safe_run.sh --gpus 0,2 --models model-a,model-b,model-c
+  ./eval_safe_run.sh --models qwen2.5-ins --datasets xstest or-bench-hard
 
+All safety benchmarks plus XSTest (safe only) and OR-Bench-Hard run by default.
+Overrefusal summaries are saved as <prefix>_overrefusal.csv (lower is better).
 Results default to ../results relative to this script. Override with --output_dir DIR.
 Aligned checkpoints save to <model>_<num_train>_<dataset_name>/<dataset>_<subcategory>/.
 Baseline models save to <model>/; filenames retain the model or dataset/subcategory prefix.

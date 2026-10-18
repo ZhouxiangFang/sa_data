@@ -1,4 +1,4 @@
-"""Syntactic diversity of alignment samples, overall and per subcategory.
+"""Syntactic and semantic diversity of alignment samples, overall and per subcategory.
 
 Training samples use exactly the filtering, tokenizer length limit, rounding,
 shuffle and seeds used by align.py. CLI samples total 600 examples by default.
@@ -11,13 +11,16 @@ sampling; tags are reused across groups and rounds. Each metric reports the
 mean across rounds, using the same sample for all metrics within a round.
 The CSV's sample_rounds column records the number of rounds for each row.
 POS sequences (e.g. "DT NN VBZ") are embedded with Qwen3-Embedding-0.6B for
-the cosine-kernel Vendi Score. Embeddings are reused across groups and datasets.
-Self-BLEU is lower for more diverse syntax; POS n-gram diversity and Vendi Score
-are higher. Vendi Score is the effective number of distinct embedded structures.
+the cosine-kernel Vendi Score (`vendi_score`). The same model embeds raw prompts
+for `semantic_vendi_score`, using exactly the same examples in every round.
+Embeddings are reused across groups and datasets with a single model instance.
+Self-BLEU is lower for more diverse syntax; POS n-gram diversity and both Vendi
+scores are higher. Vendi Score is the effective number of distinct embedded
+structures or meanings, respectively.
 Test splits remain available for prompt-only analysis, without training filters.
 
 Examples:
-    python calculate_diversity.py --datasets wildguardmix aegis
+    python calculate_diversity.py --datasets wildguardmix aegis gretel
     python calculate_diversity.py --datasets aegis --harmful_rate 0.5
     python calculate_diversity.py --datasets wildguardmix --abbr cyberattack
     python calculate_diversity.py --datasets gretel --abbr information_hazards
@@ -52,7 +55,7 @@ EMBEDDING_MODEL_ID = 'Qwen/Qwen3-Embedding-0.6B'
 
 
 class PosEmbedder:
-    """Embed space-separated POS tags once per distinct sequence."""
+    """Embed POS sequences and raw prompts using one cached text encoder."""
 
     def __init__(self, batch_size=32, device=None):
         if batch_size < 1:
@@ -64,6 +67,10 @@ class PosEmbedder:
 
     def encode(self, pos_seqs):
         texts = [' '.join(seq) for seq in pos_seqs]
+        return self.encode_texts(texts)
+
+    def encode_texts(self, texts):
+        """Embed unmodified text, preserving input order and duplicate frequency."""
         missing = list(dict.fromkeys(text for text in texts if text not in self.cache))
         if missing:
             # Delay model loading until embeddings are actually needed.
@@ -74,7 +81,7 @@ class PosEmbedder:
                     EMBEDDING_MODEL_ID, device=self.device,
                     tokenizer_kwargs={'padding_side': 'left'},
                 )
-            print(f'  Embedding {len(missing):,} unique POS sequences...')
+            print(f'  Embedding {len(missing):,} unique texts...')
             embeddings = self.model.encode(
                 missing, batch_size=self.batch_size, prompt='',
                 convert_to_numpy=True, normalize_embeddings=True,
@@ -292,6 +299,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
     if pos_embedder is None:
         pos_embedder = PosEmbedder()
     embeddings = pos_embedder.encode([tags[prompt] for prompt in prompts])
+    semantic_embeddings = pos_embedder.encode_texts(prompts)
     prompt_indices = {prompt: i for i, prompt in enumerate(prompts)}
 
     rows = []
@@ -300,10 +308,13 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
         scores = []
         for sample in tqdm(rounds, desc=f'{dataset_name} / {category}', unit='round'):
             seqs = [tags[prompt] for prompt in sample]
-            sample_embeddings = embeddings[[prompt_indices[prompt] for prompt in sample]]
+            # One index list selects both representations of the same examples,
+            # including repeats and any WildJailbreak benign examples.
+            sample_indices = [prompt_indices[prompt] for prompt in sample]
             scores.append((syntactic_self_bleu(seqs, max_n),
                            pos_ngram_diversity(seqs, max_n),
-                           vendi_score(sample_embeddings)))
+                           vendi_score(embeddings[sample_indices]),
+                           vendi_score(semantic_embeddings[sample_indices])))
         rows.append({
             'subcategory': category, 'abbr': abbr, 'count': count,
             'scored_on': num_train, 'subcategory_count': harmful_count,
@@ -311,6 +322,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
             'self_bleu': round(sum(score[0] for score in scores) / n_rounds, 4),
             'pos_ngram_diversity': round(sum(score[1] for score in scores) / n_rounds, 4),
             'vendi_score': round(sum(score[2] for score in scores) / n_rounds, 4),
+            'semantic_vendi_score': round(sum(score[3] for score in scores) / n_rounds, 4),
         })
     return pd.DataFrame(rows)
 
@@ -334,7 +346,7 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--num_proc', type=int, default=4)
     parser.add_argument('--embed_batch_size', type=int, default=32,
-                        help='Batch size for Qwen POS embeddings (default: 32)')
+                        help='Batch size for Qwen POS and prompt embeddings (default: 32)')
     parser.add_argument('--embed_device', default=None,
                         help='Embedding device, e.g. cuda:0 or cpu (default: auto)')
     parser.add_argument('--output_dir', type=Path, default=Path('../results/diversity'))
@@ -375,7 +387,7 @@ def main():
             pos_embedder=pos_embedder,
         )
         print('self_bleu: LOWER = more diverse | '
-              'pos_ngram_diversity, vendi_score: HIGHER = more diverse')
+              'pos_ngram_diversity, vendi_score, semantic_vendi_score: HIGHER = more diverse')
         print(result.to_string(index=False))
         output = args.output_dir / f'{dataset_name}_{args.split}_diversity_{args.num_train}_{args.harmful_rate}.csv'
         result.to_csv(output, index=False)

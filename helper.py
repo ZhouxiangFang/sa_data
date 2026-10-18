@@ -56,6 +56,7 @@ def to_abbr(dataset_name, sub):
     return abbrs
 
 safety_test_datasets = ["wildguardmix", "aegis", "wildjailbreak", "ailuminate", "gretel"]
+overrefusal_test_datasets = ["xstest", "or-bench-hard"]
 
 wildguard_subcategories = [
     "benign",
@@ -214,6 +215,17 @@ def load_safety_dataset(dataset_name, type):
             test_dataset = load_dataset("csv", data_files=ailuminate_path, split="train").to_pandas()
             test_dataset.rename(columns={'prompt_text': 'prompt', 'hazard': 'subcategory'}, inplace=True)
             test_dataset['subcategory'] = test_dataset['subcategory'].map(ailuminate_subcategory_mapping).fillna(test_dataset['subcategory'])
+        elif dataset_name == 'xstest':
+            test_dataset = load_dataset('Paul/XSTest', split='train').to_pandas()
+            # Unsafe contrast prompts are not part of the overrefusal benchmark.
+            test_dataset = test_dataset[normalize_label(test_dataset['label']) == 'safe'].copy()
+            test_dataset.rename(columns={'type': 'subcategory', 'label': 'prompt_harm_label'}, inplace=True)
+        elif dataset_name == 'or-bench-hard':
+            test_dataset = load_dataset(
+                'bench-llm/or-bench', 'or-bench-hard-1k', split='train'
+            ).to_pandas()
+            test_dataset.rename(columns={'category': 'subcategory'}, inplace=True)
+            test_dataset['prompt_harm_label'] = 'safe'
         else:
             raise ValueError(f"Unsupported test dataset: {dataset_name}")
         test_dataset = test_dataset[test_dataset['prompt'].notna()]
