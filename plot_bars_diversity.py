@@ -2,20 +2,27 @@
 
 Example (run from any directory):
     python sa_data/plot_bars_diversity.py \
-        results/diversity/wildguardmix_train_diversity_600_1.0.csv \
+        results/diversity/bge-m3/csv/wildguardmix_train_diversity_600_1.0.csv \
         --suffix 1800_wildguardmix --corr all
+
+Each embedding model has one folder, results/diversity/<model>/, with csv/ (the
+diversity CSVs from calculate_diversity.py and this script's correlations) and
+figs/. Every output file name starts with the dataset.
 
 The metrics are the lexical_*, semantic_* and structural_* columns written by
 calculate_diversity.py, whose ↑/↓ suffix gives the direction of more diversity.
-By default three figures are drawn, average_<group>_diversity_vs_harmful.png for
-the lexical, semantic and structural groups: one scatter panel per metric in the
-group against the equally weighted model-mean harmful score. --all-plots adds
+By default three figures, <dataset>_average_<group>_diversity_vs_harmful.png for
+the lexical, semantic and structural groups (one scatter panel per metric in the
+group against the equally weighted model-mean harmful score), and
+<dataset>_diversity_safety_correlations.csv are written. --all-plots adds
 per-metric bar charts, the same three figures per model, correlation bar charts,
-and average_<group>_diversity_vs_harmful_<test>.png per test dataset. Bar charts display
-bounded ratios (HD-D, Distinct, Self-BLEU) as percentages and other metrics in
-their original units. CSV exports are always written in the original units.
+<dataset>_average_<group>_diversity_vs_harmful_<test>.png per test dataset, and
+the plotted scores (<dataset>_diversity_safety_scores.csv and per-test CSVs).
+Bar charts display bounded ratios (HD-D, Distinct, Self-BLEU) as percentages and
+other metrics in their original units. CSV exports keep the original units.
 Figures show, average and rank Pearson and Spearman coefficients only; Kendall
-(largely redundant with Spearman) is kept in the correlation CSVs.
+(largely redundant with Spearman) is kept in the correlation CSVs. Figures also
+omit POS Self-BLEU-1, which saturates near 0.999; the CSVs keep it.
 Safety uses the precomputed Avg harmful_score_pct (lower is safer), matching
 plot_bars_overall.py. The per-test plots use each test dataset's harmful score,
 averaged equally across models.
@@ -30,8 +37,8 @@ lines. CSV exports contain plotted pairs
 and coefficients, including sample counts and p-values.
 Run names encode dataset, subcategory, and size, but not the mixture fraction;
 use --suffix to select grouped result folders for the intended configuration.
-Output folders append the selected size and any variant to the CSV stem,
-omitting the dataset already named in the stem and legacy benign-data types.
+Outputs are named by dataset only, so use --output-dir to keep the results of
+another training size or variant apart.
 """
 
 import argparse
@@ -77,10 +84,12 @@ METRICS = {
     column: (label, -1 if column.endswith("↓") else 1, GROUPS[column.split("_", 1)[0]][1])
     for column, label in LABELS.items()
 }
+# Self-BLEU-1 saturates near 0.999 on POS tags; CSVs keep it, figures leave it out.
+FIGURE_METRICS = [metric for metric in METRICS if metric != "structural_self_bleu_1↓"]
 # Bounded ratios that bar charts display as percentages.
 PERCENT_METRICS = {"lexical_hdd↑", "lexical_distinct_2↑", "structural_distinct_1_4↑",
                    *(f"structural_self_bleu_{n}↓" for n in range(1, 6))}
-GRID_COLUMNS = 5
+GRID_COLUMNS = 4
 # Background of the two metrics with the lowest mean correlation in a figure.
 HIGHLIGHT = "#E1F5FE"
 CORRELATIONS = {"pearson": pearsonr, "spearman": spearmanr, "kendall": kendalltau}
@@ -332,7 +341,7 @@ def plot_scatter(scores, correlations, title, context, path, group, test_dataset
         correlations["method"].isin(plotted_methods(correlations["method"].unique()))
     ]
     name, color = GROUPS[group]
-    metrics = [metric for metric in METRICS if metric.startswith(f"{group}_")]
+    metrics = [metric for metric in FIGURE_METRICS if metric.startswith(f"{group}_")]
     columns = min(len(metrics), GRID_COLUMNS)
     rows = -(-len(metrics) // columns)
     width = max(columns * 4.6, 10)
@@ -411,14 +420,6 @@ def plot_correlations(table, metric, method, context, path):
     save_figure(fig, path)
 
 
-def figure_suffix(suffix, dataset):
-    """Keep size and variant without repeating dataset or benign-data type."""
-    return re.sub(
-        rf"_(?:vanilla_benign|adversarial_benign|mix|{re.escape(dataset)})(?=_|$)",
-        "", suffix,
-    )
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -426,10 +427,13 @@ def main():
     parser.add_argument("--csv", type=Path, dest="csv_option", help="Alternative to positional CSV")
     parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
     parser.add_argument("--output-dir", type=Path,
-                        help="Default: ROOT/figs/diversity/<input CSV stem>; selected size/variant is appended")
+                        help="One folder for figures and CSVs; default: figs/ and csv/ of the "
+                             "input's embedding-model folder")
     parser.add_argument("--suffix",
-                        help="Result folder suffix, e.g. 800_wildguardmix; size/variant is appended to output folder")
+                        help="Safety result folder suffix, e.g. 1800_wildguardmix")
     parser.add_argument("--dataset", help="Training dataset; inferred from CSV filename")
+    parser.add_argument("--embedder", default="bge-m3",
+                        help="Embedding-model folder used when no CSV is given (default: bge-m3)")
     parser.add_argument("--train-size", type=int,
                         help="Safety-run training size; defaults to CSV scored_on")
     parser.add_argument("--corr", choices=[*CORRELATIONS, "all"], default="all")
@@ -449,7 +453,7 @@ def main():
     csv_path = args.csv or args.csv_option
     if csv_path is None:
         dataset = (args.dataset or "wildguardmix").removesuffix("_train")
-        csv_path = args.results_dir / "diversity" / (
+        csv_path = args.results_dir / "diversity" / args.embedder / "csv" / (
             f"{dataset}_train_diversity_{args.train_size or 800}_1.0.csv"
         )
     try:
@@ -479,13 +483,16 @@ def main():
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
 
-    output_dir = args.output_dir or ROOT / "figs" / "diversity" / csv_path.stem
-    if args.suffix:
-        output_dir = output_dir.with_name(
-            f"{output_dir.name}_{figure_suffix(args.suffix, dataset)}"
-        )
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # results/diversity/<model>/csv/<CSV> -> figures in <model>/figs, CSVs in <model>/csv.
+    grouped = csv_path.parent.name == "csv"
+    embedder = csv_path.parent.parent.name if grouped else None
+    fig_dir = args.output_dir or (csv_path.parent.parent if grouped else csv_path.parent) / "figs"
+    csv_dir = args.output_dir or csv_path.parent
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    csv_dir.mkdir(parents=True, exist_ok=True)
     context_parts = [dataset]
+    if embedder:
+        context_parts.append(f"embeddings: {embedder}")
     if args.suffix:
         context_parts.append(f"results: {args.suffix}")
     if "scored_on" in diversity and diversity["scored_on"].nunique() == 1:
@@ -496,10 +503,9 @@ def main():
             context_parts.append(f"harmful fraction {fractions.iloc[0]:g}")
     context = ", ".join(context_parts)
     if args.all_plots:
-        for metric in METRICS:
+        for metric in FIGURE_METRICS:
             plot_diversity(diversity, metric, context,
-                           output_dir / f"diversity_{metric.rstrip('↑↓')}.png")
-    diversity.to_csv(output_dir / "diversity_scores.csv", index=False)
+                           fig_dir / f"{dataset}_diversity_{metric.rstrip('↑↓')}.png")
     if safety.empty:
         print(f"No {dataset} safety runs with training size {size}; saved diversity plots only. "
               "Check --suffix, --results-dir, or --train-size for the intended runs.")
@@ -512,8 +518,7 @@ def main():
           f"and {safety['abbr'].nunique()} subcategories")
     methods = list(CORRELATIONS) if args.corr == "all" else [args.corr]
     table = correlation_table(pairs, methods)
-    pairs.to_csv(output_dir / "diversity_safety_scores.csv", index=False)
-    table.to_csv(output_dir / "diversity_safety_correlations.csv", index=False)
+    table.to_csv(csv_dir / f"{dataset}_diversity_safety_correlations.csv", index=False)
     context += f"; safety training size {size}"
     for model, scores in pairs.groupby("model", sort=False):
         if model != "Average" and not args.all_plots:
@@ -521,12 +526,19 @@ def main():
         title = model if model != "Average" else f"Average across {safety['model'].nunique()} models"
         for group in GROUPS:
             plot_scatter(scores, table.loc[table["model"] == model], title, context,
-                         output_dir / f"{model.lower()}_{group}_diversity_vs_harmful.png", group)
-    if args.all_plots:
-        for metric in METRICS:
-            for method in plotted_methods(methods):
-                plot_correlations(table, metric, method, context,
-                                  output_dir / f"corr_{metric.rstrip('↑↓')}_vs_harmful_{method}.png")
+                         fig_dir / f"{dataset}_{model.lower()}_{group}_diversity_vs_harmful.png",
+                         group)
+    print(f"Saved figures in {fig_dir} and correlations in {csv_dir}")
+    if not args.all_plots:
+        return
+
+    pairs.to_csv(csv_dir / f"{dataset}_diversity_safety_scores.csv", index=False)
+    for metric in FIGURE_METRICS:
+        for method in plotted_methods(methods):
+            plot_correlations(
+                table, metric, method, context,
+                fig_dir / f"{dataset}_corr_{metric.rstrip('↑↓')}_vs_harmful_{method}.png",
+            )
     test_pairs, test_correlations = [], []
     for test in TEST_DATASETS:
         if safety_by_test[test].empty:
@@ -537,24 +549,22 @@ def main():
             continue
         average["included_in_correlation"] = ~average["abbr"].str.lower().isin(excluded_abbrs)
         correlations = correlation_table(average, methods)
-        if args.all_plots:
-            for group in GROUPS:
-                plot_scatter(
-                    average, correlations,
-                    f"Average across {safety_by_test[test]['model'].nunique()} models",
-                    context, output_dir / f"average_{group}_diversity_vs_harmful_{test}.png",
-                    group, test_dataset=test,
-                )
+        for group in GROUPS:
+            plot_scatter(
+                average, correlations,
+                f"Average across {safety_by_test[test]['model'].nunique()} models",
+                context, fig_dir / f"{dataset}_average_{group}_diversity_vs_harmful_{test}.png",
+                group, test_dataset=test,
+            )
         test_pairs.append(average.assign(test_dataset=test))
         test_correlations.append(correlations.assign(test_dataset=test))
     if test_pairs:
         pd.concat(test_pairs, ignore_index=True).to_csv(
-            output_dir / "average_diversity_safety_scores_by_test.csv", index=False,
+            csv_dir / f"{dataset}_average_diversity_safety_scores_by_test.csv", index=False,
         )
         pd.concat(test_correlations, ignore_index=True).to_csv(
-            output_dir / "average_diversity_safety_correlations_by_test.csv", index=False,
+            csv_dir / f"{dataset}_average_diversity_safety_correlations_by_test.csv", index=False,
         )
-    print(f"Saved score and correlation CSVs in {output_dir}")
 
 
 if __name__ == "__main__":

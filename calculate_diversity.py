@@ -10,14 +10,19 @@ All source-pool prompts, including benign data when used, are tagged with spaCy
 before sampling; tags are reused across groups and rounds. Each metric reports
 the mean across rounds, using the same sample for all metrics within a round.
 The CSV's sample_rounds column records the number of rounds for each row.
-Embeddings come from Qwen3-Embedding-0.6B and are reused across groups and
-datasets with a single model instance.
+Each embedding model in --embedding_models (default: BAAI/bge-m3 and
+Qwen/Qwen3-Embedding-0.6B, in float32) gets its own CSV under
+<output_dir>/<model name>/csv/, e.g. results/diversity/bge-m3/csv/, beside the
+figs/ folder that plot_bars_diversity.py writes. Metrics that use no
+embedding are computed once and repeated in every model's CSV. Each model is
+loaded once and its embeddings are reused across groups and datasets.
+Qwen3-Embedding-4B and -8B results (bfloat16) follow the same layout.
 
 Every metric column is prefixed with the aspect of diversity it measures:
   lexical_     lowercased words (spaCy tokens without punctuation or whitespace)
     hdd               HD-D of the pooled sample (McCarthy & Jarvis, 2010; 42 draws)
     distinct_2        unique / total word bigrams, pooled across examples
-  semantic_    unit-normalized Qwen embeddings of the raw prompts
+  semantic_    unit-normalized embeddings of the raw prompts
     vendi             Vendi Score with a cosine kernel
     distsum_cosine    DistSum / (N (N - 1)): mean 1 - cos(x_i, x_j) over pairs i != j
     cluster_inertia   k-means (--n_clusters) sum of squared distances to centroids
@@ -27,14 +32,14 @@ Every metric column is prefixed with the aspect of diversity it measures:
     distinct_1_4      mean over n = 1..4 of pooled unique / total POS n-grams
     ngram_vendi       Vendi Score with the n-gram kernel (n = 1..4), as in
                       vendi_score.text_utils.ngram_vendi_score
-    pos_vendi         Vendi Score, cosine kernel, of Qwen embeddings of POS strings
+    pos_vendi         Vendi Score, cosine kernel, of embeddings of POS strings
     knn_cosine        mean cosine distance to the k-th nearest POS embedding (--knn_k)
 Each metric column ends in ↑ if higher values mean more diversity, or ↓ if lower
 values do (Self-BLEU only).
 DistSum, cluster inertia, radius and KNN distance follow NovelSum (Yang et al.,
-2025), with DistSum averaged rather than summed over pairs. Qwen is trained on
-unit-normalized embeddings and their raw norms carry no trained meaning, so all
-metrics use unit vectors. Squared-L2 DistSum would then equal 2 * distsum_cosine,
+2025), with DistSum averaged rather than summed over pairs. The embedding models
+are trained on unit-normalized embeddings and their raw norms carry no trained
+meaning, so all metrics use unit vectors. Squared-L2 DistSum would then equal 2 * distsum_cosine,
 so it is not reported.
 Test splits remain available for prompt-only analysis, without training filters.
 
@@ -74,19 +79,27 @@ SUPPORTED = {
     'train': ('wildguardmix', 'aegis', 'gretel'),
     'test': tuple(safety_test_datasets),
 }
-EMBEDDING_MODEL_ID = 'Qwen/Qwen3-Embedding-0.6B'
+EMBEDDING_MODEL_IDS = ('BAAI/bge-m3', 'Qwen/Qwen3-Embedding-0.6B')
 HDD_DRAWS = 42
 POS_NGRAM_ORDERS = (1, 2, 3, 4)
+
+
+def embedding_name(model_id):
+    """Results folder for an embedding model, e.g. BAAI/bge-m3 -> bge-m3."""
+    return model_id.rstrip('/').split('/')[-1].lower()
 
 
 class PosEmbedder:
     """Embed POS sequences and raw prompts using one cached text encoder."""
 
-    def __init__(self, batch_size=32, device=None):
+    def __init__(self, batch_size=32, device=None, model_id=EMBEDDING_MODEL_IDS[0],
+                 dtype='float32'):
         if batch_size < 1:
             raise ValueError('Embedding batch size must be positive')
         self.batch_size = batch_size
         self.device = device
+        self.model_id = model_id
+        self.dtype = dtype
         self.model = None
         self.cache = {}
 
@@ -103,9 +116,17 @@ class PosEmbedder:
                 from sentence_transformers import SentenceTransformer
 
                 self.model = SentenceTransformer(
-                    EMBEDDING_MODEL_ID, device=self.device,
-                    tokenizer_kwargs={'padding_side': 'left'},
+                    self.model_id, device=self.device,
+                    model_kwargs={'torch_dtype': self.dtype},
                 )
+                # Last-token pooling (Qwen3) reads the final position, so pad on the
+                # left; CLS pooling (BGE-M3) reads the first and keeps right padding.
+                pooling = [module.get_config_dict() for module in self.model
+                           if type(module).__name__ == 'Pooling']
+                # sentence-transformers 5 stores one mode string; older versions use flags.
+                if pooling and (pooling[0].get('pooling_mode') == 'lasttoken'
+                                or pooling[0].get('pooling_mode_lasttoken')):
+                    self.model.tokenizer.padding_side = 'left'
             print(f'  Embedding {len(missing):,} unique texts...')
             embeddings = self.model.encode(
                 missing, batch_size=self.batch_size, prompt='',
@@ -307,13 +328,15 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
                               harmful_rate=1.0, benign_data_type='vanilla_benign',
                               max_length=4096, max_n=5, n_rounds=10, seed=42,
                               num_proc=4, split='train', abbrs=None, benign_pool=None,
-                              pos_embedder=None, n_clusters=12, knn_k=1):
+                              embedders=None, n_clusters=12, knn_k=1):
     """Score fixed-size alignment mixtures; skip groups with insufficient data.
 
     The overall row samples the union of eligible dataset rows, preserving their
     original order and counting multi-label rows once. Each subcategory row
     reproduces a separate align.py run. `count` is its eligible source-pool size;
     `scored_on` includes both source and WildJailbreak benign examples.
+    Returns one DataFrame per entry of `embedders` ({name: PosEmbedder}), under
+    the same name; metrics that use no embedding are computed once and shared.
     """
     if num_train < 2 or n_rounds < 1 or max_n < 1 or num_proc < 1:
         raise ValueError('num_train >= 2; n_rounds, max_n and num_proc >= 1 required')
@@ -397,52 +420,65 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
                                 for sample in rounds for prompt in sample))
     if any(not tags[prompt] for prompt in prompts):
         raise ValueError('A sampled prompt produced no POS tags; cannot score the full sample')
-    if pos_embedder is None:
-        pos_embedder = PosEmbedder()
-    pos_embeddings = pos_embedder.encode([tags[prompt] for prompt in prompts])
-    semantic_embeddings = pos_embedder.encode_texts(prompts)
+    if embedders is None:
+        embedders = {embedding_name(EMBEDDING_MODEL_IDS[0]): PosEmbedder()}
     prompt_indices = {prompt: i for i, prompt in enumerate(prompts)}
 
-    rows = []
+    # Metrics without embeddings are computed once and shared by every embedder.
+    shared = {}
     for abbr, (category, count, rounds) in samples.items():
         print(f'  Scoring {category}: {num_train} examples x {n_rounds} round(s)')
-        scores = []
-        for round_index, sample in enumerate(
-                tqdm(rounds, desc=f'{dataset_name} / {category}', unit='round')):
+        shared[abbr] = []
+        for sample in tqdm(rounds, desc=f'{dataset_name} / {category}', unit='round'):
             seqs = [tags[prompt] for prompt in sample]
             sample_words = [words[prompt] for prompt in sample]
-            # One index list selects both representations of the same examples,
-            # including repeats and any WildJailbreak benign examples.
-            sample_indices = [prompt_indices[prompt] for prompt in sample]
-            semantic = semantic_embeddings[sample_indices]
-            structural = pos_embeddings[sample_indices]
-            self_bleus = self_bleu(seqs, max_n)
-            scores.append({
+            shared[abbr].append({
                 'lexical_hdd': hdd(sample_words),
                 'lexical_distinct_2': distinct_n(sample_words, 2),
-                'semantic_vendi': vendi_score(semantic),
-                'semantic_distsum_cosine': distsum_cosine(semantic),
-                'semantic_cluster_inertia': cluster_inertia(
-                    semantic, n_clusters, seed + round_index),
-                'semantic_radius': radius(semantic),
                 **{f'structural_self_bleu_{n}': score
-                   for n, score in enumerate(self_bleus, start=1)},
+                   for n, score in enumerate(self_bleu(seqs, max_n), start=1)},
                 'structural_distinct_1_4': float(np.mean(
                     [distinct_n(seqs, n) for n in POS_NGRAM_ORDERS])),
                 'structural_ngram_vendi': ngram_vendi_score(seqs),
-                'structural_pos_vendi': vendi_score(structural),
-                'structural_knn_cosine': knn_cosine_distance(structural, knn_k),
             })
-        rows.append({
-            'subcategory': category, 'abbr': abbr, 'count': count,
-            'scored_on': num_train, 'subcategory_count': harmful_count,
-            'benign_count': benign_count, 'sample_rounds': len(rounds),
-            # Arrows mark whether higher (↑) or lower (↓) values mean more diversity.
-            **{metric + ('↓' if 'self_bleu' in metric else '↑'):
-               round(float(np.mean([score[metric] for score in scores])), 6)
-               for metric in scores[0]},
-        })
-    return pd.DataFrame(rows)
+
+    results = {}
+    for name, embedder in embedders.items():
+        print(f'  Embedding metrics with {embedder.model_id}')
+        pos_embeddings = embedder.encode([tags[prompt] for prompt in prompts])
+        semantic_embeddings = embedder.encode_texts(prompts)
+        rows = []
+        for abbr, (category, count, rounds) in samples.items():
+            scores = []
+            for round_index, sample in enumerate(rounds):
+                # One index list selects both representations of the same examples,
+                # including repeats and any WildJailbreak benign examples.
+                sample_indices = [prompt_indices[prompt] for prompt in sample]
+                semantic = semantic_embeddings[sample_indices]
+                structural = pos_embeddings[sample_indices]
+                common = shared[abbr][round_index]
+                scores.append({
+                    **{key: value for key, value in common.items() if key.startswith('lexical_')},
+                    'semantic_vendi': vendi_score(semantic),
+                    'semantic_distsum_cosine': distsum_cosine(semantic),
+                    'semantic_cluster_inertia': cluster_inertia(
+                        semantic, n_clusters, seed + round_index),
+                    'semantic_radius': radius(semantic),
+                    **{key: value for key, value in common.items() if key.startswith('structural_')},
+                    'structural_pos_vendi': vendi_score(structural),
+                    'structural_knn_cosine': knn_cosine_distance(structural, knn_k),
+                })
+            rows.append({
+                'subcategory': category, 'abbr': abbr, 'count': count,
+                'scored_on': num_train, 'subcategory_count': harmful_count,
+                'benign_count': benign_count, 'sample_rounds': len(rounds),
+                # Arrows mark whether higher (↑) or lower (↓) values mean more diversity.
+                **{metric + ('↓' if 'self_bleu' in metric else '↑'):
+                   round(float(np.mean([score[metric] for score in scores])), 6)
+                   for metric in scores[0]},
+            })
+        results[name] = pd.DataFrame(rows)
+    return results
 
 
 def parse_args():
@@ -469,8 +505,17 @@ def parse_args():
                         help='Sampling repetitions per metric; report their mean (default: 10)')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--num_proc', type=int, default=4)
+    parser.add_argument('--embedding_models', '--embedding_model', dest='embedding_models',
+                        nargs='+', default=list(EMBEDDING_MODEL_IDS),
+                        help='Sentence-transformers embedding models, one results folder each '
+                             f'(default: {" ".join(EMBEDDING_MODEL_IDS)})')
+    parser.add_argument('--embed_dtype', choices=('bfloat16', 'float16', 'float32'),
+                        default='float32',
+                        help='Embedding weights dtype; use bfloat16 for large models such as '
+                             'Qwen3-Embedding-8B (default: float32)')
     parser.add_argument('--embed_batch_size', type=int, default=32,
-                        help='Batch size for Qwen POS and prompt embeddings (default: 32)')
+                        help='Batch size for POS and prompt embeddings; lower it for large '
+                             'models (default: 32)')
     parser.add_argument('--embed_device', default=None,
                         help='Embedding device, e.g. cuda:0 or cpu (default: auto)')
     parser.add_argument('--output_dir', type=Path, default=Path('../results/diversity'))
@@ -485,6 +530,8 @@ def parse_args():
         parser.error('--embed_batch_size must be positive')
     if not 1 <= args.n_clusters <= args.num_train or not 1 <= args.knn_k < args.num_train:
         parser.error('--n_clusters must be in [1, num_train] and --knn_k in [1, num_train)')
+    if len({embedding_name(model) for model in args.embedding_models}) != len(args.embedding_models):
+        parser.error('--embedding_models must have distinct model names')
     return args
 
 
@@ -500,23 +547,31 @@ def main():
         raise ValueError('Use an instruct model with a chat template, as required by align.py')
     benign_count = args.num_train - int(args.num_train * args.harmful_rate + 0.5)
     benign_pool = load_wildjailbreak_benign(args.benign_data_type) if benign_count else None
-    pos_embedder = PosEmbedder(batch_size=args.embed_batch_size, device=args.embed_device)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    embedders = {
+        embedding_name(model_id): PosEmbedder(
+            batch_size=args.embed_batch_size, device=args.embed_device,
+            model_id=model_id, dtype=args.embed_dtype,
+        )
+        for model_id in args.embedding_models
+    }
     for dataset_name in args.datasets:
         print(f'Loading {dataset_name} ({args.split})')
-        result = compute_dataset_diversity(
+        results = compute_dataset_diversity(
             load_safety_dataset(dataset_name, args.split), dataset_name,
             tokenizer=tokenizer, num_train=args.num_train, harmful_rate=args.harmful_rate,
             benign_data_type=args.benign_data_type, max_length=args.max_length,
             max_n=args.max_n, n_rounds=args.n_rounds, seed=args.seed, num_proc=args.num_proc,
             split=args.split, abbrs=args.abbr, benign_pool=benign_pool,
-            pos_embedder=pos_embedder, n_clusters=args.n_clusters, knn_k=args.knn_k,
+            embedders=embedders, n_clusters=args.n_clusters, knn_k=args.knn_k,
         )
-        print('↑: higher = more diverse | ↓: lower = more diverse')
-        print(result.to_string(index=False))
-        output = args.output_dir / f'{dataset_name}_{args.split}_diversity_{args.num_train}_{args.harmful_rate}.csv'
-        result.to_csv(output, index=False)
-        print(f'Saved: {output}')
+        for name, result in results.items():
+            print(f'{name}: ↑ higher = more diverse | ↓ lower = more diverse')
+            print(result.to_string(index=False))
+            output = (args.output_dir / name / 'csv' /
+                      f'{dataset_name}_{args.split}_diversity_{args.num_train}_{args.harmful_rate}.csv')
+            output.parent.mkdir(parents=True, exist_ok=True)
+            result.to_csv(output, index=False)
+            print(f'Saved: {output}')
 
 
 if __name__ == '__main__':
