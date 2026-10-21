@@ -1,4 +1,4 @@
-"""Syntactic and semantic diversity of alignment samples, overall and per subcategory.
+"""Lexical, semantic and structural diversity of alignment samples, per subcategory.
 
 Training samples use exactly the filtering, tokenizer length limit, rounding,
 shuffle and seeds used by align.py. CLI samples total 600 examples by default.
@@ -6,17 +6,36 @@ Set --harmful_rate below 1 to include WildJailbreak benign examples. To reproduc
 an alignment run, use its model, num_train, harmful_rate, benign_data_type,
 max_length and seed. Additional rounds use seed + round (default: 10 rounds).
 
-All source-pool prompts, including benign data when used, are POS-tagged before
-sampling; tags are reused across groups and rounds. Each metric reports the
-mean across rounds, using the same sample for all metrics within a round.
+All source-pool prompts, including benign data when used, are tagged with spaCy
+before sampling; tags are reused across groups and rounds. Each metric reports
+the mean across rounds, using the same sample for all metrics within a round.
 The CSV's sample_rounds column records the number of rounds for each row.
-POS sequences (e.g. "DT NN VBZ") are embedded with Qwen3-Embedding-0.6B for
-the cosine-kernel Vendi Score (`vendi_score`). The same model embeds raw prompts
-for `semantic_vendi_score`, using exactly the same examples in every round.
-Embeddings are reused across groups and datasets with a single model instance.
-Self-BLEU is lower for more diverse syntax; POS n-gram diversity and both Vendi
-scores are higher. Vendi Score is the effective number of distinct embedded
-structures or meanings, respectively.
+Embeddings come from Qwen3-Embedding-0.6B and are reused across groups and
+datasets with a single model instance.
+
+Every metric column is prefixed with the aspect of diversity it measures:
+  lexical_     lowercased words (spaCy tokens without punctuation or whitespace)
+    hdd               HD-D of the pooled sample (McCarthy & Jarvis, 2010; 42 draws)
+    distinct_2        unique / total word bigrams, pooled across examples
+  semantic_    unit-normalized Qwen embeddings of the raw prompts
+    vendi             Vendi Score with a cosine kernel
+    distsum_cosine    DistSum / (N (N - 1)): mean 1 - cos(x_i, x_j) over pairs i != j
+    cluster_inertia   k-means (--n_clusters) sum of squared distances to centroids
+    radius            geometric mean of per-dimension standard deviations
+  structural_  spaCy fine-grained POS tag sequences (e.g. "DT NN VBZ")
+    self_bleu_1..N    Self-BLEU-n with uniform 1..n-gram weights (N = --max_n)
+    distinct_1_4      mean over n = 1..4 of pooled unique / total POS n-grams
+    ngram_vendi       Vendi Score with the n-gram kernel (n = 1..4), as in
+                      vendi_score.text_utils.ngram_vendi_score
+    pos_vendi         Vendi Score, cosine kernel, of Qwen embeddings of POS strings
+    knn_cosine        mean cosine distance to the k-th nearest POS embedding (--knn_k)
+Each metric column ends in ↑ if higher values mean more diversity, or ↓ if lower
+values do (Self-BLEU only).
+DistSum, cluster inertia, radius and KNN distance follow NovelSum (Yang et al.,
+2025), with DistSum averaged rather than summed over pairs. Qwen is trained on
+unit-normalized embeddings and their raw norms carry no trained meaning, so all
+metrics use unit vectors. Squared-L2 DistSum would then equal 2 * distsum_cosine,
+so it is not reported.
 Test splits remain available for prompt-only analysis, without training filters.
 
 Examples:
@@ -36,6 +55,10 @@ import nltk
 import numpy as np
 import pandas as pd
 from nltk.translate.bleu_score import brevity_penalty
+from scipy import sparse
+from scipy.stats import hypergeom
+from sklearn import preprocessing
+from sklearn.cluster import KMeans
 from tqdm.auto import tqdm
 
 from helper import (
@@ -52,6 +75,8 @@ SUPPORTED = {
     'test': tuple(safety_test_datasets),
 }
 EMBEDDING_MODEL_ID = 'Qwen/Qwen3-Embedding-0.6B'
+HDD_DRAWS = 42
+POS_NGRAM_ORDERS = (1, 2, 3, 4)
 
 
 class PosEmbedder:
@@ -116,35 +141,106 @@ def vendi_score(embeddings):
     return float(np.exp(-np.sum(eigenvalues * np.log(eigenvalues))))
 
 
-def pos_tag_corpus(texts, num_proc=4, batch_size=1000):
+def ngram_vendi_score(seqs, ns=POS_NGRAM_ORDERS):
+    """n-gram Vendi Score, as in vendi_score.text_utils.ngram_vendi_score.
+
+    The kernel averages, over n, cosine similarities of n-gram count vectors. As
+    in the reference, a sequence shorter than n has a zero vector for that n, and
+    the eigenvalues of K / N are not renormalized.
+    """
+    kernel = np.zeros((len(seqs), len(seqs)))
+    for n in ns:
+        vocabulary, rows, columns = {}, [], []
+        for row, seq in enumerate(seqs):
+            for gram in nltk.ngrams(seq, n):
+                rows.append(row)
+                columns.append(vocabulary.setdefault(gram, len(vocabulary)))
+        # Repeated (row, column) entries are summed into n-gram counts.
+        counts = sparse.csr_matrix((np.ones(len(rows)), (rows, columns)),
+                                   shape=(len(seqs), max(1, len(vocabulary))))
+        counts = preprocessing.normalize(counts)
+        kernel += (counts @ counts.T).toarray()
+    eigenvalues = np.linalg.eigvalsh(kernel / (len(ns) * len(seqs)))
+    eigenvalues = eigenvalues[eigenvalues > 0]
+    return float(np.exp(-np.sum(eigenvalues * np.log(eigenvalues))))
+
+
+def distsum_cosine(embeddings):
+    """NovelSum's DistSum over N (N - 1) ordered pairs i != j: mean 1 - cos(x_i, x_j)."""
+    embeddings = preprocessing.normalize(np.asarray(embeddings, dtype=np.float64))
+    n = len(embeddings)
+    total = embeddings.sum(axis=0)
+    # Summing cos over all pairs gives ||sum_i x_i||^2; the n self-pairs add 1 each.
+    return float(1 - (total @ total - n) / (n * (n - 1)))
+
+
+def cluster_inertia(embeddings, n_clusters, seed):
+    """k-means sum of squared distances to the nearest centroid (best of 10 inits)."""
+    kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=seed)
+    return float(kmeans.fit(np.asarray(embeddings, dtype=np.float64)).inertia_)
+
+
+def radius(embeddings):
+    """Geometric mean of per-dimension standard deviations (Lai et al., 2020)."""
+    std = np.asarray(embeddings, dtype=np.float64).std(axis=0)
+    return 0.0 if (std == 0).any() else float(np.exp(np.log(std).mean()))
+
+
+def knn_cosine_distance(embeddings, k=1):
+    """Mean cosine distance from each example to its k-th nearest other example."""
+    embeddings = preprocessing.normalize(np.asarray(embeddings, dtype=np.float64))
+    if not 1 <= k < len(embeddings):
+        raise ValueError('KNN distance requires 1 <= k < number of examples')
+    distances = 1 - embeddings @ embeddings.T
+    np.fill_diagonal(distances, np.inf)
+    # Identical examples are each other's neighbors at distance zero.
+    return float(np.partition(distances, k - 1, axis=1)[:, k - 1].clip(min=0).mean())
+
+
+def tag_corpus(texts, num_proc=4, batch_size=1000):
+    """Return (POS tags, lowercased words) per text; words drop punctuation and spaces."""
     import spacy
 
     nlp = spacy.load('en_core_web_sm', enable=['tok2vec', 'tagger'])
-    return [[token.tag_ for token in doc]
+    return [([token.tag_ for token in doc],
+             [token.lower_ for token in doc if not (token.is_punct or token.is_space)])
             for doc in nlp.pipe(texts, n_process=num_proc, batch_size=batch_size)]
 
 
-def pos_ngram_diversity(pos_seqs, max_n=4):
-    """Sum of unique/total POS n-gram ratios, without storing duplicate n-grams."""
-    score = 0.0
-    for n in range(1, max_n + 1):
-        total = sum(max(0, len(seq) - n + 1) for seq in pos_seqs)
-        if total:
-            unique = {gram for seq in pos_seqs for gram in nltk.ngrams(seq, n)}
-            score += len(unique) / total
-    return score
+def hdd(seqs, draws=HDD_DRAWS):
+    """HD-D of the pooled tokens, as in lexicalrichness.LexicalRichness.hdd.
 
-
-def syntactic_self_bleu(pos_seqs, max_n=4):
-    """Exact NLTK Self-BLEU with method1 smoothing, caching reference counts.
-
-    For each n-gram, the two largest per-sentence counts let us exclude the
-    hypothesis without rebuilding counts for every other sentence. Tied maxima
-    are retained, so identical sentences still count as each other's references.
+    Each type contributes its probability of appearing in `draws` tokens drawn
+    without replacement, divided by `draws`.
     """
-    seqs = [seq for seq in pos_seqs if seq]
-    if len(seqs) < 2:
+    counts = Counter(token for seq in seqs for token in seq)
+    total = sum(counts.values())
+    if total < draws:
         return math.nan
+    frequencies = np.fromiter(counts.values(), dtype=np.int64, count=len(counts))
+    return float(np.sum(1 - hypergeom.pmf(0, total, frequencies, draws)) / draws)
+
+
+def distinct_n(seqs, n):
+    """Distinct-n across examples: unique / total n-grams in the pooled sample."""
+    total = sum(max(0, len(seq) - n + 1) for seq in seqs)
+    if not total:
+        return math.nan
+    return len({gram for seq in seqs for gram in nltk.ngrams(seq, n)}) / total
+
+
+def self_bleu(seqs, max_n=5):
+    """Exact NLTK Self-BLEU-1..max_n with method1 smoothing, caching reference counts.
+
+    Entry k - 1 is cumulative BLEU-k, i.e. sentence_bleu with weights (1 / k,) * k
+    against all other sequences. For each n-gram, the two largest per-sentence
+    counts let us exclude the hypothesis without rebuilding counts for every
+    other sentence. Tied maxima are retained, so identical sentences still count
+    as each other's references.
+    """
+    seqs = [seq for seq in seqs if seq]
+    if len(seqs) < 2:
+        return [math.nan] * max_n
     counts = [[Counter(nltk.ngrams(seq, n)) for n in range(1, max_n + 1)]
               for seq in seqs]
     maxima = [{} for _ in range(max_n)]
@@ -157,7 +253,7 @@ def syntactic_self_bleu(pos_seqs, max_n=4):
     lengths = Counter(map(len, seqs))
     scores = []
     for seq, sentence_counts in zip(seqs, counts):
-        precisions = []
+        log_precisions = []
         for n, grams in enumerate(sentence_counts):
             matches = 0
             for gram, count in grams.items():
@@ -166,18 +262,18 @@ def syntactic_self_bleu(pos_seqs, max_n=4):
                 matches += min(count, reference_count)
             if n == 0 and matches == 0:
                 break  # NLTK returns zero when no unigrams match.
-            precisions.append((matches or 0.1) / max(1, sum(grams.values())))
-        if len(precisions) != max_n:
-            scores.append(0.0)
+            log_precisions.append(math.log((matches or 0.1) / max(1, sum(grams.values()))))
+        if not log_precisions:
+            scores.append([0.0] * max_n)
             continue
         reference_length = min(
             (length for length, count in lengths.items() if count > (length == len(seq))),
             key=lambda length: (abs(length - len(seq)), length),
         )
-        scores.append(brevity_penalty(reference_length, len(seq)) * math.exp(
-            math.fsum(math.log(precision) / max_n for precision in precisions)
-        ))
-    return sum(scores) / len(scores)
+        penalty = brevity_penalty(reference_length, len(seq))
+        scores.append([penalty * math.exp(math.fsum(log_precisions[:k]) / k)
+                       for k in range(1, max_n + 1)])
+    return [sum(column) / len(scores) for column in zip(*scores)]
 
 
 def split_subcategories(value):
@@ -209,9 +305,9 @@ def category_names(df, dataset_name):
 
 def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
                               harmful_rate=1.0, benign_data_type='vanilla_benign',
-                              max_length=4096, max_n=4, n_rounds=10, seed=42,
+                              max_length=4096, max_n=5, n_rounds=10, seed=42,
                               num_proc=4, split='train', abbrs=None, benign_pool=None,
-                              pos_embedder=None):
+                              pos_embedder=None, n_clusters=12, knn_k=1):
     """Score fixed-size alignment mixtures; skip groups with insufficient data.
 
     The overall row samples the union of eligible dataset rows, preserving their
@@ -223,6 +319,8 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
         raise ValueError('num_train >= 2; n_rounds, max_n and num_proc >= 1 required')
     if not 0 <= harmful_rate <= 1 or max_length < 1:
         raise ValueError('harmful_rate must be in [0, 1] and max_length positive')
+    if not 1 <= n_clusters <= num_train or not 1 <= knn_k < num_train:
+        raise ValueError('n_clusters must be in [1, num_train] and knn_k in [1, num_train)')
 
     names = category_names(df, dataset_name)
     if abbrs:
@@ -265,7 +363,10 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
         source_prompts.extend(benign_pool['prompt'].tolist())
     source_prompts = list(dict.fromkeys(source_prompts))
     print(f'  POS-tagging {len(source_prompts):,} unique source-pool prompts...')
-    tags = dict(zip(source_prompts, pos_tag_corpus(source_prompts, num_proc=num_proc)))
+    tags, words = {}, {}
+    for prompt, (prompt_tags, prompt_words) in zip(
+            source_prompts, tag_corpus(source_prompts, num_proc=num_proc)):
+        tags[prompt], words[prompt] = prompt_tags, prompt_words
 
     samples = {}
     for abbr, category, pool in groups:
@@ -298,7 +399,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
         raise ValueError('A sampled prompt produced no POS tags; cannot score the full sample')
     if pos_embedder is None:
         pos_embedder = PosEmbedder()
-    embeddings = pos_embedder.encode([tags[prompt] for prompt in prompts])
+    pos_embeddings = pos_embedder.encode([tags[prompt] for prompt in prompts])
     semantic_embeddings = pos_embedder.encode_texts(prompts)
     prompt_indices = {prompt: i for i, prompt in enumerate(prompts)}
 
@@ -306,23 +407,40 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
     for abbr, (category, count, rounds) in samples.items():
         print(f'  Scoring {category}: {num_train} examples x {n_rounds} round(s)')
         scores = []
-        for sample in tqdm(rounds, desc=f'{dataset_name} / {category}', unit='round'):
+        for round_index, sample in enumerate(
+                tqdm(rounds, desc=f'{dataset_name} / {category}', unit='round')):
             seqs = [tags[prompt] for prompt in sample]
+            sample_words = [words[prompt] for prompt in sample]
             # One index list selects both representations of the same examples,
             # including repeats and any WildJailbreak benign examples.
             sample_indices = [prompt_indices[prompt] for prompt in sample]
-            scores.append((syntactic_self_bleu(seqs, max_n),
-                           pos_ngram_diversity(seqs, max_n),
-                           vendi_score(embeddings[sample_indices]),
-                           vendi_score(semantic_embeddings[sample_indices])))
+            semantic = semantic_embeddings[sample_indices]
+            structural = pos_embeddings[sample_indices]
+            self_bleus = self_bleu(seqs, max_n)
+            scores.append({
+                'lexical_hdd': hdd(sample_words),
+                'lexical_distinct_2': distinct_n(sample_words, 2),
+                'semantic_vendi': vendi_score(semantic),
+                'semantic_distsum_cosine': distsum_cosine(semantic),
+                'semantic_cluster_inertia': cluster_inertia(
+                    semantic, n_clusters, seed + round_index),
+                'semantic_radius': radius(semantic),
+                **{f'structural_self_bleu_{n}': score
+                   for n, score in enumerate(self_bleus, start=1)},
+                'structural_distinct_1_4': float(np.mean(
+                    [distinct_n(seqs, n) for n in POS_NGRAM_ORDERS])),
+                'structural_ngram_vendi': ngram_vendi_score(seqs),
+                'structural_pos_vendi': vendi_score(structural),
+                'structural_knn_cosine': knn_cosine_distance(structural, knn_k),
+            })
         rows.append({
             'subcategory': category, 'abbr': abbr, 'count': count,
             'scored_on': num_train, 'subcategory_count': harmful_count,
             'benign_count': benign_count, 'sample_rounds': len(rounds),
-            'self_bleu': round(sum(score[0] for score in scores) / n_rounds, 4),
-            'pos_ngram_diversity': round(sum(score[1] for score in scores) / n_rounds, 4),
-            'vendi_score': round(sum(score[2] for score in scores) / n_rounds, 4),
-            'semantic_vendi_score': round(sum(score[3] for score in scores) / n_rounds, 4),
+            # Arrows mark whether higher (↑) or lower (↓) values mean more diversity.
+            **{metric + ('↓' if 'self_bleu' in metric else '↑'):
+               round(float(np.mean([score[metric] for score in scores])), 6)
+               for metric in scores[0]},
         })
     return pd.DataFrame(rows)
 
@@ -340,7 +458,13 @@ def parse_args():
     parser.add_argument('--benign_data_type', choices=BENIGN_DATA_TYPES, default='vanilla_benign')
     parser.add_argument('--model', default='qwen2.5-ins', help='Tokenizer model, as in align.py')
     parser.add_argument('--max_length', type=int, default=4096)
-    parser.add_argument('--max_n', type=int, default=4)
+    parser.add_argument('--max_n', type=int, default=5,
+                        help='Report structural Self-BLEU-1 through Self-BLEU-max_n (default: 5)')
+    parser.add_argument('--n_clusters', type=int, default=12,
+                        help='k-means clusters for semantic cluster inertia; 12 keeps '
+                             "NovelSum's 50 examples per cluster at 600 examples (default: 12)")
+    parser.add_argument('--knn_k', type=int, default=1,
+                        help='Neighbor rank for structural KNN cosine distance (default: 1)')
     parser.add_argument('--n_rounds', type=int, default=10,
                         help='Sampling repetitions per metric; report their mean (default: 10)')
     parser.add_argument('--seed', type=int, default=42)
@@ -359,6 +483,8 @@ def parse_args():
         parser.error('--harmful_rate must be between 0 and 1')
     if args.embed_batch_size < 1:
         parser.error('--embed_batch_size must be positive')
+    if not 1 <= args.n_clusters <= args.num_train or not 1 <= args.knn_k < args.num_train:
+        parser.error('--n_clusters must be in [1, num_train] and --knn_k in [1, num_train)')
     return args
 
 
@@ -384,10 +510,9 @@ def main():
             benign_data_type=args.benign_data_type, max_length=args.max_length,
             max_n=args.max_n, n_rounds=args.n_rounds, seed=args.seed, num_proc=args.num_proc,
             split=args.split, abbrs=args.abbr, benign_pool=benign_pool,
-            pos_embedder=pos_embedder,
+            pos_embedder=pos_embedder, n_clusters=args.n_clusters, knn_k=args.knn_k,
         )
-        print('self_bleu: LOWER = more diverse | '
-              'pos_ngram_diversity, vendi_score, semantic_vendi_score: HIGHER = more diverse')
+        print('↑: higher = more diverse | ↓: lower = more diverse')
         print(result.to_string(index=False))
         output = args.output_dir / f'{dataset_name}_{args.split}_diversity_{args.num_train}_{args.harmful_rate}.csv'
         result.to_csv(output, index=False)
