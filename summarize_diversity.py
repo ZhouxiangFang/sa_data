@@ -4,10 +4,9 @@ Each value is the mean of the Pearson and Spearman coefficients between a
 diversity metric and the model-average harmful score, read from
 results/diversity/<model>/csv/<dataset>_diversity_safety_correlations.csv
 (written by plot_bars_diversity.py). Rows are grouped structural, lexical, then
-semantic, and sorted within each group by the mean over embedding models, most
-negative (more diversity, less harm) first. In each group, the lowest value of
-every model column is marked **bold** (Markdown). POS Self-BLEU-1 is left out,
-as in the figures.
+semantic, and sorted alphabetically within each group. In each group, the
+lowest (most negative: more diversity, less harm) value of every model column is
+marked **bold** (Markdown). POS Self-BLEU-1 is left out, as in the figures.
 
 Example:
     python sa_data/summarize_diversity.py --datasets wildguardmix aegis gretel
@@ -38,11 +37,12 @@ def correlation_table(diversity_dir, dataset):
 
 
 def ranked(table):
-    """Order the groups, sort each by the mean over models, and bold each column's best."""
+    """Order the groups, sort each alphabetically, and bold each column's best."""
     blocks = []
     for group in GROUP_ORDER:
-        block = table[table.index.str.startswith(f'{group}_')]
-        block = block.loc[block.mean(axis=1).sort_values(na_position='last').index]
+        # Natural order, so knn_cosine_10 follows knn_cosine_5.
+        block = table[table.index.str.startswith(f'{group}_')].sort_index(
+            key=lambda index: index.str.replace(r'\d+', lambda m: m[0].zfill(3), regex=True))
         formatted = block.map(lambda value: f'{value:.3f}' if pd.notna(value) else '')
         for model in block:
             if block[model].notna().any():

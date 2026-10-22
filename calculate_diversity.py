@@ -21,7 +21,7 @@ Qwen3-Embedding-4B and -8B results (bfloat16) follow the same layout.
 Every metric column is prefixed with the aspect of diversity it measures:
   lexical_     lowercased words (spaCy tokens without punctuation or whitespace)
     hdd               HD-D of the pooled sample (McCarthy & Jarvis, 2010; 42 draws)
-    distinct_2        unique / total word bigrams, pooled across examples
+    distinct_2..4     unique / total word n-grams (n = 2, 3, 4), pooled across examples
   semantic_    unit-normalized embeddings of the raw prompts
     vendi             Vendi Score with a cosine kernel
     distsum_cosine    DistSum / (N (N - 1)): mean 1 - cos(x_i, x_j) over pairs i != j
@@ -33,11 +33,13 @@ Every metric column is prefixed with the aspect of diversity it measures:
     ngram_vendi       Vendi Score with the n-gram kernel (n = 1..4), as in
                       vendi_score.text_utils.ngram_vendi_score
     pos_vendi         Vendi Score, cosine kernel, of embeddings of POS strings
-    knn_cosine        mean cosine distance to the k-th nearest POS embedding (--knn_k)
+    knn_cosine_1..10  mean cosine distance to the k nearest POS embeddings, one column
+                      per k in --knn_ks (default: 1, 3, 5, 10)
 Each metric column ends in ↑ if higher values mean more diversity, or ↓ if lower
 values do (Self-BLEU only).
 DistSum, cluster inertia, radius and KNN distance follow NovelSum (Yang et al.,
-2025), with DistSum averaged rather than summed over pairs. The embedding models
+2025), with DistSum averaged rather than summed over pairs and KNN distance averaged
+over the k nearest neighbors (NovelSum's 1-NN distance at k = 1). The embedding models
 are trained on unit-normalized embeddings and their raw norms carry no trained
 meaning, so all metrics use unit vectors. Squared-L2 DistSum would then equal 2 * distsum_cosine,
 so it is not reported.
@@ -81,7 +83,9 @@ SUPPORTED = {
 }
 EMBEDDING_MODEL_IDS = ('BAAI/bge-m3', 'Qwen/Qwen3-Embedding-0.6B')
 HDD_DRAWS = 42
+LEXICAL_DISTINCT_ORDERS = (2, 3, 4)
 POS_NGRAM_ORDERS = (1, 2, 3, 4)
+KNN_KS = (1, 3, 5, 10)
 
 
 def embedding_name(model_id):
@@ -208,14 +212,15 @@ def radius(embeddings):
 
 
 def knn_cosine_distance(embeddings, k=1):
-    """Mean cosine distance from each example to its k-th nearest other example."""
+    """Mean cosine distance from each example to its k nearest other examples."""
     embeddings = preprocessing.normalize(np.asarray(embeddings, dtype=np.float64))
     if not 1 <= k < len(embeddings):
         raise ValueError('KNN distance requires 1 <= k < number of examples')
     distances = 1 - embeddings @ embeddings.T
     np.fill_diagonal(distances, np.inf)
-    # Identical examples are each other's neighbors at distance zero.
-    return float(np.partition(distances, k - 1, axis=1)[:, k - 1].clip(min=0).mean())
+    # Identical examples are each other's neighbors at distance zero. After the
+    # partition, the first k entries of each row are its k smallest distances.
+    return float(np.partition(distances, k - 1, axis=1)[:, :k].clip(min=0).mean())
 
 
 def tag_corpus(texts, num_proc=4, batch_size=1000):
@@ -328,7 +333,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
                               harmful_rate=1.0, benign_data_type='vanilla_benign',
                               max_length=4096, max_n=5, n_rounds=10, seed=42,
                               num_proc=4, split='train', abbrs=None, benign_pool=None,
-                              embedders=None, n_clusters=12, knn_k=1):
+                              embedders=None, n_clusters=12, knn_ks=KNN_KS):
     """Score fixed-size alignment mixtures; skip groups with insufficient data.
 
     The overall row samples the union of eligible dataset rows, preserving their
@@ -342,8 +347,8 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
         raise ValueError('num_train >= 2; n_rounds, max_n and num_proc >= 1 required')
     if not 0 <= harmful_rate <= 1 or max_length < 1:
         raise ValueError('harmful_rate must be in [0, 1] and max_length positive')
-    if not 1 <= n_clusters <= num_train or not 1 <= knn_k < num_train:
-        raise ValueError('n_clusters must be in [1, num_train] and knn_k in [1, num_train)')
+    if not 1 <= n_clusters <= num_train or not all(1 <= k < num_train for k in knn_ks):
+        raise ValueError('n_clusters must be in [1, num_train] and each knn_ks in [1, num_train)')
 
     names = category_names(df, dataset_name)
     if abbrs:
@@ -434,7 +439,8 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
             sample_words = [words[prompt] for prompt in sample]
             shared[abbr].append({
                 'lexical_hdd': hdd(sample_words),
-                'lexical_distinct_2': distinct_n(sample_words, 2),
+                **{f'lexical_distinct_{n}': distinct_n(sample_words, n)
+                   for n in LEXICAL_DISTINCT_ORDERS},
                 **{f'structural_self_bleu_{n}': score
                    for n, score in enumerate(self_bleu(seqs, max_n), start=1)},
                 'structural_distinct_1_4': float(np.mean(
@@ -466,7 +472,8 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
                     'semantic_radius': radius(semantic),
                     **{key: value for key, value in common.items() if key.startswith('structural_')},
                     'structural_pos_vendi': vendi_score(structural),
-                    'structural_knn_cosine': knn_cosine_distance(structural, knn_k),
+                    **{f'structural_knn_cosine_{k}': knn_cosine_distance(structural, k)
+                       for k in knn_ks},
                 })
             rows.append({
                 'subcategory': category, 'abbr': abbr, 'count': count,
@@ -499,8 +506,10 @@ def parse_args():
     parser.add_argument('--n_clusters', type=int, default=12,
                         help='k-means clusters for semantic cluster inertia; 12 keeps '
                              "NovelSum's 50 examples per cluster at 600 examples (default: 12)")
-    parser.add_argument('--knn_k', type=int, default=1,
-                        help='Neighbor rank for structural KNN cosine distance (default: 1)')
+    parser.add_argument('--knn_ks', '--knn_k', dest='knn_ks', type=int, nargs='+',
+                        default=list(KNN_KS),
+                        help='Neighbor counts for structural KNN cosine distance, one column '
+                             f'each (default: {" ".join(map(str, KNN_KS))})')
     parser.add_argument('--n_rounds', type=int, default=10,
                         help='Sampling repetitions per metric; report their mean (default: 10)')
     parser.add_argument('--seed', type=int, default=42)
@@ -528,8 +537,9 @@ def parse_args():
         parser.error('--harmful_rate must be between 0 and 1')
     if args.embed_batch_size < 1:
         parser.error('--embed_batch_size must be positive')
-    if not 1 <= args.n_clusters <= args.num_train or not 1 <= args.knn_k < args.num_train:
-        parser.error('--n_clusters must be in [1, num_train] and --knn_k in [1, num_train)')
+    if (not 1 <= args.n_clusters <= args.num_train
+            or not all(1 <= k < args.num_train for k in args.knn_ks)):
+        parser.error('--n_clusters must be in [1, num_train] and each --knn_ks in [1, num_train)')
     if len({embedding_name(model) for model in args.embedding_models}) != len(args.embedding_models):
         parser.error('--embedding_models must have distinct model names')
     return args
@@ -562,7 +572,7 @@ def main():
             benign_data_type=args.benign_data_type, max_length=args.max_length,
             max_n=args.max_n, n_rounds=args.n_rounds, seed=args.seed, num_proc=args.num_proc,
             split=args.split, abbrs=args.abbr, benign_pool=benign_pool,
-            embedders=embedders, n_clusters=args.n_clusters, knn_k=args.knn_k,
+            embedders=embedders, n_clusters=args.n_clusters, knn_ks=args.knn_ks,
         )
         for name, result in results.items():
             print(f'{name}: ↑ higher = more diverse | ↓ lower = more diverse')

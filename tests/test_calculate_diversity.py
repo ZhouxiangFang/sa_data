@@ -43,6 +43,11 @@ class MetricTests(unittest.TestCase):
         seqs = [['a', 'b', 'c'], ['a', 'b', 'd'], ['e']]
         self.assertEqual(cd.distinct_n(seqs, 1), 5 / 7)
         self.assertEqual(cd.distinct_n(seqs, 2), 3 / 4)
+        # Sequences shorter than n contribute no n-grams to either count.
+        seqs = [['a', 'b', 'c', 'd'], ['a', 'b', 'c', 'd', 'e'], ['e']]
+        self.assertEqual(cd.distinct_n(seqs, 3), 3 / 5)
+        self.assertEqual(cd.distinct_n(seqs, 4), 2 / 3)
+        self.assertTrue(math.isnan(cd.distinct_n([['a', 'b', 'c']], 4)))
 
     def test_ngram_vendi_matches_dense_kernel(self):
         seqs = random_seqs(random.Random(1))
@@ -69,9 +74,9 @@ class MetricTests(unittest.TestCase):
                                np.mean([1 - unit[i] @ unit[j] for i, j in pairs]), places=12)
         distances = 1 - unit @ unit.T
         np.fill_diagonal(distances, np.inf)
-        for k in (1, 3):
+        for k in (1, 3, 10):
             self.assertAlmostEqual(cd.knn_cosine_distance(x, k),
-                                   np.sort(distances, axis=1)[:, k - 1].mean(), places=12)
+                                   np.sort(distances, axis=1)[:, :k].mean(), places=12)
         self.assertAlmostEqual(cd.radius(x), np.prod(x.std(axis=0)) ** (1 / 8), places=12)
         self.assertAlmostEqual(cd.cluster_inertia(x, 1, 0),
                                np.sum((x - x.mean(axis=0)) ** 2), places=8)

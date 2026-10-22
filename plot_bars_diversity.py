@@ -68,7 +68,7 @@ GROUPS = {
 # Column: display label. The ↑/↓ suffix marks the direction of more diversity.
 LABELS = {
     "lexical_hdd↑": "HD-D",
-    "lexical_distinct_2↑": "Distinct-2",
+    **{f"lexical_distinct_{n}↑": f"Distinct-{n}" for n in (2, 3, 4)},
     "semantic_vendi↑": "Vendi score",
     "semantic_distsum_cosine↑": "DistSum (cosine)",
     "semantic_cluster_inertia↑": "Cluster inertia",
@@ -77,7 +77,7 @@ LABELS = {
     "structural_distinct_1_4↑": "POS Distinct-1–4 avg",
     "structural_ngram_vendi↑": "POS n-gram Vendi",
     "structural_pos_vendi↑": "POS-embedding Vendi",
-    "structural_knn_cosine↑": "POS KNN cosine distance",
+    **{f"structural_knn_cosine_{k}↑": f"POS KNN-{k} cosine distance" for k in (1, 3, 5, 10)},
 }
 # Column: (display label, direction of increasing diversity, color).
 METRICS = {
@@ -87,7 +87,8 @@ METRICS = {
 # Self-BLEU-1 saturates near 0.999 on POS tags; CSVs keep it, figures leave it out.
 FIGURE_METRICS = [metric for metric in METRICS if metric != "structural_self_bleu_1↓"]
 # Bounded ratios that bar charts display as percentages.
-PERCENT_METRICS = {"lexical_hdd↑", "lexical_distinct_2↑", "structural_distinct_1_4↑",
+PERCENT_METRICS = {"lexical_hdd↑", "structural_distinct_1_4↑",
+                   *(f"lexical_distinct_{n}↑" for n in (2, 3, 4)),
                    *(f"structural_self_bleu_{n}↓" for n in range(1, 6))}
 GRID_COLUMNS = 4
 # Background of the two metrics with the lowest mean correlation in a figure.
@@ -379,7 +380,7 @@ def plot_scatter(scores, correlations, title, context, path, group, test_dataset
     coverage += f"; shaded = two lowest mean {methods} correlations, bold = lowest"
     if test_dataset != "Avg":
         context += f"; test: {TEST_DATASETS[test_dataset]}"
-    # Wrap the run details so narrow figures (e.g. two lexical panels) keep them visible.
+    # Wrap the run details so narrow figures keep them visible.
     details = f"{textwrap.fill(context, width=int(width * 7))}\n{coverage}"
     fig.suptitle(f"{title}: {name.lower()} diversity vs. post-training harmful score\n{details}",
                  fontsize=16)
