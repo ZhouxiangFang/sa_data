@@ -130,8 +130,12 @@ def metric_columns(overrefusal=False):
     return "is_unsafe", "harmful", "harmful_score_pct"
 
 
-def overall_results(datasets, overrefusal=False):
-    """Report valid-label rates and their unweighted mean across datasets."""
+def overall_results(datasets, overrefusal=False, previous=None):
+    """Report valid-label rates and their unweighted mean across datasets.
+
+    Rows of `previous` (an earlier table from this function) for datasets not
+    evaluated here are kept ahead of the new rows and included in the mean.
+    """
     label_column, count_column, score_column = metric_columns(overrefusal)
     rows = []
     for name, dataset in datasets.items():
@@ -148,6 +152,10 @@ def overall_results(datasets, overrefusal=False):
         )
 
     results = pd.DataFrame(rows)
+    if previous is not None:
+        kept = previous[~previous["dataset"].isin([*datasets, "Avg"])]
+        kept = kept.astype({score_column: float})
+        results = pd.concat([kept, results], ignore_index=True)
     average = pd.DataFrame(
         [
             {
@@ -208,7 +216,7 @@ def subcategory_results(name, dataset, overrefusal=False):
     return results
 
 
-def save_results(datasets, output_dir, model_name):
+def save_results(datasets, output_dir, model_name, merge=False):
     os.makedirs(output_dir, exist_ok=True)
     width = shutil.get_terminal_size().columns
     print(f"\n{'=' * width}\nRESULTS\n{'=' * width}")
@@ -220,12 +228,16 @@ def save_results(datasets, output_dir, model_name):
         }
         if not selected:
             continue
-        overall = overall_results(selected, overrefusal=overrefusal)
         title = "Overrefusal" if overrefusal else "Harmful"
         suffix = "overrefusal" if overrefusal else "overall"
+        overall_path = os.path.join(output_dir, f"{model_name}_{suffix}.csv")
+        previous = (
+            pd.read_csv(overall_path)
+            if merge and os.path.exists(overall_path) else None
+        )
+        overall = overall_results(selected, overrefusal=overrefusal, previous=previous)
         print(f"\n=== Overall {title} Scores ===")
         print(overall.to_string(index=False))
-        overall_path = os.path.join(output_dir, f"{model_name}_{suffix}.csv")
         overall.to_csv(overall_path, index=False)
         print(f"Saved: {overall_path}")
 
@@ -301,6 +313,12 @@ def parse_args():
         action="store_true",
         help="Let the model decide whether to comply with each request.",
     )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help=("Keep other datasets' rows in an existing overall/overrefusal CSV "
+              "and recompute its Avg instead of overwriting the file."),
+    )
     args = parser.parse_args()
     if args.num_train is not None and args.num_train <= 0:
         parser.error("--num_train must be positive")
@@ -373,7 +391,7 @@ def main():
 
     del guard
     torch.cuda.empty_cache()
-    save_results(datasets, output_dir, filename_prefix)
+    save_results(datasets, output_dir, filename_prefix, merge=args.merge)
 
 
 if __name__ == "__main__":
