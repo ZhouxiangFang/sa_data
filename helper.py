@@ -13,6 +13,10 @@ DATA_DIR = os.path.join(os.path.dirname(MODULE_DIR), "data")
 SAFE_LABELS = {"safe", "unharmful"}
 HARMFUL_LABELS = {"harmful", "unsafe"}
 BENIGN_DATA_TYPES = ("vanilla_benign", "adversarial_benign", "mix")
+# Pseudo-subcategories that draw from the subcategories in baseline_abbrs():
+# "random" samples their pooled prompts uniformly (so larger subcategories
+# contribute more), while "evenly" gives each subcategory the same share.
+BASELINE_ABBRS = ("random", "evenly")
 
 
 model_mapping = {
@@ -54,6 +58,17 @@ def to_abbr(dataset_name, sub):
         k = str(p).strip()
         abbrs.append(abbr_map.get(k, k))
     return abbrs
+
+def baseline_abbrs(dataset_name, harmful_count):
+    """Non-benign subcategories that align_run.sh trains on their own.
+
+    As in align_run.sh, these have at least harmful_count safe responses in
+    the training split of subcategory_stats.json.
+    """
+    with open(os.path.join(DATA_DIR, 'subcategory_stats.json')) as f:
+        categories = json.load(f)[dataset_name]
+    return [c['abbr'] for c in categories.values()
+            if c['abbr'] != 'benign' and c['train']['safe_response'] >= harmful_count]
 
 safety_test_datasets = ["wildguardmix", "aegis", "wildjailbreak", "ailuminate", "gretel"]
 overrefusal_test_datasets = ["xstest", "or-bench-hard"]
@@ -265,17 +280,23 @@ def clean_pairs(df: pd.DataFrame) -> pd.DataFrame:
     return df[(df["prompt"] != "") & (df["response"] != "")]
 
 
-def load_harmful_subcategory(dataset_name: str, abbr: str) -> pd.DataFrame:
+def load_harmful_subcategory(
+    dataset_name: str, abbr: str, harmful_count: int | None = None
+) -> pd.DataFrame:
     """Load prompts in one subcategory with safe response targets."""
     return select_harmful_subcategory(
-        load_safety_dataset(dataset_name, "train"), dataset_name, abbr
+        load_safety_dataset(dataset_name, "train"), dataset_name, abbr, harmful_count
     )
 
 
 def select_harmful_subcategory(
-    df: pd.DataFrame, dataset_name: str, abbr: str
+    df: pd.DataFrame, dataset_name: str, abbr: str, harmful_count: int | None = None
 ) -> pd.DataFrame:
-    """Apply the alignment filters to an already loaded dataset."""
+    """Apply the alignment filters to an already loaded dataset.
+
+    A baseline abbr selects rows from any subcategory in
+    baseline_abbrs(dataset_name, harmful_count), counting multi-label rows once.
+    """
     prompt_label_column = (
         "prompt_harm_label" if dataset_name in ("wildguardmix", "gretel") else "prompt_label"
     )
@@ -290,9 +311,15 @@ def select_harmful_subcategory(
     if missing:
         raise ValueError(f"{dataset_name} is missing required columns: {missing}")
 
+    if abbr in BASELINE_ABBRS:
+        if harmful_count is None:
+            raise ValueError(f"Baseline {abbr!r} needs harmful_count to pick subcategories")
+        targets = set(baseline_abbrs(dataset_name, harmful_count))
+    else:
+        targets = {abbr}
     is_subcategory = df["sub_abbrs"].apply(
         lambda abbreviations: isinstance(abbreviations, (list, tuple, set))
-        and abbr in abbreviations
+        and not targets.isdisjoint(abbreviations)
     )
     prompt_labels = SAFE_LABELS if abbr.lower() == "benign" else HARMFUL_LABELS
     has_target_prompt_label = normalize_label(df[prompt_label_column]).isin(
@@ -329,6 +356,22 @@ def load_wildjailbreak_benign(data_type: str) -> pd.DataFrame:
     return clean_pairs(df)
 
 
+def formatted_prompt_lengths(prompts, tokenizer) -> list[int]:
+    """Token lengths of prompts formatted as single-turn chat generations."""
+    conversations = [[{"role": "user", "content": prompt}] for prompt in prompts]
+    formatted_prompts = tokenizer.apply_chat_template(
+        conversations,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    return tokenizer(
+        formatted_prompts,
+        add_special_tokens=False,
+        return_length=True,
+        truncation=False,
+    )["length"]
+
+
 def sample_pairs(
     df: pd.DataFrame,
     count: int,
@@ -353,20 +396,7 @@ def sample_pairs(
     batch_size = max(256, min(2048, count * 2))
     for start in range(0, len(shuffled), batch_size):
         batch = shuffled.iloc[start : start + batch_size]
-        conversations = [
-            [{"role": "user", "content": prompt}] for prompt in batch["prompt"]
-        ]
-        formatted_prompts = tokenizer.apply_chat_template(
-            conversations,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        lengths = tokenizer(
-            formatted_prompts,
-            add_special_tokens=False,
-            return_length=True,
-            truncation=False,
-        )["length"]
+        lengths = formatted_prompt_lengths(batch["prompt"], tokenizer)
         for index, length in zip(batch.index, lengths):
             if length < max_length:
                 selected_indices.append(index)
@@ -381,6 +411,61 @@ def sample_pairs(
         f"{len(selected_indices):,} have a formatted prompt shorter than "
         f"--max_length {max_length:,}"
     )
+
+
+def sample_evenly(
+    df: pd.DataFrame,
+    count: int,
+    abbrs: list[str],
+    source: str,
+    seed: int,
+    tokenizer,
+    max_length: int,
+) -> tuple[pd.DataFrame, int, dict[str, int]]:
+    """Split count as evenly as possible across subcategories.
+
+    Subcategories are filled smallest first, so one that runs short passes its
+    unused share to the larger ones. A multi-label row is drawn at most once
+    and counts toward the subcategory that drew it.
+    """
+    if count == 0:
+        return pd.DataFrame(columns=["prompt", "response"]), 0, {}
+
+    batch_size = 2048
+    lengths = [
+        length
+        for start in range(0, len(df), batch_size)
+        for length in formatted_prompt_lengths(
+            df["prompt"].iloc[start : start + batch_size], tokenizer
+        )
+    ]
+    fits = pd.Series(lengths, index=df.index, dtype=int) < max_length
+    available = df[fits]
+    members = {
+        abbr: available.index[available["sub_abbrs"].apply(lambda subs: abbr in subs)]
+        for abbr in abbrs
+    }
+
+    selected: list[int] = []
+    counts: dict[str, int] = {}
+    remaining = count
+    order = sorted(abbrs, key=lambda abbr: len(members[abbr]))
+    for position, abbr in enumerate(order):
+        candidates = members[abbr].difference(selected)
+        take = min(len(candidates), remaining // (len(order) - position))
+        selected.extend(
+            available.loc[candidates].sample(n=take, random_state=seed).index
+        )
+        counts[abbr] = take
+        remaining -= take
+    if remaining:
+        raise ValueError(
+            f"Requested {count:,} examples from {source}, but only "
+            f"{count - remaining:,} could be drawn from subcategories with a "
+            f"formatted prompt shorter than --max_length {max_length:,}"
+        )
+    selected_df = df.loc[selected, ["prompt", "response"]].reset_index(drop=True)
+    return selected_df, int((~fits).sum()), counts
 
 
 def mixture_counts(total, harmful_rate, general_rate=0.0):
@@ -407,7 +492,7 @@ def build_training_data(
     )
 
     harmful_pool = harmful_pool if harmful_pool is not None else (
-        load_harmful_subcategory(args.alignment_dataset, args.abbr)
+        load_harmful_subcategory(args.alignment_dataset, args.abbr, harmful_count)
         if harmful_count
         else pd.DataFrame(columns=["prompt", "response"])
     )
@@ -422,14 +507,27 @@ def build_training_data(
             if general_count else pd.DataFrame(columns=["prompt", "response"])
         )
 
-    harmful, harmful_overlong = sample_pairs(
-        harmful_pool,
-        harmful_count,
-        f"subcategory {args.abbr!r} in {args.alignment_dataset}",
-        args.seed,
-        tokenizer,
-        args.max_length,
-    )
+    harmful_source = f"subcategory {args.abbr!r} in {args.alignment_dataset}"
+    harmful_counts = None
+    if args.abbr == "evenly":
+        harmful, harmful_overlong, harmful_counts = sample_evenly(
+            harmful_pool,
+            harmful_count,
+            baseline_abbrs(args.alignment_dataset, harmful_count),
+            harmful_source,
+            args.seed,
+            tokenizer,
+            args.max_length,
+        )
+    else:
+        harmful, harmful_overlong = sample_pairs(
+            harmful_pool,
+            harmful_count,
+            harmful_source,
+            args.seed,
+            tokenizer,
+            args.max_length,
+        )
     benign, benign_overlong = sample_pairs(
         benign_pool,
         benign_count,
@@ -449,6 +547,8 @@ def build_training_data(
     train_df = pd.concat([harmful, benign, general], ignore_index=True)
     train_df = train_df.sample(frac=1, random_state=args.seed).reset_index(drop=True)
     train_df.attrs["general_available"] = len(general_pool)
+    if harmful_counts is not None:
+        train_df.attrs["harmful_subcategory_counts"] = harmful_counts
     return (
         train_df,
         len(harmful_pool),

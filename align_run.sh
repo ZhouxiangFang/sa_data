@@ -17,7 +17,10 @@ Launcher options:
   --folder DIR                    Add immediate child directories with config.json
   --datasets DATASET [DATASET...] Space- or comma-separated datasets
                                  Default: wildguardmix aegis; also supports gretel
-  --num_train N                   Total examples per job (default: 1800)
+  --abbrs ABBR [ABBR ...]         Space- or comma-separated subcategories to run
+                                 Default: every eligible subcategory plus the
+                                 random and evenly baselines
+  --num_train N                  Total examples per job (default: 1800)
   --epochs N                      Training epochs per job (default: 2)
   --harmful_rate RATE             Safety subcategory fraction (default: 1/3)
   --general_rate RATE             General instruction fraction (default: 1/3)
@@ -29,12 +32,17 @@ Examples:
   ./align_run.sh --models qwen2.5-ins llama3.1-ins
   ./align_run.sh --models qwen2.5-ins,llama3.1-ins --datasets wildguardmix aegis
   ./align_run.sh --models qwen2.5-ins --datasets gretel
+  ./align_run.sh --models qwen2.5-ins --abbrs random evenly
   ./align_run.sh --folder /home/zf28/models/20k --datasets wildguardmix
   ./align_run.sh --folder /home/zf28/models/20k --models qwen2.5-ins \
       --num_train 1800 --general_dataset ../data/git_data_20k.csv --epochs 2 --lr 1e-5
 
 Benign safety examples fill the remaining fraction: the default mixture is
 600 harmful safety + 600 benign safety + 600 general instructions (1:1:1).
+
+The random and evenly baselines draw harmful examples from the non-benign
+subcategories selected below (whether or not --abbrs lists them): random in
+proportion to subcategory size, evenly in equal shares.
 
 GPU_GROUP=auto uses both 0,1,2,3 and 4,5,6,7. It can instead be set to one
 of those groups. MAX_USED_MB defaults to 2000 and GPU_POLL_SECONDS to 30.
@@ -45,6 +53,7 @@ EOF
 models=()
 folders=()
 datasets=()
+abbrs=()
 extra_args=()
 num_train=1800
 harmful_rate=0.3333333333333333
@@ -64,29 +73,22 @@ append_csv_values() {
 
 while (( $# > 0 )); do
     case "$1" in
-        --models|--datasets)
+        --models|--datasets|--abbrs)
             option="$1"
             shift
             (( $# > 0 )) && [[ "$1" != --* ]] || {
                 echo "$option needs at least one value." >&2
                 exit 2
             }
+            # Each option fills the array of the same name.
             while (( $# > 0 )) && [[ "$1" != --* ]]; do
-                if [[ "$option" == --models ]]; then
-                    append_csv_values models "$1" || exit $?
-                else
-                    append_csv_values datasets "$1" || exit $?
-                fi
+                append_csv_values "${option#--}" "$1" || exit $?
                 shift
             done
             ;;
-        --models=*|--datasets=*)
+        --models=*|--datasets=*|--abbrs=*)
             option="${1%%=*}"
-            if [[ "$option" == --models ]]; then
-                append_csv_values models "${1#*=}" || exit $?
-            else
-                append_csv_values datasets "${1#*=}" || exit $?
-            fi
+            append_csv_values "${option#--}" "${1#*=}" || exit $?
             shift
             ;;
         --folder)
@@ -236,6 +238,10 @@ job_models=()
 job_datasets=()
 job_abbrs=()
 skipped=()
+declare -A requested=() matched=()
+for abbr in "${abbrs[@]}"; do
+    requested[$abbr]=1
+done
 
 for dataset in "${datasets[@]}"; do
     category_lines=$(python -c '
@@ -251,12 +257,24 @@ for category in categories.values():
     eligible=()
     while IFS=$'\t' read -r abbr available; do
         [[ -n "$abbr" ]] || continue
+        if (( ${#abbrs[@]} > 0 )); then
+            [[ -n "${requested[$abbr]:-}" ]] || continue
+            matched[$abbr]=1
+        fi
+        # helper.baseline_abbrs applies the same rule to the baselines.
         if (( available >= category_required )); then
             eligible+=("$abbr")
         else
             skipped+=("$dataset/$abbr: $available available, $category_required required")
         fi
     done <<< "$category_lines"
+    # Baselines pool the eligible non-benign subcategories; align.py checks that pool.
+    for abbr in random evenly; do
+        if (( ${#abbrs[@]} == 0 )) || [[ -n "${requested[$abbr]:-}" ]]; then
+            eligible+=("$abbr")
+            matched[$abbr]=1
+        fi
+    done
 
     echo "$dataset: selected ${#eligible[@]} subcategory(s)."
     for model in "${models[@]}"; do
@@ -266,6 +284,13 @@ for category in categories.values():
             job_abbrs+=("$abbr")
         done
     done
+done
+
+for abbr in "${abbrs[@]}"; do
+    [[ -n "${matched[$abbr]:-}" ]] || {
+        echo "Unknown subcategory in ${datasets[*]}: $abbr" >&2
+        exit 2
+    }
 done
 
 if (( ${#skipped[@]} > 0 )); then
@@ -376,7 +401,7 @@ run_queue() {
     return "$queue_status"
 }
 
-echo "Configuration: models=${models[*]} datasets=${datasets[*]} num_train=$num_train harmful_rate=$harmful_rate general_rate=$general_rate general_dataset=$general_dataset"
+echo "Configuration: models=${models[*]} datasets=${datasets[*]} abbrs=${abbrs[*]:-all} num_train=$num_train harmful_rate=$harmful_rate general_rate=$general_rate general_dataset=$general_dataset"
 echo "Required subcategory examples: $category_required"
 echo "Queued ${#job_models[@]} job(s) on GPU groups: ${gpu_groups[*]}"
 

@@ -10,8 +10,9 @@ Use --output-dir to choose an explicit folder.
 Harmful scores use the precomputed Avg row (a macro-average over safety
 datasets); IFBench and IFEval prompt_loose fractions are converted to percent.
 IF scores are averaged equally across IFBench and IFEval. Official and
-self-trained instruct baselines come first, followed by subcategories ranked
-by descending harmful score. Pale gray bars beside the harmful bars show the
+self-trained instruct baselines come first, then the random and evenly
+training-data baselines, followed by subcategories ranked by descending harmful
+score. Pale gray bars beside the harmful bars show the
 secondary IF metric. The average figure gives each model equal weight.
 """
 
@@ -33,6 +34,14 @@ METRICS = {
     "harmful_score_pct": ("Overall harmful ↓", "#D55E00"),
     "if_prompt_loose_pct": ("Mean IFBench / IFEval prompt_loose ↑", "#999999"),
 }
+# Mixed-subcategory training baselines (helper.BASELINE_ABBRS), shown in this
+# order between the instruct models and the ranked subcategories.
+BASELINE_ABBRS = ("random", "evenly")
+
+
+def training_subcategory(version):
+    """Training subcategory of a DATASET_SUBCATEGORY_SIZE version label."""
+    return version.split("_", 1)[1].rsplit("_", 1)[0]
 
 
 def discover_runs(results_dir, model, suffix=None):
@@ -151,15 +160,24 @@ def default_output_dir(data, versions, suffix=None):
 
 def plot_bars(scores, versions, title, output_path):
     baselines = ["-ins", "-20k"]
+    trained = [version for version in versions if version not in baselines]
+    mixes = sorted(
+        (version for version in trained if training_subcategory(version) in BASELINE_ABBRS),
+        key=lambda version: BASELINE_ABBRS.index(training_subcategory(version)),
+    )
     subcategories = scores.reindex([
-        version for version in versions if version not in baselines
+        version for version in trained if version not in mixes
     ]).sort_values(
         "harmful_score_pct", ascending=False, kind="stable"
     )
-    versions = baselines + subcategories.index.tolist()
+    groups = [group for group in (baselines, mixes, subcategories.index.tolist()) if group]
+    versions = [version for group in groups for version in group]
     scores = scores.reindex(versions)
     x = np.arange(len(versions), dtype=float)
-    x[len(baselines):] += 0.6
+    # Separate the groups with a gap; a dashed line marks each one below.
+    boundaries = np.cumsum([len(group) for group in groups])[:-1]
+    for boundary in boundaries:
+        x[boundary:] += 0.6
     width = 0.34
     offset = 0.19
     fig, ax = plt.subplots(figsize=(max(12, len(versions) * 0.85), 7))
@@ -195,7 +213,9 @@ def plot_bars(scores, versions, title, output_path):
     ax.set_xticks(x, labels, rotation=45, ha="right", rotation_mode="anchor")
     ax.tick_params(axis="x", labelsize=13)
     ax.tick_params(axis="y", labelsize=14)
-    ax.axvline((x[1] + x[2]) / 2, color="0.65", linestyle="--", linewidth=1)
+    for boundary in boundaries:
+        ax.axvline((x[boundary - 1] + x[boundary]) / 2, color="0.65",
+                   linestyle="--", linewidth=1)
     ymax = min(105, np.ceil(scores[list(METRICS)].to_numpy().max() / 10) * 10 + 10)
     ax.set_ylim(0, ymax)
     ax.set_yticks(np.arange(0, min(ymax, 100) + 1, 10 if ymax <= 70 else 20))

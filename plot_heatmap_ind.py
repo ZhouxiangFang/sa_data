@@ -14,6 +14,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(ROOT, "results")
 FIGS_DIR = os.path.join(ROOT, "figs", "heatmap")
 MODELS = ("llama3", "llama3.1", "mistral", "olmo2", "qwen2.5", "qwen3")
+# Mixed-subcategory training baselines (helper.BASELINE_ABBRS), drawn as the
+# first training columns.
+BASELINE_ABBRS = ("random", "evenly")
 os.makedirs(FIGS_DIR, exist_ok=True)
 
 _BASE_FONT = plt.rcParams["font.size"]
@@ -34,6 +37,11 @@ def category_mapping(dataset):
     if dataset not in stats:
         raise ValueError(f"No subcategory statistics for {dataset!r}")
     return {entry["abbr"]: full for full, entry in sorted(stats[dataset].items())}
+
+
+def train_order(dataset):
+    """Training columns in display order: baselines, then subcategories."""
+    return [*BASELINE_ABBRS, *category_mapping(dataset)]
 
 
 def find_dataset_csv(dirpath, dataset):
@@ -72,7 +80,7 @@ def train_result_dir(n, model, dataset, short, suffix=None):
 
 def collect_train_shortnames(n, model, dataset, suffix=None):
     if suffix is not None:
-        return [short for short in category_mapping(dataset)
+        return [short for short in train_order(dataset)
                 if os.path.isdir(train_result_dir(n, model, dataset, short, suffix))]
     prefix = f"{model}_{dataset}_"
     suffix = f"_{n}"
@@ -86,7 +94,7 @@ def collect_train_shortnames(n, model, dataset, suffix=None):
 def build_matrices(n, init_scores, model, dataset, suffix=None):
     names = category_mapping(dataset)
     available = set(collect_train_shortnames(n, model, dataset, suffix))
-    train_shorts = [s for s in names if s in available]
+    train_shorts = [s for s in train_order(dataset) if s in available]
     run_scores = {}
     for short in train_shorts:
         csv = find_dataset_csv(train_result_dir(n, model, dataset, short, suffix), dataset)
@@ -132,6 +140,11 @@ def _draw_heatmap(ax, matrix, train_shorts, test_shorts, im_kwargs, fmt, text_th
         if j is not None:
             ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1,
                                    fill=False, edgecolor="black", linewidth=1.8))
+
+    # Separator between the mixed baselines and the single-subcategory runs.
+    mixed = [j for j, s in enumerate(train_shorts) if s in BASELINE_ABBRS]
+    if mixed and mixed[-1] + 1 < len(train_shorts):
+        ax.axvline(x=mixed[-1] + 0.5, color="black", linewidth=1.5)
 
     ax.set_xticks(range(len(train_shorts)))
     ax.set_xticklabels(train_shorts, rotation=45, ha="right")
@@ -208,7 +221,9 @@ def plot_abs_heatmap(matrix, train_shorts, test_shorts, n, model, dataset, out_p
             overall_avg_harmful(train_result_dir(n, model, dataset, s, suffix))
             for s in train_shorts[col_offset:]
         ])
-    finite_idx = [j for j, v in enumerate(overall_avgs) if np.isfinite(v)]
+    # Rank single-subcategory runs only; the mixed baselines are references.
+    finite_idx = [j for j, v in enumerate(overall_avgs)
+                  if np.isfinite(v) and train_shorts[j + col_offset] not in BASELINE_ABBRS]
     if finite_idx:
         top_k = 5
         top_idx = sorted(finite_idx, key=lambda j: overall_avgs[j])[:top_k]
@@ -231,7 +246,7 @@ def plot_abs_heatmap(matrix, train_shorts, test_shorts, n, model, dataset, out_p
 def plot_average_heatmaps(runs, n, dataset, suffix, include_abs):
     # Align by category, using only categories shared by every model.
     names = category_mapping(dataset)
-    train = [s for s in names if all(s in run["train"] for run in runs)]
+    train = [s for s in train_order(dataset) if all(s in run["train"] for run in runs)]
     test = [s for s in names if all(s in run["test"] for run in runs)]
     if not train or not test:
         raise ValueError("No shared subcategories available for the average heatmap")

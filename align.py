@@ -16,6 +16,11 @@ effective batch size of 32 examples.
 
 Use --alignment_dataset gretel --abbr information_hazards for Gretel's
 risk categories. Gretel safe_response supplies the response training target.
+
+Use --abbr random or --abbr evenly for baselines over the non-benign
+subcategories that align_run.sh trains on their own: random samples their
+pooled prompts uniformly, so larger subcategories contribute more; evenly gives
+each subcategory the same share.
 """
 
 import argparse
@@ -32,7 +37,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
 from helper import (
-    BENIGN_DATA_TYPES, build_training_data, mixture_counts, model_mapping, print_config,
+    BASELINE_ABBRS, BENIGN_DATA_TYPES, baseline_abbrs, build_training_data,
+    mixture_counts, model_mapping, print_config,
 )
 
 
@@ -68,7 +74,10 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help=(
             "Subcategory abbreviation from data/subcategory_stats.json. "
-            "For Gretel, use its configured abbreviation (e.g. 'information_hazards')."
+            "For Gretel, use its configured abbreviation (e.g. 'information_hazards'). "
+            "Baselines over the non-benign subcategories that align_run.sh trains "
+            "on their own: 'random' samples them in proportion to their size; "
+            "'evenly' samples each equally."
         ),
     )
     parser.add_argument(
@@ -231,6 +240,14 @@ def main() -> None:
             f"{general_count:,} general instructions from {args.general_dataset} "
             f"({train_df.attrs['general_available']:,} available)"
         )
+        if args.abbr in BASELINE_ABBRS:
+            pooled = baseline_abbrs(args.alignment_dataset, harmful_count)
+            print(f"Baseline subcategories ({len(pooled)}): {', '.join(pooled)}")
+        subcategory_counts = train_df.attrs.get("harmful_subcategory_counts")
+        if subcategory_counts:
+            print("Examples per subcategory:")
+            for abbr, count in sorted(subcategory_counts.items()):
+                print(f"  {abbr}: {count:,}")
         print(f"Overlong candidates skipped while sampling: {overlong_count:,}")
 
     train_dataset = Dataset.from_dict(
