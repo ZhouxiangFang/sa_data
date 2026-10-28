@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Concrete eight-A6000 launcher. Each worker owns one four-GPU group and runs
-# its assigned model/dataset/subcategory jobs sequentially.
+# Concrete eight-A6000 launcher. Model/dataset/subcategory jobs share one queue;
+# whichever four-GPU group is idle takes the next job. Jobs whose checkpoint is
+# already saved are skipped, so rerunning the same command resumes a run.
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
@@ -45,7 +46,9 @@ subcategories selected below (whether or not --abbrs lists them): random in
 proportion to subcategory size, evenly in equal shares.
 
 GPU_GROUP=auto uses both 0,1,2,3 and 4,5,6,7. It can instead be set to one
-of those groups. MAX_USED_MB defaults to 2000 and GPU_POLL_SECONDS to 30.
+of those groups. A group is idle when each of its GPUs uses less than
+MAX_USED_MB (default 2000), checked every GPU_POLL_SECONDS (default 30). A
+failed job is requeued until it has run JOB_ATTEMPTS times (default 2).
 EOF
 }
 
@@ -299,7 +302,51 @@ if (( ${#skipped[@]} > 0 )); then
 fi
 (( ${#job_models[@]} > 0 )) || { echo "No eligible jobs remain." >&2; exit 2; }
 
-# ---- two fixed four-GPU groups, matching git_train.sh ----
+# ---- skip jobs whose checkpoint was already saved ----
+# Mirrors align.py: <output_dir>/<model>_<num_train>_<dataset>_<abbr>.
+output_root=/scratch/zf28/ckpts
+use_run_name=0
+for ((i = 0; i < ${#extra_args[@]}; i++)); do
+    case "${extra_args[i]}" in
+        --output_dir) output_root="${extra_args[i + 1]:-}" ;;
+        --output_dir=*) output_root="${extra_args[i]#*=}" ;;
+        --run_name|--run_name=*) use_run_name=1 ;;
+    esac
+done
+
+# Same rule as align.filename_component.
+filename_component() {
+    local component
+    component=$(sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^[-._]+//; s/[-._]+$//' <<< "$1")
+    printf '%s' "${component:-run}"
+}
+
+job_is_saved() {
+    local index="$1" model="${job_models[$1]%/}" checkpoint
+    (( use_run_name == 0 )) || return 1
+    checkpoint="$output_root/$(filename_component "${model##*/}")_${num_train}_${job_datasets[$index]}_$(filename_component "${job_abbrs[$index]}")"
+    # tokenizer files are written after the weights, so they mark a full save.
+    [[ -f "$checkpoint/config.json" && -f "$checkpoint/tokenizer_config.json" ]]
+}
+
+pending=()
+saved_count=0
+for index in "${!job_models[@]}"; do
+    if job_is_saved "$index"; then
+        ((saved_count += 1))
+    else
+        pending+=("$index")
+    fi
+done
+if (( saved_count > 0 )); then
+    echo "Skipping $saved_count job(s) whose checkpoint is already saved in $output_root."
+fi
+if (( ${#pending[@]} == 0 )); then
+    echo "All ${#job_models[@]} alignment jobs already have saved checkpoints."
+    exit 0
+fi
+
+# ---- four-GPU groups, matching git_train.sh ----
 case "${GPU_GROUP:-auto}" in
     auto) gpu_groups=(0,1,2,3 4,5,6,7) ;;
     0,1,2,3|4,5,6,7) gpu_groups=("$GPU_GROUP") ;;
@@ -312,6 +359,11 @@ esac
 max_used_mb="${MAX_USED_MB:-2000}"
 poll_seconds="${GPU_POLL_SECONDS:-30}"
 master_port="${MASTER_PORT:-29500}"
+max_attempts="${JOB_ATTEMPTS:-2}"
+[[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || {
+    echo "JOB_ATTEMPTS must be a positive integer." >&2
+    exit 2
+}
 [[ "$max_used_mb" =~ ^[1-9][0-9]*$ ]] || {
     echo "MAX_USED_MB must be a positive integer." >&2
     exit 2
@@ -346,11 +398,30 @@ group_is_idle() {
     done
 }
 
-wait_for_group() {
-    local group="$1"
-    until group_is_idle "$group"; do
-        echo "Waiting for GPUs $group below $max_used_mb MB each; retrying in ${poll_seconds}s."
-        sleep "$poll_seconds"
+# Per-GPU locks shared with eval_run_helpers.sh, so a training job and an
+# evaluation never start on the same GPUs.
+gpu_lock_file() {
+    printf '/tmp/align_eval_gpu_%s.lock' "$1"
+}
+
+group_is_unlocked() {
+    local gpu
+    local -a indices
+    IFS=',' read -r -a indices <<< "$1"
+    for gpu in "${indices[@]}"; do
+        flock -n "$(gpu_lock_file "$gpu")" true 2>/dev/null || return 1
+    done
+}
+
+# Hold the group's locks for the rest of the calling (sub)shell; exit status 75
+# means an evaluation took one first.
+lock_group() {
+    local gpu fd
+    local -a indices
+    IFS=',' read -r -a indices <<< "$1"
+    for gpu in "${indices[@]}"; do
+        exec {fd}>"$(gpu_lock_file "$gpu")"
+        flock -n "$fd" || return 75
     done
 }
 
@@ -375,7 +446,6 @@ run_job() {
 
     echo "Starting [$((index + 1))/${#job_models[@]}] on GPUs $gpu_group: $model | $dataset | $abbr"
     echo "LOG_FILE=$log_file"
-    wait_for_group "$gpu_group"
 
     env -u CUDA_VISIBLE_DEVICES PYTHONUNBUFFERED=1 \
         deepspeed --include="localhost:$gpu_group" --master_port="$port" \
@@ -390,35 +460,85 @@ run_job() {
         --general_dataset "$general_dataset" 2>&1 | tee -a "$log_file"
 }
 
-run_queue() {
-    local worker="$1" gpu_group="$2" index
-    local port=$((master_port + worker))
-    local queue_status=0
-
-    for ((index=worker; index<${#job_models[@]}; index+=${#gpu_groups[@]})); do
-        run_job "$index" "$gpu_group" "$port" || queue_status=1
-    done
-    return "$queue_status"
+job_label() {
+    printf '[%d/%d] %s | %s | %s' "$(($1 + 1))" "${#job_models[@]}" \
+        "${job_models[$1]}" "${job_datasets[$1]}" "${job_abbrs[$1]}"
 }
 
 echo "Configuration: models=${models[*]} datasets=${datasets[*]} abbrs=${abbrs[*]:-all} num_train=$num_train harmful_rate=$harmful_rate general_rate=$general_rate general_dataset=$general_dataset"
 echo "Required subcategory examples: $category_required"
-echo "Queued ${#job_models[@]} job(s) on GPU groups: ${gpu_groups[*]}"
+echo "Queued ${#pending[@]} job(s) on GPU groups: ${gpu_groups[*]} (attempts per job: $max_attempts)"
 
-pids=()
-for worker in "${!gpu_groups[@]}"; do
-    run_queue "$worker" "${gpu_groups[$worker]}" &
-    pids+=("$!")
+# A single dispatcher hands the next pending job to whichever group is idle,
+# so a group held by other users never blocks jobs another group could run.
+# A failed job goes back to the end of the queue until it uses its attempts.
+declare -A group_pid=() group_job=()
+attempts=()
+failed=()
+last_wait_message=""
+while (( ${#pending[@]} > 0 || ${#group_pid[@]} > 0 )); do
+    for group in "${!group_pid[@]}"; do
+        pid="${group_pid[$group]}"
+        ! kill -0 "$pid" 2>/dev/null || continue
+        index="${group_job[$group]}"
+        unset 'group_pid[$group]' 'group_job[$group]'
+        job_status=0
+        wait "$pid" || job_status=$?
+        if (( job_status == 0 )); then
+            echo "Finished $(job_label "$index") on GPUs $group"
+            continue
+        fi
+        if (( job_status == 75 )); then
+            echo "GPUs $group were reserved by an evaluation before $(job_label "$index") started; requeued."
+            pending=("$index" "${pending[@]}")
+            continue
+        fi
+        attempts[index]=$(( ${attempts[index]:-0} + 1 ))
+        if (( attempts[index] < max_attempts )); then
+            echo "Failed $(job_label "$index") on GPUs $group; requeued (attempt ${attempts[index]}/$max_attempts)." >&2
+            pending+=("$index")
+        else
+            echo "Failed $(job_label "$index") on GPUs $group after $max_attempts attempt(s)." >&2
+            failed+=("$index")
+        fi
+    done
+
+    busy_groups=()
+    for worker in "${!gpu_groups[@]}"; do
+        group="${gpu_groups[$worker]}"
+        (( ${#pending[@]} > 0 )) || break
+        [[ -z "${group_pid[$group]:-}" ]] || continue
+        if ! group_is_idle "$group" || ! group_is_unlocked "$group"; then
+            busy_groups+=("$group")
+            continue
+        fi
+        index="${pending[0]}"
+        pending=("${pending[@]:1}")
+        (
+            lock_group "$group" || exit $?
+            run_job "$index" "$group" "$((master_port + worker))"
+        ) &
+        group_pid[$group]=$!
+        group_job[$group]="$index"
+    done
+
+    wait_message=""
+    if (( ${#pending[@]} > 0 && ${#busy_groups[@]} > 0 )); then
+        wait_message="${#pending[@]} job(s) pending; GPUs ${busy_groups[*]} in use by other processes (limit $max_used_mb MB each)."
+    fi
+    if [[ -n "$wait_message" && "$wait_message" != "$last_wait_message" ]]; then
+        echo "$(date '+%F %T') Waiting: $wait_message"
+    fi
+    last_wait_message="$wait_message"
+    (( ${#pending[@]} == 0 && ${#group_pid[@]} == 0 )) || sleep "$poll_seconds"
 done
 
-status=0
-for pid in "${pids[@]}"; do
-    wait "$pid" || status=1
-done
-
-if (( status == 0 )); then
+if (( ${#failed[@]} == 0 )); then
     echo "All ${#job_models[@]} alignment jobs completed."
-else
-    echo "One or more alignment jobs failed; check the log files." >&2
+    exit 0
 fi
-exit "$status"
+echo "${#failed[@]} alignment job(s) failed; check the log files:" >&2
+for index in "${failed[@]}"; do
+    echo "  $(job_label "$index")" >&2
+done
+exit 1

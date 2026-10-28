@@ -9,6 +9,9 @@ set -uo pipefail
 #      safety and overrefusal evaluation. eval_run.sh deletes the checkpoints
 #      only after both evaluations succeed.
 # A failed stage is reported and the next stage still runs.
+# align_run.sh skips jobs whose checkpoint is already saved, so rerunning this
+# script resumes training. SKIP_STAGES lists comma-separated stage names to skip,
+# e.g. SKIP_STAGES="gretel test for instruct models".
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 models_dir=/home/zf28/models/20k
@@ -19,6 +22,10 @@ stage() {
     local name="$1"
     shift
     echo
+    if [[ ",${SKIP_STAGES:-}," == *",$name,"* ]]; then
+        echo "===== $(date '+%F %T') SKIPPED: $name ====="
+        return
+    fi
     echo "===== $(date '+%F %T') START: $name ====="
     if "$@"; then
         echo "===== $(date '+%F %T') DONE: $name ====="
