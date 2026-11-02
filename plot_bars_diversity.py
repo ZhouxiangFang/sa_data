@@ -24,14 +24,16 @@ Figures show, average and rank Pearson and Spearman coefficients only; Kendall
 (largely redundant with Spearman) is kept in the correlation CSVs. Figures also
 omit POS Self-BLEU-1, which saturates near 0.999; the CSVs keep it.
 Safety uses the precomputed Avg harmful_score_pct (lower is safer), matching
-plot_bars_overall.py. The per-test plots use each test dataset's harmful score,
+plot_bars_overall.py, for the --models models (default: llama3.1 mistral olmo2
+qwen2.5). The per-test plots use each test dataset's harmful score,
 averaged equally across models.
 Their plotted scores and correlations are exported in average_diversity_safety_*
 CSVs with a test_dataset column. Correlations use negative Self-BLEU so larger always
 means more diverse. Average correlations are computed against equally weighted
 model-mean harmful scores on subcategories available for every model; they
 are not averages of correlation coefficients. The pooled overall diversity
-reference is excluded from correlations. The benign subcategory and any --exclude
+reference is excluded from correlations. The benign training subcategory is
+dropped from figures and CSVs (plot_bars_overall.EXCLUDED_ABBRS); --exclude
 subcategories are plotted but excluded from correlation coefficients and fitted
 lines. CSV exports contain plotted pairs
 and coefficients, including sample counts and p-values.
@@ -55,6 +57,8 @@ from matplotlib.ticker import FormatStrFormatter, MaxNLocator
 import numpy as np
 import pandas as pd
 from scipy.stats import kendalltau, pearsonr, spearmanr
+
+from plot_bars_overall import DEFAULT_MODELS, EXCLUDED_ABBRS, MODELS
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -96,6 +100,8 @@ HIGHLIGHT = "#E1F5FE"
 CORRELATIONS = {"pearson": pearsonr, "spearman": spearmanr, "kendall": kendalltau}
 # Methods that figures show and average; CSVs keep every computed method.
 PLOT_METHODS = ("pearson", "spearman")
+# Post-training score column: display name. Lower is better for both.
+SCORE_LABELS = {"harmful_score_pct": "harmful score", "overrefusal_score_pct": "overrefusal"}
 TEST_DATASETS = {
     "wildguardmix": "WildGuardMix",
     "aegis": "Aegis",
@@ -107,6 +113,7 @@ TEST_DATASETS = {
 
 def load_diversity(path):
     data = pd.read_csv(path)
+    data = data.loc[~data["abbr"].str.lower().isin(EXCLUDED_ABBRS)].reset_index(drop=True)
     missing = {"abbr", *METRICS} - set(data.columns)
     if missing:
         raise ValueError(f"{path}: missing columns {sorted(missing)}")
@@ -174,45 +181,44 @@ def load_safety(results_dir, dataset, train_size, abbreviations, suffix=None,
     return result
 
 
-def join_scores(diversity, safety):
+def join_scores(diversity, safety, score="harmful_score_pct"):
     """Add the equal-model average using only complete subcategory coverage."""
     subs = diversity.loc[diversity["abbr"] != "overall"]
     pairs = safety.merge(subs, on="abbr", validate="many_to_one")
     pairs["model_count"] = 1
-    wide = safety.pivot(index="abbr", columns="model", values="harmful_score_pct")
+    wide = safety.pivot(index="abbr", columns="model", values=score)
     complete = wide.dropna()
     if complete.empty:
         print("Warning: no subcategories shared by all models; no average plot")
         return pairs
-    average = complete.mean(axis=1).rename("harmful_score_pct").reset_index()
+    average = complete.mean(axis=1).rename(score).reset_index()
     average = average.merge(subs, on="abbr", validate="one_to_one")
     average = average.assign(model="Average", run="", model_count=len(wide.columns))
     return pd.concat([pairs, average], ignore_index=True)
 
 
 def correlation_mask(scores):
-    """Keep benign and explicitly excluded subcategories out of statistics."""
-    included = ~scores["abbr"].str.lower().eq("benign")
+    """Keep explicitly excluded subcategories out of statistics."""
     if "included_in_correlation" in scores:
-        included &= scores["included_in_correlation"]
-    return included
+        return scores["included_in_correlation"]
+    return pd.Series(True, index=scores.index)
 
 
-def finite_pairs(scores, metric, for_correlation=False):
+def finite_pairs(scores, metric, for_correlation=False, score="harmful_score_pct"):
     sign = METRICS[metric][1]
     x = sign * scores[metric].to_numpy(dtype=float)
-    y = scores["harmful_score_pct"].to_numpy(dtype=float)
+    y = scores[score].to_numpy(dtype=float)
     valid = np.isfinite(x) & np.isfinite(y)
     if for_correlation:
         valid &= correlation_mask(scores).to_numpy()
     return x[valid], y[valid], scores.loc[valid, "abbr"].tolist()
 
 
-def correlation_table(pairs, methods):
+def correlation_table(pairs, methods, score="harmful_score_pct"):
     rows = []
     for model, scores in pairs.groupby("model", sort=False):
         for metric in METRICS:
-            x, y, _ = finite_pairs(scores, metric, for_correlation=True)
+            x, y, _ = finite_pairs(scores, metric, for_correlation=True, score=score)
             for method in methods:
                 coefficient = pvalue = np.nan
                 if len(x) >= 3 and np.ptp(x) > 0 and np.ptp(y) > 0:
@@ -222,7 +228,7 @@ def correlation_table(pairs, methods):
                     "model": model, "group": metric.split("_", 1)[0],
                     "metric": metric, "method": method,
                     "diversity_multiplier": METRICS[metric][1],
-                    "safety_metric": "harmful_score_pct", "n_subcategories": len(x),
+                    "safety_metric": score, "n_subcategories": len(x),
                     "coefficient": coefficient, "p_value": pvalue,
                 })
     return pd.DataFrame(rows)
@@ -282,9 +288,9 @@ def plot_diversity(data, metric, context, path):
 
 
 def plot_scatter_panel(ax, scores, correlations, metric, test_dataset, show_ylabel,
-                       bold=False, highlight=False):
+                       bold=False, highlight=False, score="harmful_score_pct"):
     label, sign, color = METRICS[metric]
-    x, y, abbreviations = finite_pairs(scores, metric)
+    x, y, abbreviations = finite_pairs(scores, metric, score=score)
     excluded_abbrs = set(scores.loc[~correlation_mask(scores), "abbr"])
     excluded = np.array([abbr in excluded_abbrs for abbr in abbreviations], dtype=bool)
     ax.scatter(x[~excluded], y[~excluded], color=color, s=48, edgecolors="white",
@@ -294,7 +300,7 @@ def plot_scatter_panel(ax, scores, correlations, metric, test_dataset, show_ylab
                    marker="D", s=60, zorder=4)
     for xi, yi, abbr in zip(x, y, abbreviations):
         ax.annotate(abbr, (xi, yi), xytext=(4, 4), textcoords="offset points", fontsize=7)
-    corr_x, corr_y, _ = finite_pairs(scores, metric, for_correlation=True)
+    corr_x, corr_y, _ = finite_pairs(scores, metric, for_correlation=True, score=score)
     if len(corr_x) >= 3 and np.ptp(corr_x) > 0 and np.ptp(corr_y) > 0:
         line_x = np.linspace(corr_x.min(), corr_x.max(), 100)
         ax.plot(line_x, np.polyval(np.polyfit(corr_x, corr_y, 1), line_x),
@@ -319,7 +325,7 @@ def plot_scatter_panel(ax, scores, correlations, metric, test_dataset, show_ylab
     if show_ylabel:
         safety_label = ("Overall" if test_dataset == "Avg"
                         else TEST_DATASETS[test_dataset])
-        ax.set_ylabel(f"{safety_label} harmful score (%) ↓", fontsize=11)
+        ax.set_ylabel(f"{safety_label} {SCORE_LABELS[score]} (%) ↓", fontsize=11)
     ax.margins(x=0.18)
     if len(y):
         span = max(float(np.ptp(y)), 1.0)
@@ -336,7 +342,8 @@ def plotted_methods(methods):
     return [method for method in methods if method in PLOT_METHODS] or list(methods)
 
 
-def plot_scatter(scores, correlations, title, context, path, group, test_dataset="Avg"):
+def plot_scatter(scores, correlations, title, context, path, group, test_dataset="Avg",
+                 score="harmful_score_pct"):
     """Draw one panel per metric of a lexical, semantic or structural group."""
     correlations = correlations.loc[
         correlations["method"].isin(plotted_methods(correlations["method"].unique()))
@@ -347,7 +354,7 @@ def plot_scatter(scores, correlations, title, context, path, group, test_dataset
     rows = -(-len(metrics) // columns)
     width = max(columns * 4.6, 10)
     # Shade the two metrics whose mean coefficient is most negative (more diversity,
-    # less harm) and bold the lowest.
+    # lower score) and bold the lowest.
     group_correlations = correlations.loc[correlations["metric"].isin(metrics)]
     ranked = group_correlations.groupby("metric")["coefficient"].mean().dropna().sort_values()
     top_two = list(ranked.index[:2])
@@ -357,7 +364,7 @@ def plot_scatter(scores, correlations, title, context, path, group, test_dataset
             plot_scatter_panel(ax, scores, correlations, metrics[index], test_dataset,
                                show_ylabel=index % columns == 0,
                                bold=metrics[index] in top_two[:1],
-                               highlight=metrics[index] in top_two)
+                               highlight=metrics[index] in top_two, score=score)
         else:
             ax.set_visible(False)
     handles = [
@@ -369,7 +376,7 @@ def plot_scatter(scores, correlations, title, context, path, group, test_dataset
     if (~correlation_mask(scores)).any():
         handles.append(Line2D([], [], marker="D", linestyle="", markerfacecolor="none",
                               markeredgecolor="0.3", markersize=8,
-                              label="Excluded from correlation (benign or --exclude)"))
+                              label="Excluded from correlation (--exclude)"))
     fig.legend(handles=handles, loc="outside lower center",
                ncols=len(handles) if width > 12 else 1, fontsize=11, frameon=False)
     counts = group_correlations["n_subcategories"]
@@ -382,8 +389,8 @@ def plot_scatter(scores, correlations, title, context, path, group, test_dataset
         context += f"; test: {TEST_DATASETS[test_dataset]}"
     # Wrap the run details so narrow figures keep them visible.
     details = f"{textwrap.fill(context, width=int(width * 7))}\n{coverage}"
-    fig.suptitle(f"{title}: {name.lower()} diversity vs. post-training harmful score\n{details}",
-                 fontsize=16)
+    fig.suptitle(f"{title}: {name.lower()} diversity vs. post-training {SCORE_LABELS[score]}"
+                 f"\n{details}", fontsize=16)
     save_figure(fig, path)
 
 
@@ -437,10 +444,12 @@ def main():
                         help="Embedding-model folder used when no CSV is given (default: bge-m3)")
     parser.add_argument("--train-size", type=int,
                         help="Safety-run training size; defaults to CSV scored_on")
+    parser.add_argument("--models", nargs="+", choices=MODELS, default=list(DEFAULT_MODELS),
+                        help="Models to correlate and average (default: %(default)s)")
     parser.add_argument("--corr", choices=[*CORRELATIONS, "all"], default="all")
     parser.add_argument("--exclude", nargs="*", default=[],
-                        help="Additional subcategories to exclude from correlations, "
-                             "while keeping them plotted and in CSVs; benign is always excluded")
+                        help="Subcategories to exclude from correlations, "
+                             "while keeping them plotted and in CSVs")
     parser.add_argument("--all-plots", action="store_true",
                         help="Also draw per-metric bar charts, per-model scatter plots, "
                              "correlation bar charts and per-test-dataset average plots")
@@ -462,8 +471,10 @@ def main():
         dataset = args.dataset or csv_path.stem.split("_diversity")[0]
         dataset = dataset.removesuffix("_train").removesuffix("_test")
         size = args.train_size
-        if args.suffix and re.match(r"^[1-9][0-9]*_", args.suffix):
-            suffix_size = int(args.suffix.split("_", 1)[0])
+        # The size is the first all-digit field, e.g. 1800 in git20k_1800_aegis.
+        size_match = re.search(r"(?:^|_)([1-9][0-9]*)_", args.suffix or "")
+        if size_match:
+            suffix_size = int(size_match.group(1))
             if size is not None and size != suffix_size:
                 raise ValueError("--train-size must match the training size in --suffix")
             size = suffix_size
@@ -474,12 +485,15 @@ def main():
             size = int(sizes[0])
         if size <= 0:
             raise ValueError("--train-size must be positive")
-        safety_by_test = {
-            test: load_safety(args.results_dir, dataset, size,
-                              set(diversity["abbr"]) - {"overall"}, args.suffix,
-                              test_dataset=test)
-            for test in ["Avg", *TEST_DATASETS]
-        }
+        safety_by_test = {}
+        for test in ["Avg", *TEST_DATASETS]:
+            scores = load_safety(args.results_dir, dataset, size,
+                                 set(diversity["abbr"]) - {"overall"}, args.suffix,
+                                 test_dataset=test)
+            safety_by_test[test] = scores.loc[scores["model"].isin(args.models)]
+        missing = set(args.models) - set(safety_by_test["Avg"]["model"])
+        if missing:
+            print(f"Warning: no {dataset} safety runs for {sorted(missing)}")
         safety = safety_by_test["Avg"]
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
@@ -513,7 +527,7 @@ def main():
         return
 
     pairs = join_scores(diversity, safety)
-    excluded_abbrs = {"benign", *(abbr.lower() for abbr in args.exclude)}
+    excluded_abbrs = {abbr.lower() for abbr in args.exclude}
     pairs["included_in_correlation"] = ~pairs["abbr"].str.lower().isin(excluded_abbrs)
     print(f"Matched {len(safety)} runs across {safety['model'].nunique()} models "
           f"and {safety['abbr'].nunique()} subcategories")

@@ -528,14 +528,34 @@ def build_training_data(
             tokenizer,
             args.max_length,
         )
-    benign, benign_overlong = sample_pairs(
-        benign_pool,
-        benign_count,
-        f"WildJailbreak {args.benign_data_type!r}",
-        args.seed + 1,
-        tokenizer,
-        args.max_length,
-    )
+    if args.benign_data_type == "mix":
+        # Equal halves of vanilla and adversarial benign examples (vanilla gets
+        # the extra one when benign_count is odd).
+        parts = [
+            sample_pairs(
+                benign_pool[benign_pool["data_type"] == data_type],
+                share,
+                f"WildJailbreak {data_type!r}",
+                args.seed + 1,
+                tokenizer,
+                args.max_length,
+            )
+            for data_type, share in (
+                ("vanilla_benign", benign_count - benign_count // 2),
+                ("adversarial_benign", benign_count // 2),
+            )
+        ]
+        benign = pd.concat([part for part, _ in parts], ignore_index=True)
+        benign_overlong = sum(overlong for _, overlong in parts)
+    else:
+        benign, benign_overlong = sample_pairs(
+            benign_pool,
+            benign_count,
+            f"WildJailbreak {args.benign_data_type!r}",
+            args.seed + 1,
+            tokenizer,
+            args.max_length,
+        )
     general, general_overlong = sample_pairs(
         general_pool,
         general_count,

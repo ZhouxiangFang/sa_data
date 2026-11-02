@@ -1,19 +1,25 @@
-"""Plot harmful and prompt-loose IF scores for six models and their mean.
+"""Plot harmful, overrefusal and prompt-loose IF scores per model and their mean.
 
 Run from any directory: python sa_data/plot_bars_overall.py
 Select a result configuration with --suffix 800_wildguardmix; official
-and self-trained instruct baselines are always included.
+and self-trained instruct baselines are always included. --models selects
+the models (default: llama3.1 mistral olmo2 qwen2.5).
 Figures default to figs/<baseline>_<size>_<dataset> (for example,
 figs/git20k_800_wildguardmix),
 inferred from the loaded runs, or figs/<baseline>_<suffix> when selected.
 Use --output-dir to choose an explicit folder.
+Runs trained on the benign subcategory are left out (EXCLUDED_ABBRS): they
+replace the harmful prompts with benign ones, so they are not safety training.
 Harmful scores use the precomputed Avg row (a macro-average over safety
-datasets); IFBench and IFEval prompt_loose fractions are converted to percent.
-IF scores are averaged equally across IFBench and IFEval. Official and
+datasets); overrefusal scores use the Avg row of <run>_overrefusal.csv (a
+macro-average over XSTest and OR-Bench-Hard); IFBench and IFEval prompt_loose
+fractions are converted to percent and averaged equally. Official and
 self-trained instruct baselines come first, then the random and evenly
 training-data baselines, followed by subcategories ranked by descending harmful
-score. Pale gray bars beside the harmful bars show the
-secondary IF metric. The average figure gives each model equal weight.
+score. Pale blue and gray bars beside the harmful bars show the secondary
+overrefusal and IF metrics. The average figure gives each model equal weight.
+The same figures are drawn per safety test dataset in <output>/<test>/, with
+that dataset's harmful score in place of the Avg row.
 """
 
 import argparse
@@ -30,13 +36,26 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ("llama3", "llama3.1", "mistral", "olmo2", "qwen2.5", "qwen3")
+DEFAULT_MODELS = ("llama3.1", "mistral", "olmo2", "qwen2.5")
 METRICS = {
     "harmful_score_pct": ("Overall harmful ↓", "#D55E00"),
+    "overrefusal_score_pct": ("Mean XSTest / OR-Bench-Hard overrefusal ↓", "#0072B2"),
     "if_prompt_loose_pct": ("Mean IFBench / IFEval prompt_loose ↑", "#999999"),
+}
+# Safety test datasets in each run's overall CSV, each plotted in its own folder.
+TEST_DATASETS = {
+    "aegis": "Aegis",
+    "wildguardmix": "WildGuardMix",
+    "wildjailbreak": "WildJailbreak",
+    "ailuminate": "AILuminate",
+    "gretel": "Gretel",
 }
 # Mixed-subcategory training baselines (helper.BASELINE_ABBRS), shown in this
 # order between the instruct models and the ranked subcategories.
 BASELINE_ABBRS = ("random", "evenly")
+# Training subcategories left out of every figure and score table; benign runs
+# have no harmful prompts (align.py).
+EXCLUDED_ABBRS = ("benign",)
 
 
 def training_subcategory(version):
@@ -74,6 +93,8 @@ def discover_runs(results_dir, model, suffix=None):
                 and (category / f"{category.name}_overall.csv").is_file()
             }
         for label, run in selected.items():
+            if training_subcategory(label) in EXCLUDED_ABBRS:
+                continue
             if label in runs:
                 raise ValueError(
                     f"{model}: multiple runs for {label!r}; select one with --suffix"
@@ -98,21 +119,22 @@ def read_score(path, row_column, row_name, score_column, scale=1.0):
     return score
 
 
-def load_scores(results_dir, if_eval_dir, suffix=None):
+def load_scores(results_dir, if_eval_dir, models, suffix=None):
     rows = []
     versions = None
-    for model in MODELS:
+    for model in models:
         runs = discover_runs(results_dir, model, suffix)
         if versions is None:
             versions = list(runs)
         elif set(runs) != set(versions):
             raise ValueError(
-                f"{model}: versions differ from {MODELS[0]}; "
+                f"{model}: versions differ from {models[0]}; "
                 f"missing={sorted(set(versions) - set(runs))}, "
                 f"extra={sorted(set(runs) - set(versions))}"
             )
         for version, run in runs.items():
             overall = results_dir / run / f"{Path(run).name}_overall.csv"
+            overrefusal = results_dir / run / f"{Path(run).name}_overrefusal.csv"
             summary = if_eval_dir / f"{run}_if_summary.csv"
             rows.append({
                 "model": model,
@@ -120,6 +142,15 @@ def load_scores(results_dir, if_eval_dir, suffix=None):
                 "run": run,
                 "harmful_score_pct": read_score(
                     overall, "dataset", "Avg", "harmful_score_pct"
+                ),
+                **{
+                    f"{test}_harmful_score_pct": read_score(
+                        overall, "dataset", test, "harmful_score_pct"
+                    )
+                    for test in TEST_DATASETS
+                },
+                "overrefusal_score_pct": read_score(
+                    overrefusal, "dataset", "Avg", "overrefusal_score_pct"
                 ),
                 "ifbench_prompt_loose_pct": read_score(
                     summary, "benchmark", "IFBench", "prompt_loose", 100.0
@@ -158,7 +189,8 @@ def default_output_dir(data, versions, suffix=None):
     return ROOT / "figs" / f"{next(iter(baselines))}_{output_suffix}"
 
 
-def plot_bars(scores, versions, title, output_path):
+def plot_bars(scores, versions, title, output_path, harmful_column="harmful_score_pct",
+              harmful_label=METRICS["harmful_score_pct"][0]):
     baselines = ["-ins", "-20k"]
     trained = [version for version in versions if version not in baselines]
     mixes = sorted(
@@ -168,7 +200,7 @@ def plot_bars(scores, versions, title, output_path):
     subcategories = scores.reindex([
         version for version in trained if version not in mixes
     ]).sort_values(
-        "harmful_score_pct", ascending=False, kind="stable"
+        harmful_column, ascending=False, kind="stable"
     )
     groups = [group for group in (baselines, mixes, subcategories.index.tolist()) if group]
     versions = [version for group in groups for version in group]
@@ -178,21 +210,24 @@ def plot_bars(scores, versions, title, output_path):
     boundaries = np.cumsum([len(group) for group in groups])[:-1]
     for boundary in boundaries:
         x[boundary:] += 0.6
-    width = 0.34
-    offset = 0.19
-    fig, ax = plt.subplots(figsize=(max(12, len(versions) * 0.85), 7))
-    label, color = METRICS["if_prompt_loose_pct"]
-    if_bars = ax.bar(
-        x + offset, scores["if_prompt_loose_pct"], width, label=label, color=color,
-        alpha=0.25, edgecolor="none", zorder=2,
-    )
+    width = 0.27
+    offset = 0.29
+    fig, ax = plt.subplots(figsize=(max(12, len(versions) * 1.05), 7))
     label, color = METRICS["harmful_score_pct"]
     bars = ax.bar(
-        x - offset, scores["harmful_score_pct"], width, label=label, color=color,
+        x - offset, scores[harmful_column], width, label=harmful_label, color=color,
         zorder=3,
     )
     ax.bar_label(bars, fmt="%.1f", padding=4, fontsize=9)
-    ax.bar_label(if_bars, fmt="%.1f", padding=4, fontsize=7, color="0.5")
+    secondary = []
+    for column, shift in (("overrefusal_score_pct", 0), ("if_prompt_loose_pct", offset)):
+        label, color = METRICS[column]
+        handle = ax.bar(
+            x + shift, scores[column], width, label=label, color=color,
+            alpha=0.25, edgecolor="none", zorder=2,
+        )
+        ax.bar_label(handle, fmt="%.1f", padding=4, fontsize=7, color="0.5")
+        secondary.append(handle)
 
     labels = []
     training_sets = set()
@@ -216,7 +251,8 @@ def plot_bars(scores, versions, title, output_path):
     for boundary in boundaries:
         ax.axvline((x[boundary - 1] + x[boundary]) / 2, color="0.65",
                    linestyle="--", linewidth=1)
-    ymax = min(105, np.ceil(scores[list(METRICS)].to_numpy().max() / 10) * 10 + 10)
+    plotted = [harmful_column, "overrefusal_score_pct", "if_prompt_loose_pct"]
+    ymax = min(105, np.ceil(scores[plotted].to_numpy().max() / 10) * 10 + 10)
     ax.set_ylim(0, ymax)
     ax.set_yticks(np.arange(0, min(ymax, 100) + 1, 10 if ymax <= 70 else 20))
     ax.set_ylabel("Score (%)", fontsize=18)
@@ -227,8 +263,8 @@ def plot_bars(scores, versions, title, output_path):
     )
     ax.set_title(title, pad=48, fontsize=23)
     ax.legend(
-        handles=[bars, if_bars], loc="lower center",
-        bbox_to_anchor=(0.5, 1.01), ncol=2, frameon=False, fontsize=13,
+        handles=[bars, *secondary], loc="lower center",
+        bbox_to_anchor=(0.5, 1.01), ncol=3, frameon=False, fontsize=13,
     )
     ax.set_axisbelow(True)
     ax.grid(axis="y", linestyle="--", alpha=0.3)
@@ -254,6 +290,10 @@ def main():
         "--output-dir", type=Path,
         help="Output folder (default: ROOT/figs/<baseline>_<suffix or size_dataset>)",
     )
+    parser.add_argument(
+        "--models", nargs="+", choices=MODELS, default=list(DEFAULT_MODELS),
+        help="Models to plot and average (default: %(default)s)",
+    )
     args = parser.parse_args()
     if args.suffix is not None:
         args.suffix = args.suffix.lstrip("_")
@@ -262,24 +302,32 @@ def main():
     try:
         data, versions = load_scores(
             args.results_dir, args.if_eval_dir or args.results_dir / "if_eval",
-            args.suffix,
+            args.models, args.suffix,
         )
         output_dir = args.output_dir or default_output_dir(data, versions, args.suffix)
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    for model in MODELS:
+    for model in args.models:
         scores = data.loc[data["model"] == model].set_index("version")
         plot_bars(scores, versions, model, output_dir / f"{model}_overall.png")
 
     score_columns = [column for column in data if column.endswith("_pct")]
     average = data.groupby("version")[score_columns].mean().reindex(versions)
-    plot_bars(
-        average, versions, f"Average across {len(MODELS)} models (equal weight)",
-        output_dir / "average_overall.png",
-    )
-    # Export the exact plotted numbers, including the six-model means.
+    average_title = f"Average across {len(args.models)} models (equal weight)"
+    plot_bars(average, versions, average_title, output_dir / "average_overall.png")
+    for test, name in TEST_DATASETS.items():
+        test_dir = output_dir / test
+        test_dir.mkdir(exist_ok=True)
+        column = f"{test}_harmful_score_pct"
+        for model in args.models:
+            scores = data.loc[data["model"] == model].set_index("version")
+            plot_bars(scores, versions, f"{model}: {name} test", test_dir / f"{model}_{test}.png",
+                      column, f"{name} harmful ↓")
+        plot_bars(average, versions, f"{average_title}: {name} test",
+                  test_dir / f"average_{test}.png", column, f"{name} harmful ↓")
+    # Export the exact plotted numbers, including the model means.
     average = average.reset_index().assign(model="Average", run="")
     table_path = output_dir / "overall_scores.csv"
     pd.concat([data, average], ignore_index=True).to_csv(

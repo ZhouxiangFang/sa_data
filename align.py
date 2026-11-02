@@ -106,7 +106,7 @@ def parse_args() -> argparse.Namespace:
         choices=BENIGN_DATA_TYPES,
         default="vanilla_benign",
         help=(
-            "WildJailbreak benign data to use. 'mix' samples from both vanilla "
+            "WildJailbreak benign data to use. 'mix' samples equal halves of vanilla "
             "and adversarial benign examples (default: vanilla_benign)."
         ),
     )
