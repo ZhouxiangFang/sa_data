@@ -35,15 +35,14 @@ import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parent.parent
-# Project layout. results/ and if_eval/ hold the safety and IF results of the
-# default 1:1:1 (harmful : benign : general) runs and the instruct baselines;
-# every other training setting is in ablations/<setting>/, with its IF results in
-# ablations/<setting>/if_eval/. Diversity results are in diversity/.
+# Project layout. results/ holds the safety results of the default 1:1:1
+# (harmful : benign : general) runs and the instruct baselines; every other
+# training setting is in ablations/<setting>/. Each such folder keeps its IF
+# results in its own if_eval/ subfolder. Diversity results are in diversity/.
 RESULTS_DIR = ROOT / "results"
-IF_EVAL_DIR = ROOT / "if_eval"
 ABLATIONS_DIR = ROOT / "ablations"
 DIVERSITY_DIR = ROOT / "diversity"
-MODELS =("llama3", "llama3.1", "mistral", "olmo2", "qwen2.5", "qwen3")
+MODELS = ("llama3", "llama3.1", "mistral", "olmo2", "qwen2.5", "qwen3")
 DEFAULT_MODELS = ("llama3.1", "mistral", "olmo2", "qwen2.5")
 METRICS = {
     "harmful_score_pct": ("Overall harmful ↓", "#D55E00"),
@@ -64,12 +63,6 @@ BASELINE_ABBRS = ("random", "evenly")
 # Training subcategories left out of every figure and score table; benign runs
 # have no harmful prompts (align.py).
 EXCLUDED_ABBRS = ("benign",)
-
-
-def default_if_eval_dir(results_dir):
-    """IF summaries for a safety result folder: if_eval/ for results/, else <folder>/if_eval."""
-    results_dir = Path(results_dir)
-    return IF_EVAL_DIR if results_dir.resolve() == RESULTS_DIR.resolve() else results_dir / "if_eval"
 
 
 def training_subcategory(version):
@@ -298,8 +291,7 @@ def main():
     )
     parser.add_argument(
         "--if-eval-dir", type=Path,
-        help="IF summary directory (default: ROOT/if_eval for ROOT/results, "
-             "otherwise RESULTS_DIR/if_eval)",
+        help="IF summary directory (default: RESULTS_DIR/if_eval)",
     )
     parser.add_argument(
         "--output-dir", type=Path,
@@ -316,7 +308,7 @@ def main():
             parser.error("--suffix must be a nonempty folder-name suffix without path separators")
     try:
         data, versions = load_scores(
-            args.results_dir, args.if_eval_dir or default_if_eval_dir(args.results_dir),
+            args.results_dir, args.if_eval_dir or args.results_dir / "if_eval",
             args.models, args.suffix,
         )
         output_dir = args.output_dir or default_output_dir(data, versions, args.suffix)

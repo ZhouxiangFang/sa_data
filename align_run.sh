@@ -40,7 +40,7 @@ Examples:
 
 Benign safety examples fill the remaining fraction: the default mixture is
 600 harmful safety + 600 benign safety + 600 general instructions (1:1:1).
-Default-mixture results go to ../results and ../if_eval (eval_run.sh defaults);
+Default-mixture results go to ../results and ../results/if_eval (eval_run.sh defaults);
 evaluate every other setting into ../ablations/<setting>/ instead
 (--safe-output-dir ../ablations/<setting> --if-output-dir ../ablations/<setting>/if_eval).
 

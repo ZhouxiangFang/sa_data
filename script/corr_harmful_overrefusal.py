@@ -1,7 +1,7 @@
 """Correlate harmful and overrefusal rates across training runs.
 
 Example (run from any directory):
-    python sa_data/corr_harmful_overrefusal.py --datasets aegis wildguardmix gretel
+    python sa_data/script/corr_harmful_overrefusal.py --datasets aegis wildguardmix gretel
 
 For each training dataset, the points are the runs in
 results/<model>_git20k_<size>_<dataset>/ (every subcategory except benign, plus
@@ -23,6 +23,7 @@ p < 0.05) and <dataset>/correlations.csv; and a combined correlations.csv.
 """
 
 import argparse
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -33,8 +34,11 @@ import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 
+# sa_data/ holds the shared modules this script imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from plot_bars_overall import (DEFAULT_MODELS, MODELS, RESULTS_DIR, ROOT, TEST_DATASETS,
-                               default_if_eval_dir, load_scores, training_subcategory)
+                               load_scores, training_subcategory)
 
 
 CORRELATIONS = {"pearson": pearsonr, "spearman": spearmanr}
@@ -185,7 +189,7 @@ def main():
 
     tables = []
     for dataset in args.datasets:
-        data, _ = load_scores(args.results_dir, default_if_eval_dir(args.results_dir), args.models,
+        data, _ = load_scores(args.results_dir, args.results_dir / "if_eval", args.models,
                               f"{args.train_size}_{dataset}")
         data = harmful_rates(data.loc[~data["version"].isin(["-ins", "-20k"])], dataset)
         columns = ["overrefusal_score_pct", *HARMFUL_RATES]

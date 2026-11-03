@@ -1,7 +1,7 @@
 """Correlate training-data diversity with post-training overrefusal.
 
 Example (run from any directory):
-    python sa_data/corr_diversity_overrefusal.py --datasets aegis wildguardmix gretel
+    python sa_data/script/corr_diversity_overrefusal.py --datasets aegis wildguardmix gretel
 
 The counterpart of plot_bars_diversity.py with overrefusal (the Avg row of
 <run>_overrefusal.csv, a macro-average over XSTest and OR-Bench-Hard; lower is
@@ -13,7 +13,7 @@ plot_bars_diversity.py, the benign training subcategory is dropped, --exclude
 subcategories are plotted but left out of correlations, Self-BLEU is negated so larger always means more
 diverse, and "Average" correlates the equally weighted model-mean overrefusal;
 "Mean coefficient" averages the per-model coefficients.
-Outputs go to diversity/overrefusal/ (or --output-dir): per training
+Outputs go to diversity/overrefusal_correlation/ (or --output-dir): per training
 dataset, <dataset>/<model>_<group>_diversity_vs_overrefusal.png for the lexical,
 semantic and structural groups (every model and the average),
 <dataset>/correlations.png (Pearson and Spearman heatmaps, * marks p < 0.05) and
@@ -21,6 +21,7 @@ semantic and structural groups (every model and the average),
 """
 
 import argparse
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -30,12 +31,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+# sa_data/ holds the shared modules this script imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from plot_bars_diversity import (CORRELATIONS, FIGURE_METRICS, GROUPS, LABELS, PLOT_METHODS,
                                  correlation_table, join_scores, load_diversity, plot_scatter,
                                  save_figure)
 from plot_bars_overall import (DEFAULT_MODELS, DIVERSITY_DIR, MODELS, RESULTS_DIR,
-                               TEST_DATASETS, default_if_eval_dir, load_scores,
-                               training_subcategory)
+                               TEST_DATASETS, load_scores, training_subcategory)
 
 
 SCORE = "overrefusal_score_pct"
@@ -43,7 +46,7 @@ SCORE = "overrefusal_score_pct"
 
 def load_overrefusal(results_dir, models, suffix):
     """Overrefusal per model and training subcategory, without instruct baselines."""
-    data, _ = load_scores(results_dir, default_if_eval_dir(results_dir), models, suffix)
+    data, _ = load_scores(results_dir, results_dir / "if_eval", models, suffix)
     data = data.loc[~data["version"].isin(["-ins", "-20k"])]
     return data.assign(abbr=data["version"].map(training_subcategory))[
         ["model", "abbr", "run", SCORE]
@@ -120,7 +123,8 @@ def main():
                         help="Subcategories to exclude from correlations")
     parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
     parser.add_argument("--diversity-dir", type=Path, default=DIVERSITY_DIR)
-    parser.add_argument("--output-dir", type=Path, default=DIVERSITY_DIR / "overrefusal")
+    parser.add_argument("--output-dir", type=Path,
+                        default=DIVERSITY_DIR / "overrefusal_correlation")
     args = parser.parse_args()
 
     methods = list(CORRELATIONS)

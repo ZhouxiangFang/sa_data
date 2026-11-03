@@ -13,7 +13,8 @@ set -uo pipefail
 # SKIP_STAGES lists comma-separated stage names to skip, e.g.
 # SKIP_STAGES="train vanilla_benign".
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# This launcher is in sa_data/script/; align_run.sh and eval_run.sh are in sa_data/.
+sa_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 models_dir=/home/zf28/models/20k
 models=(llama3.1_git20k mistral_git20k olmo2_git20k qwen2.5_git20k)
 failed=()
@@ -40,14 +41,14 @@ stage() {
 for variant in vanilla_benign mix; do
     tag=h0.2_${variant%_benign}
     ckpt_dir=/scratch/zf28/ckpts/$tag
-    results_dir=$script_dir/../ablations/$tag
+    results_dir=$sa_dir/../ablations/$tag
     stage "train $variant" \
-        "$script_dir/align_run.sh" --models "${models[@]/#/$models_dir/}" \
+        "$sa_dir/align_run.sh" --models "${models[@]/#/$models_dir/}" \
         --datasets aegis wildguardmix gretel --abbrs evenly \
         --num_train 3000 --harmful_rate 0.2 --general_rate 0.4 \
         --benign_data_type "$variant" --output_dir "$ckpt_dir"
     stage "evaluate $variant" \
-        "$script_dir/eval_run.sh" --folder "$ckpt_dir" \
+        "$sa_dir/eval_run.sh" --folder "$ckpt_dir" \
         --safe-output-dir "$results_dir" --if-output-dir "$results_dir/if_eval"
 done
 

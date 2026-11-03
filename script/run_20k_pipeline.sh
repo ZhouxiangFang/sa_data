@@ -13,7 +13,8 @@ set -uo pipefail
 # script resumes training. SKIP_STAGES lists comma-separated stage names to skip,
 # e.g. SKIP_STAGES="gretel test for instruct models".
 
-script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# This launcher is in sa_data/script/; align_run.sh and eval_run.sh are in sa_data/.
+sa_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 models_dir=/home/zf28/models/20k
 ckpt_root=/scratch/zf28/ckpts
 failed=()
@@ -36,16 +37,16 @@ stage() {
 }
 
 stage "gretel test for instruct models" \
-    "$script_dir/eval_safe_run.sh" \
+    "$sa_dir/eval_safe_run.sh" \
     --models llama3-ins,llama3.1-ins,mistral-ins,olmo2-ins,qwen2.5-ins,qwen3-ins \
     --folder "$models_dir" --datasets gretel --merge
 
 for dataset in aegis wildguardmix gretel; do
     ckpt_dir="$ckpt_root/20k_$dataset"
     stage "train $dataset" \
-        "$script_dir/align_run.sh" --folder "$models_dir" --datasets "$dataset" \
+        "$sa_dir/align_run.sh" --folder "$models_dir" --datasets "$dataset" \
         --output_dir "$ckpt_dir"
-    stage "evaluate $dataset" "$script_dir/eval_run.sh" --folder "$ckpt_dir"
+    stage "evaluate $dataset" "$sa_dir/eval_run.sh" --folder "$ckpt_dir"
 done
 
 echo

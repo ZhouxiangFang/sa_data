@@ -6,8 +6,8 @@ available subcategory summary files for the selected dataset and training size.
 The output uses three header rows to represent metric -> benchmark -> training stage.
 
 Example:
-    python summarize_eval_if.py
-    python summarize_eval_if.py --dataset gretel --num-train 1800
+    python sa_data/script/summarize_eval_if.py
+    python sa_data/script/summarize_eval_if.py --dataset gretel --num-train 1800
 """
 
 import argparse
@@ -33,7 +33,7 @@ DEFAULT_MODELS = (
     "qwen2.5_git20k",
     "qwen3_git20k",
 )
-STATS_PATH = Path(__file__).resolve().parent.parent / "data" / "subcategory_stats.json"
+STATS_PATH = Path(__file__).resolve().parents[2] / "data" / "subcategory_stats.json"
 
 
 def expected_subcategories(dataset):
@@ -129,8 +129,8 @@ def summarize_model(input_dir, model, dataset="wildguardmix", num_train=800):
 
 
 def parse_args():
-    project_dir = Path(__file__).resolve().parent.parent
-    default_input = project_dir / "if_eval"
+    project_dir = Path(__file__).resolve().parents[2]
+    default_input = project_dir / "results" / "if_eval"
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(

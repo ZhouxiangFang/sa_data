@@ -291,9 +291,10 @@ def main():
     parser.add_argument(
         "--output_dir",
         default=os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "if_eval",
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "results", "if_eval",
         ),
-        help="Result root (default: if_eval next to sa_data, independent of working directory).",
+        help="Result root (default: results/if_eval next to sa_data, independent of working directory).",
     )
     parser.add_argument("--max_tokens", type=int, default=4096)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)

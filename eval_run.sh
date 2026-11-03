@@ -20,7 +20,7 @@ Options:
   --tensor_parallel_size N     GPUs used by one IF evaluation (default: 1)
   --guard MODEL                Guard used by the safety evaluation
   --permit                     Enable the safety evaluation permit prompt
-  --if-output-dir DIR          IF evaluation result directory (default: ../if_eval)
+  --if-output-dir DIR          IF evaluation result directory (default: ../results/if_eval)
   --safe-output-dir DIR        Safety evaluation result directory (default: ../results)
                                Use ../ablations/<setting> and
                                ../ablations/<setting>/if_eval for any training
