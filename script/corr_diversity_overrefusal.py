@@ -9,7 +9,9 @@ better) in place of the harmful score. Diversity is read from
 diversity/<embedder>/csv/<dataset>_train_diversity_*.csv and overrefusal
 from results/<model>_git20k_<size>_<dataset>/, through
 plot_bars_overall.load_scores, so it matches the plotted bars. As in
-plot_bars_diversity.py, the benign training subcategory is dropped, --exclude
+plot_bars_diversity.py, the random and evenly baselines are correlated with
+the subcategories unless --no-baselines is given, the benign training
+subcategory is dropped, --exclude
 subcategories are plotted but left out of correlations, Self-BLEU is negated so larger always means more
 diverse, and "Average" correlates the equally weighted model-mean overrefusal;
 "Mean coefficient" averages the per-model coefficients.
@@ -37,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from plot_bars_diversity import (CORRELATIONS, FIGURE_METRICS, GROUPS, LABELS, PLOT_METHODS,
                                  correlation_table, join_scores, load_diversity, plot_scatter,
                                  save_figure)
-from plot_bars_overall import (DEFAULT_MODELS, DIVERSITY_DIR, MODELS, RESULTS_DIR,
+from plot_bars_overall import (BASELINE_ABBRS, DEFAULT_MODELS, DIVERSITY_DIR, MODELS, RESULTS_DIR,
                                TEST_DATASETS, load_scores, training_subcategory)
 
 
@@ -62,7 +64,7 @@ def diversity_csv(diversity_dir, embedder, dataset):
     return paths[0]
 
 
-def plot_heatmaps(table, dataset, context, path):
+def plot_heatmaps(table, dataset, context, path, points="subcategories"):
     """Metric x model coefficients, one heatmap per plotted method."""
     models = list(table["model"].unique())
     fig, axes = plt.subplots(1, len(PLOT_METHODS), figsize=(18, 10), sharey=True,
@@ -100,12 +102,10 @@ def plot_heatmaps(table, dataset, context, path):
     fig.colorbar(image, ax=axes, shrink=0.6,
                  label="Coefficient (negative: more diverse, less overrefusal)")
     n = table.loc[table["model"] != "Mean coefficient", "n_subcategories"]
+    count = f"{n.min()}–{n.max()}" if n.nunique() > 1 else f"{n.iloc[0]}"
     fig.suptitle(f"{dataset}: training-data diversity vs. post-training overrefusal\n"
-                 f"{context}; {n.min()}–{n.max()} subcategories; * p < 0.05 (not computed for "
-                 "mean coefficients)" if n.nunique() > 1 else
-                 f"{dataset}: training-data diversity vs. post-training overrefusal\n"
-                 f"{context}; {n.iloc[0]} subcategories; * p < 0.05 (not computed for mean "
-                 "coefficients)", fontsize=15)
+                 f"{context}; {count} {points}; * p < 0.05 (not computed for "
+                 "mean coefficients)", fontsize=15)
     save_figure(fig, path)
 
 
@@ -121,6 +121,8 @@ def main():
     parser.add_argument("--train-size", type=int, default=1800)
     parser.add_argument("--exclude", nargs="*", default=[],
                         help="Subcategories to exclude from correlations")
+    parser.add_argument("--no-baselines", dest="baselines", action="store_false",
+                        help="Leave out the random and evenly baselines (default: include them)")
     parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
     parser.add_argument("--diversity-dir", type=Path, default=DIVERSITY_DIR)
     parser.add_argument("--output-dir", type=Path,
@@ -131,7 +133,8 @@ def main():
     excluded = {abbr.lower() for abbr in args.exclude}
     tables = []
     for dataset in args.datasets:
-        diversity = load_diversity(diversity_csv(args.diversity_dir, args.embedder, dataset))
+        diversity = load_diversity(diversity_csv(args.diversity_dir, args.embedder, dataset),
+                                   args.baselines)
         suffix = f"{args.train_size}_{dataset}"
         safety = load_overrefusal(args.results_dir, args.models, suffix)
         pairs = join_scores(diversity, safety, SCORE)
@@ -155,8 +158,10 @@ def main():
                 plot_scatter(scores, table.loc[table["model"] == model], title, context,
                              dataset_dir / f"{model.lower()}_{group}_diversity_vs_overrefusal.png",
                              group, score=SCORE)
+        points = ("training sets (subcategories + random/evenly baselines)"
+                  if pairs["abbr"].isin(BASELINE_ABBRS).any() else "subcategories")
         plot_heatmaps(table, dataset, f"embeddings: {args.embedder}",
-                      dataset_dir / "correlations.png")
+                      dataset_dir / "correlations.png", points)
         tables.append(table.assign(train_dataset=dataset))
 
     path = args.output_dir / "correlations.csv"

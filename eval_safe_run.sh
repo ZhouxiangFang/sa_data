@@ -17,6 +17,9 @@ Examples:
   ./eval_safe_run.sh --models qwen2.5-ins --datasets xstest or-bench-hard
 
 All safety benchmarks plus XSTest (safe only) and OR-Bench-Hard run by default.
+Every prompt is generated and judged, but harmful scores count only harmful
+prompts; benign WildGuardMix/Aegis/WildJailbreak prompts stay in the
+*_responses.csv files (prompt_type column). Pass --score_all_prompts to count them.
 Overrefusal summaries are saved as <prefix>_overrefusal.csv (lower is better).
 Results default to ../results relative to this script. Override with --output_dir DIR.
 Aligned checkpoints save to <model>_<num_train>_<dataset_name>/<dataset>_<subcategory>/.

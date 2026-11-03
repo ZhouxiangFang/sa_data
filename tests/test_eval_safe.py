@@ -119,6 +119,47 @@ class OverrefusalTests(unittest.TestCase):
             self.assertTrue(pd.isna(saved["is_refusal"].iloc[2]))
             self.assertNotIn("is_unsafe", saved)
 
+    def test_prompt_types_follow_each_test_set_labels(self):
+        cases = {
+            "wildguardmix": ({"prompt_harm_label": ["harmful", "unharmful", None]},
+                             ["harmful", "benign", "unknown"]),
+            "aegis": ({"prompt_label": ["unsafe", "Safe"]}, ["harmful", "benign"]),
+            "wildjailbreak": ({"subcategory": ["adversarial_harmful", "adversarial_benign"]},
+                              ["harmful", "benign"]),
+            "gretel": ({"prompt": ["a", "b"]}, ["harmful", "harmful"]),
+            "ailuminate": ({"prompt": ["a"]}, ["harmful"]),
+            "xstest": ({"prompt": ["a"]}, ["benign"]),
+        }
+        for name, (columns, expected) in cases.items():
+            with self.subTest(name=name):
+                types = helper.prompt_types(pd.DataFrame(columns), name)
+                self.assertEqual(types.tolist(), expected)
+
+    def test_harmful_score_counts_only_harmful_prompts(self):
+        dataset = responses([1, 0, 0, 1], "is_unsafe").assign(
+            prompt_type=["harmful", "harmful", "benign", "unknown"],
+            subcategory=["a", "b", "benign", "b"],
+        )
+        for all_prompts, total, harmful, subcategories in (
+            (False, 2, 1, ["overall", "a", "b"]),
+            (True, 4, 2, ["overall", "b", "a", "benign"]),
+        ):
+            with (self.subTest(all_prompts=all_prompts), tempfile.TemporaryDirectory() as directory,
+                  contextlib.redirect_stdout(io.StringIO())):
+                eval_safe.save_results({"wildguardmix": dataset}, directory, "model",
+                                       all_prompts=all_prompts)
+                root = Path(directory)
+                overall = pd.read_csv(root / "model_overall.csv").set_index("dataset")
+                self.assertEqual(overall.loc["wildguardmix", "total"], total)
+                self.assertEqual(overall.loc["wildguardmix", "harmful"], harmful)
+                breakdown = pd.read_csv(root / "model_wildguardmix.csv")
+                self.assertEqual(breakdown["subcategory"].tolist(), subcategories)
+                # Benign and unlabeled prompts are still saved with their type.
+                saved = pd.read_csv(root / "model_wildguardmix_responses.csv")
+                self.assertEqual(saved["prompt_type"].tolist(),
+                                 ["harmful", "harmful", "benign", "unknown"])
+                self.assertEqual(saved["is_unsafe"].tolist(), [1, 0, 0, 1])
+
     def test_cli_defaults_include_both_benchmarks(self):
         with patch.object(sys, "argv", ["eval_safe.py"]):
             args = eval_safe.parse_args()

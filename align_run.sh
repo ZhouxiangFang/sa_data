@@ -17,7 +17,7 @@ Launcher options:
   --models MODEL [MODEL ...]      Space- or comma-separated models
   --folder DIR                    Add immediate child directories with config.json
   --datasets DATASET [DATASET...] Space- or comma-separated datasets
-                                 Default: wildguardmix aegis; also supports gretel
+                                 Default: wildguardmix aegis gretel
   --abbrs ABBR [ABBR ...]         Space- or comma-separated subcategories to run
                                  Default: every eligible subcategory plus the
                                  random and evenly baselines
@@ -138,7 +138,7 @@ while (( $# > 0 )); do
 done
 
 if (( ${#datasets[@]} == 0 )); then
-    datasets=(wildguardmix aegis)
+    datasets=(wildguardmix aegis gretel)
 fi
 
 # A folder contributes each immediate checkpoint directory containing config.json.

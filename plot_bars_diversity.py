@@ -32,7 +32,10 @@ CSVs with a test_dataset column. Correlations use negative Self-BLEU so larger a
 means more diverse. Average correlations are computed against equally weighted
 model-mean harmful scores on subcategories available for every model; they
 are not averages of correlation coefficients. The pooled overall diversity
-reference is excluded from correlations. The benign training subcategory is
+reference is excluded from correlations. The random and evenly training-data
+baselines (rows written by calculate_diversity.py, trained by align_run.sh)
+are correlated with the subcategories by default and drawn as squares;
+--no-baselines leaves them out. The benign training subcategory is
 dropped from figures and CSVs (plot_bars_overall.EXCLUDED_ABBRS); --exclude
 subcategories are plotted but excluded from correlation coefficients and fitted
 lines. CSV exports contain plotted pairs
@@ -58,7 +61,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import kendalltau, pearsonr, spearmanr
 
-from plot_bars_overall import DEFAULT_MODELS, DIVERSITY_DIR, EXCLUDED_ABBRS, MODELS, RESULTS_DIR
+from plot_bars_overall import (BASELINE_ABBRS, DEFAULT_MODELS, DIVERSITY_DIR, EXCLUDED_ABBRS,
+                               MODELS, RESULTS_DIR)
 
 
 # Column prefix: (section title, color). Colors are the first three slots of the
@@ -110,9 +114,11 @@ TEST_DATASETS = {
 }
 
 
-def load_diversity(path):
+def load_diversity(path, baselines=True):
+    """Read a diversity CSV; baselines=False drops the random and evenly rows."""
     data = pd.read_csv(path)
-    data = data.loc[~data["abbr"].str.lower().isin(EXCLUDED_ABBRS)].reset_index(drop=True)
+    excluded = EXCLUDED_ABBRS if baselines else (*EXCLUDED_ABBRS, *BASELINE_ABBRS)
+    data = data.loc[~data["abbr"].str.lower().isin(excluded)].reset_index(drop=True)
     missing = {"abbr", *METRICS} - set(data.columns)
     if missing:
         raise ValueError(f"{path}: missing columns {sorted(missing)}")
@@ -233,6 +239,15 @@ def correlation_table(pairs, methods, score="harmful_score_pct"):
     return pd.DataFrame(rows)
 
 
+def coverage_label(counts, baselines=False):
+    """Describe how many training sets (subcategories and baselines) were correlated."""
+    count = (f"{counts.iloc[0]}" if counts.nunique() == 1
+             else f"{counts.min()}–{counts.max()}")
+    if baselines:
+        return f"Correlations across {count} training sets (subcategories + random/evenly baselines)"
+    return f"Correlations across {count} subcategories"
+
+
 def style_axis(ax):
     ax.set_axisbelow(True)
     ax.grid(axis="y", linestyle="--", alpha=0.3)
@@ -250,16 +265,19 @@ def save_figure(fig, path):
 
 def plot_diversity(data, metric, context, path):
     label, sign, color = METRICS[metric]
-    reference = data.loc[data["abbr"] == "overall"]
-    subs = data.loc[data["abbr"] != "overall"].sort_values(
+    first = ["overall", *BASELINE_ABBRS]
+    reference = data.loc[data["abbr"].isin(first)].sort_values(
+        "abbr", key=lambda abbrs: abbrs.map(first.index))
+    subs = data.loc[~data["abbr"].isin(first)].sort_values(
         metric, ascending=sign > 0, kind="stable"
     )
     ordered = pd.concat([reference, subs])
     x = np.arange(len(ordered), dtype=float)
     if len(reference):
-        x[1:] += 0.6
+        x[len(reference):] += 0.6
     fig, ax = plt.subplots(figsize=(max(12, len(ordered) * 0.85), 7))
-    colors = ["#999999" if abbr == "overall" else color for abbr in ordered["abbr"]]
+    colors = ["#999999" if abbr == "overall" else "#c4c4c4" if abbr in BASELINE_ABBRS
+              else color for abbr in ordered["abbr"]]
     # Display bounded ratios as percentages; other metrics keep their native units.
     scale = 100 if metric in PERCENT_METRICS else 1
     values = ordered[metric] * scale
@@ -271,7 +289,9 @@ def plot_diversity(data, metric, context, path):
                         xytext=(0, 4), textcoords="offset points", ha="center", fontsize=9)
     ax.set_xticks(x, ordered["abbr"], rotation=45, ha="right", rotation_mode="anchor")
     if len(reference) and len(subs):
-        ax.axvline((x[0] + x[1]) / 2, color="0.65", linestyle="--", linewidth=1)
+        boundary = len(reference)
+        ax.axvline((x[boundary - 1] + x[boundary]) / 2, color="0.65", linestyle="--",
+                   linewidth=1)
     low, high = float(values.min()), float(values.max())
     span = max(high - low, 0.02 * abs(high), 1e-9)
     ax.set_ylim(max(0, low - span * 0.15), high + span * 0.22)
@@ -292,8 +312,11 @@ def plot_scatter_panel(ax, scores, correlations, metric, test_dataset, show_ylab
     x, y, abbreviations = finite_pairs(scores, metric, score=score)
     excluded_abbrs = set(scores.loc[~correlation_mask(scores), "abbr"])
     excluded = np.array([abbr in excluded_abbrs for abbr in abbreviations], dtype=bool)
-    ax.scatter(x[~excluded], y[~excluded], color=color, s=48, edgecolors="white",
-               linewidths=1, zorder=3)
+    baseline = np.array([abbr in BASELINE_ABBRS for abbr in abbreviations], dtype=bool)
+    ax.scatter(x[~excluded & ~baseline], y[~excluded & ~baseline], color=color, s=48,
+               edgecolors="white", linewidths=1, zorder=3)
+    ax.scatter(x[~excluded & baseline], y[~excluded & baseline], color=color, marker="s",
+               s=58, edgecolors="black", linewidths=1, zorder=4)
     if excluded.any():
         ax.scatter(x[excluded], y[excluded], facecolors="none", edgecolors="0.3",
                    marker="D", s=60, zorder=4)
@@ -369,19 +392,21 @@ def plot_scatter(scores, correlations, title, context, path, group, test_dataset
     handles = [
         Line2D([], [], marker="o", linestyle="", color=color, markersize=8,
                label="Subcategory"),
-        Line2D([], [], color=color, alpha=0.65, linewidth=1.5,
-               label="Least-squares fit on correlated subcategories"),
     ]
+    if scores["abbr"].isin(BASELINE_ABBRS).any():
+        handles.append(Line2D([], [], marker="s", linestyle="", color=color,
+                              markeredgecolor="black", markersize=8,
+                              label="Random / evenly baseline"))
+    handles.append(Line2D([], [], color=color, alpha=0.65, linewidth=1.5,
+                          label="Least-squares fit on correlated points"))
     if (~correlation_mask(scores)).any():
         handles.append(Line2D([], [], marker="D", linestyle="", markerfacecolor="none",
                               markeredgecolor="0.3", markersize=8,
                               label="Excluded from correlation (--exclude)"))
     fig.legend(handles=handles, loc="outside lower center",
                ncols=len(handles) if width > 12 else 1, fontsize=11, frameon=False)
-    counts = group_correlations["n_subcategories"]
-    coverage = (f"Correlations across {counts.iloc[0]} subcategories"
-                if counts.nunique() == 1 else
-                f"Correlations across {counts.min()}–{counts.max()} subcategories")
+    coverage = coverage_label(group_correlations["n_subcategories"],
+                              scores["abbr"].isin(BASELINE_ABBRS).any())
     methods = "/".join(method.title() for method in group_correlations["method"].unique())
     coverage += f"; shaded = two lowest mean {methods} correlations, bold = lowest"
     if test_dataset != "Avg":
@@ -393,7 +418,7 @@ def plot_scatter(scores, correlations, title, context, path, group, test_dataset
     save_figure(fig, path)
 
 
-def plot_correlations(table, metric, method, context, path):
+def plot_correlations(table, metric, method, context, path, baselines=False):
     scores = table.loc[(table["metric"] == metric) & (table["method"] == method)]
     x = np.arange(len(scores), dtype=float)
     colors = ["#999999" if model == "Average" else METRICS[metric][2]
@@ -418,10 +443,9 @@ def plot_correlations(table, metric, method, context, path):
     label, sign, _ = METRICS[metric]
     ax.set_title(f"Diversity ({'negative ' if sign < 0 else ''}{label}) vs. overall harmful score",
                  fontsize=23, pad=20)
-    counts = scores["n_subcategories"]
-    coverage = (f"Correlations across {counts.iloc[0]} subcategories"
-                if counts.nunique() == 1 else
-                f"Correlations across {counts.min()}–{counts.max()} subcategories (varies by model)")
+    coverage = coverage_label(scores["n_subcategories"], baselines)
+    if scores["n_subcategories"].nunique() > 1:
+        coverage += " (varies by model)"
     ax.set_xlabel(f"{context}\n{coverage}; outliers excluded", fontsize=14, labelpad=12)
     style_axis(ax)
     save_figure(fig, path)
@@ -452,6 +476,9 @@ def main():
     parser.add_argument("--exclude", nargs="*", default=[],
                         help="Subcategories to exclude from correlations, "
                              "while keeping them plotted and in CSVs")
+    parser.add_argument("--no-baselines", dest="baselines", action="store_false",
+                        help="Leave the random and evenly training-data baselines out of "
+                             "correlations and figures (default: include them)")
     parser.add_argument("--all-plots", action="store_true",
                         help="Also draw per-metric bar charts, per-model scatter plots, "
                              "correlation bar charts and per-test-dataset average plots")
@@ -469,7 +496,7 @@ def main():
             f"{dataset}_train_diversity_{args.train_size or 800}_1.0.csv"
         )
     try:
-        diversity = load_diversity(csv_path)
+        diversity = load_diversity(csv_path, args.baselines)
         dataset = args.dataset or csv_path.stem.split("_diversity")[0]
         dataset = dataset.removesuffix("_train").removesuffix("_test")
         size = args.train_size
@@ -555,6 +582,7 @@ def main():
             plot_correlations(
                 table, metric, method, context,
                 fig_dir / f"{dataset}_corr_{metric.rstrip('↑↓')}_vs_harmful_{method}.png",
+                baselines=pairs["abbr"].isin(BASELINE_ABBRS).any(),
             )
     test_pairs, test_correlations = [], []
     for test in TEST_DATASETS:

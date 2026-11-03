@@ -72,6 +72,33 @@ def baseline_abbrs(dataset_name, harmful_count):
 
 safety_test_datasets = ["wildguardmix", "aegis", "wildjailbreak", "ailuminate", "gretel"]
 overrefusal_test_datasets = ["xstest", "or-bench-hard"]
+# Prompt types of test prompts. Every prompt is generated and judged, but the
+# harmful score counts only harmful prompts (eval_safe.py).
+HARMFUL_PROMPT, BENIGN_PROMPT, UNKNOWN_PROMPT = "harmful", "benign", "unknown"
+
+
+def prompt_types(df, dataset_name):
+    """Label each test prompt harmful, benign, or unknown (no prompt label).
+
+    WildGuardMix uses prompt_harm_label, Aegis prompt_label, and WildJailbreak
+    its data type (adversarial_harmful / adversarial_benign, kept in
+    subcategory). AILuminate and Gretel contain only harmful prompts; XSTest
+    and OR-Bench-Hard (after load_safety_dataset's filtering) only benign ones.
+    """
+    dataset_name = dataset_name.lower()
+    if dataset_name in ("ailuminate", "gretel"):
+        return pd.Series(HARMFUL_PROMPT, index=df.index)
+    if dataset_name in overrefusal_test_datasets:
+        return pd.Series(BENIGN_PROMPT, index=df.index)
+    column, harmful, benign = {
+        "wildguardmix": ("prompt_harm_label", "harmful", "unharmful"),
+        "aegis": ("prompt_label", "unsafe", "safe"),
+        "wildjailbreak": ("subcategory", "adversarial_harmful", "adversarial_benign"),
+    }[dataset_name]
+    labels = normalize_label(df[column])
+    return labels.map({harmful: HARMFUL_PROMPT, benign: BENIGN_PROMPT}).fillna(
+        UNKNOWN_PROMPT
+    ).astype(object)
 
 wildguard_subcategories = [
     "benign",

@@ -10,14 +10,26 @@ All source-pool prompts, including benign data when used, are tagged with spaCy
 before sampling; tags are reused across groups and rounds. Each metric reports
 the mean across rounds, using the same sample for all metrics within a round.
 The CSV's sample_rounds column records the number of rounds for each row.
-Each embedding model in --embedding_models (default: BAAI/bge-m3 and
+
+Training splits also get rows for the random and evenly baselines (after the
+overall row) unless --no_baselines is given. As in align.py, both draw from the
+non-benign subcategories with enough safe responses to train on their own
+(helper.baseline_abbrs): random samples their pooled prompts uniformly, evenly
+gives each subcategory the same share. Their `count` is the pooled pool size.
+--merge updates an existing CSV in place: the scored rows replace rows with the
+same abbr and every other row is kept, so baselines can be added with
+--abbr random evenly --merge without rescoring every subcategory. With --abbr,
+the overall row (the union of only the selected pools) is not merged.
+Each embedding model in --embedding_models (default: only BAAI/bge-m3 and
 Qwen/Qwen3-Embedding-0.6B, in float32) gets its own CSV under
 <output_dir>/<model name>/csv/ (default output_dir: diversity/ beside sa_data),
 e.g. diversity/bge-m3/csv/, beside the
 figs/ folder that plot_bars_diversity.py writes. Metrics that use no
 embedding are computed once and repeated in every model's CSV. Each model is
 loaded once and its embeddings are reused across groups and datasets.
-Qwen3-Embedding-4B and -8B results (bfloat16) follow the same layout.
+Qwen3-Embedding-4B and -8B are not run by default; pass them with
+--embedding_models and --embed_dtype bfloat16, and their results follow the
+same layout.
 
 Every metric column is prefixed with the aspect of diversity it measures:
   lexical_     lowercased words (spaCy tokens without punctuation or whitespace)
@@ -54,7 +66,8 @@ examples are skipped. Results go to <dataset>_train_tactic_diversity_<N>_<rate>.
 its subcategory and abbr columns hold the tactic name and its snake_case form.
 
 Examples:
-    python calculate_diversity.py --datasets wildguardmix aegis gretel
+    python calculate_diversity.py   # wildguardmix, aegis and gretel
+    python calculate_diversity.py --abbr random evenly --merge
     python calculate_diversity.py --datasets aegis --harmful_rate 0.5
     python calculate_diversity.py --datasets wildguardmix --abbr cyberattack
     python calculate_diversity.py --datasets gretel --abbr information_hazards
@@ -79,6 +92,7 @@ from sklearn.cluster import KMeans
 from tqdm.auto import tqdm
 
 from helper import (
+    BASELINE_ABBRS,
     BENIGN_DATA_TYPES,
     build_training_data,
     load_wildjailbreak_benign,
@@ -92,6 +106,10 @@ SUPPORTED = {
     'test': tuple(safety_test_datasets),
 }
 EMBEDDING_MODEL_IDS = ('BAAI/bge-m3', 'Qwen/Qwen3-Embedding-0.6B')
+# Training datasets scored by default, as in align_run.sh.
+DEFAULT_DATASETS = ('wildguardmix', 'aegis', 'gretel')
+# Display names of the training-data baselines (helper.BASELINE_ABBRS).
+BASELINE_NAMES = {'random': 'Random baseline', 'evenly': 'Evenly baseline'}
 HDD_DRAWS = 42
 LEXICAL_DISTINCT_ORDERS = (2, 3, 4)
 POS_NGRAM_ORDERS = (1, 2, 3, 4)
@@ -373,7 +391,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
                               max_length=4096, max_n=5, n_rounds=10, seed=42,
                               num_proc=4, split='train', abbrs=None, benign_pool=None,
                               embedders=None, n_clusters=12, knn_ks=KNN_KS,
-                              group_by='subcategory'):
+                              group_by='subcategory', baselines=True):
     """Score fixed-size alignment mixtures; skip groups with insufficient data.
 
     The overall row samples the union of eligible dataset rows, preserving their
@@ -383,7 +401,8 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
     Returns one DataFrame per entry of `embedders` ({name: PosEmbedder}), under
     the same name; metrics that use no embedding are computed once and shared.
     With group_by='tactic', rows are jailbreak tactics (see tactic_pools) and
-    abbrs selects tactic abbreviations.
+    abbrs selects tactic abbreviations. With baselines, training subcategory
+    scores also get random and evenly rows that reproduce align.py's baselines.
     """
     if num_train < 2 or n_rounds < 1 or max_n < 1 or num_proc < 1:
         raise ValueError('num_train >= 2; n_rounds, max_n and num_proc >= 1 required')
@@ -400,12 +419,20 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
         names, pools = tactic_pools(df, dataset_name)
     else:
         names, pools = category_names(df, dataset_name), {}
+    harmful_count = int(num_train * harmful_rate + 0.5)
+    benign_count = num_train - harmful_count
+    baseline_names = (
+        {abbr: BASELINE_NAMES[abbr] for abbr in BASELINE_ABBRS}
+        if baselines and split == 'train' and group_by == 'subcategory' and harmful_count
+        else {}
+    )
     if abbrs:
-        missing = set(abbrs).difference(names)
+        missing = set(abbrs).difference(names, baseline_names)
         if missing:
             raise ValueError(f'Unknown {group_by} abbreviations in {dataset_name}: '
                              f'{sorted(missing)}')
-        names = {abbr: names[abbr] for abbr in abbrs}
+        names = {abbr: names[abbr] for abbr in abbrs if abbr in names}
+        baseline_names = {abbr: name for abbr, name in baseline_names.items() if abbr in abbrs}
 
     if group_by == 'tactic':
         pools = {abbr: pools[abbr] for abbr in names}
@@ -425,11 +452,12 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
     eligible_indices = set().union(*(set(pool.index) for pool in pools.values()))
     overall = df.loc[df.index.isin(eligible_indices)].copy()
     overall['prompt'] = overall['prompt'].astype(str).str.strip()
-    groups = [('overall', 'overall', overall)] + [
-        (abbr, names[abbr], pools[abbr]) for abbr in sorted(names)
-    ]
-    harmful_count = int(num_train * harmful_rate + 0.5)
-    benign_count = num_train - harmful_count
+    # The baseline pools pool the eligible subcategories (align.py's selection).
+    baseline_pools = {abbr: select_harmful_subcategory(df, dataset_name, abbr, harmful_count)
+                      for abbr in baseline_names}
+    groups = ([('overall', 'overall', overall)] if names else []) + [
+        (abbr, name, baseline_pools[abbr]) for abbr, name in baseline_names.items()
+    ] + [(abbr, names[abbr], pools[abbr]) for abbr in sorted(names)]
     if benign_count and benign_pool is None:
         benign_pool = load_wildjailbreak_benign(benign_data_type)
     if benign_count and len(benign_pool) < benign_count:
@@ -438,6 +466,8 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
     # Tag the complete source pools before any sampling. Deduplicate tagging
     # work, but preserve repeated prompts when reconstructing scored samples.
     source_prompts = overall['prompt'].tolist()
+    for pool in baseline_pools.values():
+        source_prompts.extend(pool['prompt'].astype(str).str.strip())
     if benign_count:
         source_prompts.extend(benign_pool['prompt'].tolist())
     source_prompts = list(dict.fromkeys(source_prompts))
@@ -539,14 +569,41 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
     return results
 
 
+def merge_rows(existing, scored, keep_overall=False):
+    """Replace existing rows by abbr with scored rows and keep all other rows.
+
+    Rows are ordered overall, then the baselines, then the remaining rows in
+    their existing order, with new subcategories appended alphabetically.
+    """
+    if list(existing.columns) != list(scored.columns):
+        raise ValueError('Cannot merge: the existing CSV has different columns; '
+                         'rerun without --merge')
+    if keep_overall:
+        scored = scored.loc[scored['abbr'] != 'overall']
+    rows = {row['abbr']: row for row in existing.to_dict('records')}
+    rows.update((row['abbr'], row) for row in scored.to_dict('records'))
+    first = ['overall', *BASELINE_ABBRS]
+    order = [abbr for abbr in first if abbr in rows]
+    order += [abbr for abbr in existing['abbr'] if abbr not in first]
+    order += sorted(abbr for abbr in rows if abbr not in order)
+    return pd.DataFrame([rows[abbr] for abbr in order], columns=existing.columns)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--datasets', nargs='+', type=str.lower, default=['wildguardmix'])
+    parser.add_argument('--datasets', nargs='+', type=str.lower, default=list(DEFAULT_DATASETS),
+                        help=f'Datasets to score (default: {" ".join(DEFAULT_DATASETS)})')
     parser.add_argument('--split', choices=SUPPORTED, default='train')
     parser.add_argument('--abbr', nargs='+',
                         help='Only score these subcategory (or, with --group_by tactic, '
-                             'tactic) abbreviations')
+                             'tactic) abbreviations; random and evenly select the baselines')
+    parser.add_argument('--no_baselines', dest='baselines', action='store_false',
+                        help='Leave out the random and evenly baseline rows (default: '
+                             'include them for training subcategories)')
+    parser.add_argument('--merge', action='store_true',
+                        help='Replace only the scored rows of an existing output CSV and '
+                             'keep the rest (the overall row is kept when --abbr is given)')
     parser.add_argument('--group_by', choices=('subcategory', 'tactic'), default='subcategory',
                         help='Score one row per subcategory, or per jailbreak tactic '
                              '(gretel train only) (default: subcategory)')
@@ -634,7 +691,7 @@ def main():
             max_n=args.max_n, n_rounds=args.n_rounds, seed=args.seed, num_proc=args.num_proc,
             split=args.split, abbrs=args.abbr, benign_pool=benign_pool,
             embedders=embedders, n_clusters=args.n_clusters, knn_ks=args.knn_ks,
-            group_by=args.group_by,
+            group_by=args.group_by, baselines=args.baselines,
         )
         grouping = 'tactic_' if args.group_by == 'tactic' else ''
         for name, result in results.items():
@@ -644,6 +701,9 @@ def main():
                       f'{dataset_name}_{args.split}_{grouping}diversity_'
                       f'{args.num_train}_{args.harmful_rate}.csv')
             output.parent.mkdir(parents=True, exist_ok=True)
+            if args.merge and output.exists():
+                result = merge_rows(pd.read_csv(output), result,
+                                    keep_overall=bool(args.abbr))
             result.to_csv(output, index=False)
             print(f'Saved: {output}')
 

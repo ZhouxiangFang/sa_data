@@ -7,6 +7,7 @@ from pathlib import Path
 
 import nltk
 import numpy as np
+import pandas as pd
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -82,6 +83,20 @@ class MetricTests(unittest.TestCase):
                                np.sum((x - x.mean(axis=0)) ** 2), places=8)
         self.assertAlmostEqual(cd.cluster_inertia(x, len(x), 0), 0.0, places=8)
 
+
+
+class MergeTests(unittest.TestCase):
+    def test_merge_replaces_scored_rows_and_orders_baselines_first(self):
+        existing = pd.DataFrame({'abbr': ['overall', 'b', 'a'], 'value': [1, 2, 3]})
+        scored = pd.DataFrame({'abbr': ['overall', 'evenly', 'random', 'a', 'c'],
+                               'value': [9, 8, 7, 6, 5]})
+        merged = cd.merge_rows(existing, scored)
+        self.assertEqual(merged['abbr'].tolist(), ['overall', 'random', 'evenly', 'b', 'a', 'c'])
+        self.assertEqual(merged['value'].tolist(), [9, 7, 8, 2, 6, 5])
+        kept = cd.merge_rows(existing, scored, keep_overall=True)
+        self.assertEqual(kept['value'].tolist(), [1, 7, 8, 2, 6, 5])
+        with self.assertRaises(ValueError):
+            cd.merge_rows(existing, scored.rename(columns={'value': 'other'}))
 
 if __name__ == '__main__':
     unittest.main()

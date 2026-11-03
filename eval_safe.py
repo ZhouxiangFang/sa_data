@@ -11,10 +11,13 @@ import pandas as pd
 
 from helper import (
     BENIGN_DATA_TYPES,
+    BENIGN_PROMPT,
+    HARMFUL_PROMPT,
     generate_responses,
     load_safety_dataset,
     model_mapping,
     overrefusal_test_datasets,
+    prompt_types,
     safety_test_datasets,
     to_abbr,
     wildguard_instruction_format,
@@ -216,14 +219,43 @@ def subcategory_results(name, dataset, overrefusal=False):
     return results
 
 
-def save_results(datasets, output_dir, model_name, merge=False):
+def scored_rows(name, dataset, all_prompts=False):
+    """Rows a dataset's score counts: harmful prompts for the harmful score.
+
+    Benign and unlabeled prompts of the safety test sets are still generated,
+    judged and saved, but count only with all_prompts. Overrefusal benchmarks
+    and data without a prompt_type column are scored on every row.
+    """
+    if all_prompts or name in overrefusal_test_datasets or "prompt_type" not in dataset:
+        return dataset
+    return dataset.loc[dataset["prompt_type"] == HARMFUL_PROMPT]
+
+
+def save_results(datasets, output_dir, model_name, merge=False, all_prompts=False):
+    """Write the overall, per-subcategory and per-response CSVs.
+
+    Harmful scores use only harmful prompts unless all_prompts is set; the
+    responses CSVs keep every prompt with its prompt_type.
+    """
     os.makedirs(output_dir, exist_ok=True)
     width = shutil.get_terminal_size().columns
     print(f"\n{'=' * width}\nRESULTS\n{'=' * width}")
+    scored = {
+        name: scored_rows(name, dataset, all_prompts) for name, dataset in datasets.items()
+    }
+    for name, dataset in datasets.items():
+        if name in overrefusal_test_datasets or "prompt_type" not in dataset:
+            continue
+        benign = dataset.loc[dataset["prompt_type"] == BENIGN_PROMPT, "is_unsafe"].dropna()
+        unknown = int((~dataset["prompt_type"].isin([HARMFUL_PROMPT, BENIGN_PROMPT])).sum())
+        if len(benign) or unknown:
+            print(f"{name}: {'included' if all_prompts else 'excluded from the score'}: "
+                  f"{len(benign)} benign prompts ({percentage(int(benign.sum()), len(benign))}% "
+                  f"harmful responses) and {unknown} unlabeled prompts")
 
     for overrefusal in (False, True):
         selected = {
-            name: dataset for name, dataset in datasets.items()
+            name: dataset for name, dataset in scored.items()
             if (name in overrefusal_test_datasets) == overrefusal
         }
         if not selected:
@@ -244,14 +276,16 @@ def save_results(datasets, output_dir, model_name, merge=False):
     for name, dataset in datasets.items():
         overrefusal = name in overrefusal_test_datasets
         label_column, _, _ = metric_columns(overrefusal)
-        breakdown = subcategory_results(name, dataset, overrefusal=overrefusal)
+        breakdown = subcategory_results(name, scored[name], overrefusal=overrefusal)
         print(f"\n=== {name} — Per-Subcategory Results ===")
         print(breakdown.to_string(index=False))
         breakdown_path = os.path.join(output_dir, f"{model_name}_{name}.csv")
         breakdown.to_csv(breakdown_path, index=False)
         print(f"Saved: {breakdown_path}")
 
-        metadata_columns = [column for column in ("persona", "tactic") if column in dataset]
+        metadata_columns = [
+            column for column in ("prompt_type", "persona", "tactic") if column in dataset
+        ]
         responses = dataset[
             ["prompt", "subcategory", "generated_response", label_column] + metadata_columns
         ].copy()
@@ -314,6 +348,13 @@ def parse_args():
         help="Let the model decide whether to comply with each request.",
     )
     parser.add_argument(
+        "--score_all_prompts",
+        action="store_true",
+        help=("Compute harmful scores over every safety test prompt. By default they "
+              "use only harmful prompts; benign ones (in WildGuardMix, Aegis and "
+              "WildJailbreak) are still generated, judged and saved."),
+    )
+    parser.add_argument(
         "--merge",
         action="store_true",
         help=("Keep other datasets' rows in an existing overall/overrefusal CSV "
@@ -352,7 +393,8 @@ def main():
     for name in dict.fromkeys(args.datasets):
         print(f"\nLoading dataset: {name}")
         dataset = load_safety_dataset(name, "test")
-        columns = ["prompt", "subcategory"]
+        dataset = dataset.assign(prompt_type=prompt_types(dataset, name))
+        columns = ["prompt", "subcategory", "prompt_type"]
         columns.extend(
             column for column in ("sub_abbrs", "persona", "tactic") if column in dataset
         )
@@ -391,7 +433,8 @@ def main():
 
     del guard
     torch.cuda.empty_cache()
-    save_results(datasets, output_dir, filename_prefix, merge=args.merge)
+    save_results(datasets, output_dir, filename_prefix, merge=args.merge,
+                 all_prompts=args.score_all_prompts)
 
 
 if __name__ == "__main__":
