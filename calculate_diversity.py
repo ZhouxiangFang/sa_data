@@ -12,7 +12,8 @@ the mean across rounds, using the same sample for all metrics within a round.
 The CSV's sample_rounds column records the number of rounds for each row.
 Each embedding model in --embedding_models (default: BAAI/bge-m3 and
 Qwen/Qwen3-Embedding-0.6B, in float32) gets its own CSV under
-<output_dir>/<model name>/csv/, e.g. results/diversity/bge-m3/csv/, beside the
+<output_dir>/<model name>/csv/ (default output_dir: diversity/ beside sa_data),
+e.g. diversity/bge-m3/csv/, beside the
 figs/ folder that plot_bars_diversity.py writes. Metrics that use no
 embedding are computed once and repeated in every model's CSV. Each model is
 loaded once and its embeddings are reused across groups and datasets.
@@ -45,15 +46,24 @@ meaning, so all metrics use unit vectors. Squared-L2 DistSum would then equal 2 
 so it is not reported.
 Test splits remain available for prompt-only analysis, without training filters.
 
+--group_by tactic (gretel train only) scores one row per jailbreak tactic instead
+of per subcategory. Rows pass the same training filters as the non-benign
+subcategories (harmful prompt, safe response, non-empty pair; multi-label rows
+once) and are sampled the same way; tactics that cannot supply --num_train
+examples are skipped. Results go to <dataset>_train_tactic_diversity_<N>_<rate>.csv;
+its subcategory and abbr columns hold the tactic name and its snake_case form.
+
 Examples:
     python calculate_diversity.py --datasets wildguardmix aegis gretel
     python calculate_diversity.py --datasets aegis --harmful_rate 0.5
     python calculate_diversity.py --datasets wildguardmix --abbr cyberattack
     python calculate_diversity.py --datasets gretel --abbr information_hazards
+    python calculate_diversity.py --datasets gretel --group_by tactic --num_train 300 --n_clusters 6
 """
 
 import argparse
 import math
+import re
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
@@ -329,11 +339,41 @@ def category_names(df, dataset_name):
     return names
 
 
+def tactic_abbr(tactic):
+    """snake_case form of a jailbreak tactic, e.g. 'quid pro quo' -> 'quid_pro_quo'."""
+    return re.sub(r'[^a-z0-9]+', '_', str(tactic).lower()).strip('_')
+
+
+def tactic_pools(df, dataset_name):
+    """Group the training rows eligible under any non-benign subcategory by tactic.
+
+    Each row passes exactly the filters select_harmful_subcategory applies to
+    subcategories; multi-label rows are counted once, in their original order.
+    Returns ({abbr: tactic name}, {abbr: pool}).
+    """
+    if 'tactic' not in df.columns:
+        raise ValueError(f'{dataset_name} has no tactic column')
+    subcategories = [abbr for abbr in category_names(df, dataset_name) if abbr != 'benign']
+    eligible = pd.concat([select_harmful_subcategory(df, dataset_name, abbr)
+                          for abbr in subcategories])
+    eligible = eligible[~eligible.index.duplicated()].sort_index()
+    eligible = eligible[eligible['tactic'].notna()
+                        & (eligible['tactic'].astype(str).str.strip() != '')]
+    names = {}
+    for tactic in dict.fromkeys(eligible['tactic'].astype(str).str.strip()):
+        if names.setdefault(tactic_abbr(tactic), tactic) != tactic:
+            raise ValueError(f'Tactics {names[tactic_abbr(tactic)]!r} and {tactic!r} '
+                             'share an abbreviation')
+    tactics = eligible['tactic'].astype(str).str.strip()
+    return names, {abbr: eligible[tactics == tactic] for abbr, tactic in names.items()}
+
+
 def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
                               harmful_rate=1.0, benign_data_type='vanilla_benign',
                               max_length=4096, max_n=5, n_rounds=10, seed=42,
                               num_proc=4, split='train', abbrs=None, benign_pool=None,
-                              embedders=None, n_clusters=12, knn_ks=KNN_KS):
+                              embedders=None, n_clusters=12, knn_ks=KNN_KS,
+                              group_by='subcategory'):
     """Score fixed-size alignment mixtures; skip groups with insufficient data.
 
     The overall row samples the union of eligible dataset rows, preserving their
@@ -342,6 +382,8 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
     `scored_on` includes both source and WildJailbreak benign examples.
     Returns one DataFrame per entry of `embedders` ({name: PosEmbedder}), under
     the same name; metrics that use no embedding are computed once and shared.
+    With group_by='tactic', rows are jailbreak tactics (see tactic_pools) and
+    abbrs selects tactic abbreviations.
     """
     if num_train < 2 or n_rounds < 1 or max_n < 1 or num_proc < 1:
         raise ValueError('num_train >= 2; n_rounds, max_n and num_proc >= 1 required')
@@ -350,15 +392,24 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
     if not 1 <= n_clusters <= num_train or not all(1 <= k < num_train for k in knn_ks):
         raise ValueError('n_clusters must be in [1, num_train] and each knn_ks in [1, num_train)')
 
-    names = category_names(df, dataset_name)
+    if group_by not in ('subcategory', 'tactic'):
+        raise ValueError(f'Unknown group_by: {group_by!r}')
+    if group_by == 'tactic' and split != 'train':
+        raise ValueError('group_by="tactic" applies the training filters; use split="train"')
+    if group_by == 'tactic':
+        names, pools = tactic_pools(df, dataset_name)
+    else:
+        names, pools = category_names(df, dataset_name), {}
     if abbrs:
         missing = set(abbrs).difference(names)
         if missing:
-            raise ValueError(f'Unknown subcategories in {dataset_name}: {sorted(missing)}')
+            raise ValueError(f'Unknown {group_by} abbreviations in {dataset_name}: '
+                             f'{sorted(missing)}')
         names = {abbr: names[abbr] for abbr in abbrs}
 
-    pools = {}
-    if split == 'train':
+    if group_by == 'tactic':
+        pools = {abbr: pools[abbr] for abbr in names}
+    elif split == 'train':
         for abbr in names:
             pools[abbr] = select_harmful_subcategory(df, dataset_name, abbr)
     else:
@@ -493,7 +544,12 @@ def parse_args():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--datasets', nargs='+', type=str.lower, default=['wildguardmix'])
     parser.add_argument('--split', choices=SUPPORTED, default='train')
-    parser.add_argument('--abbr', nargs='+', help='Only score these subcategory abbreviations')
+    parser.add_argument('--abbr', nargs='+',
+                        help='Only score these subcategory (or, with --group_by tactic, '
+                             'tactic) abbreviations')
+    parser.add_argument('--group_by', choices=('subcategory', 'tactic'), default='subcategory',
+                        help='Score one row per subcategory, or per jailbreak tactic '
+                             '(gretel train only) (default: subcategory)')
     parser.add_argument('--num_train', '--group_size', dest='num_train', type=int, default=600,
                         help='Total examples per group, including benign data (default: 600)')
     parser.add_argument('--harmful_rate', type=float, default=1.0,
@@ -527,10 +583,15 @@ def parse_args():
                              'models (default: 32)')
     parser.add_argument('--embed_device', default=None,
                         help='Embedding device, e.g. cuda:0 or cpu (default: auto)')
-    parser.add_argument('--output_dir', type=Path, default=Path('../results/diversity'))
+    parser.add_argument('--output_dir', type=Path,
+                        default=Path(__file__).resolve().parent.parent / 'diversity',
+                        help='Diversity root, independent of the working directory '
+                             '(default: diversity/ beside sa_data)')
     args = parser.parse_args()
     if any(dataset not in SUPPORTED[args.split] for dataset in args.datasets):
         parser.error(f'--split {args.split} supports {SUPPORTED[args.split]}')
+    if args.group_by == 'tactic' and (args.split != 'train' or args.datasets != ['gretel']):
+        parser.error('--group_by tactic supports only --datasets gretel --split train')
     if args.num_train < 2 or min(args.max_length, args.max_n, args.n_rounds, args.num_proc) < 1:
         parser.error('--num_train must be >= 2; length, order, rounds and processes must be positive')
     if not 0 <= args.harmful_rate <= 1:
@@ -573,12 +634,15 @@ def main():
             max_n=args.max_n, n_rounds=args.n_rounds, seed=args.seed, num_proc=args.num_proc,
             split=args.split, abbrs=args.abbr, benign_pool=benign_pool,
             embedders=embedders, n_clusters=args.n_clusters, knn_ks=args.knn_ks,
+            group_by=args.group_by,
         )
+        grouping = 'tactic_' if args.group_by == 'tactic' else ''
         for name, result in results.items():
             print(f'{name}: ↑ higher = more diverse | ↓ lower = more diverse')
             print(result.to_string(index=False))
             output = (args.output_dir / name / 'csv' /
-                      f'{dataset_name}_{args.split}_diversity_{args.num_train}_{args.harmful_rate}.csv')
+                      f'{dataset_name}_{args.split}_{grouping}diversity_'
+                      f'{args.num_train}_{args.harmful_rate}.csv')
             output.parent.mkdir(parents=True, exist_ok=True)
             result.to_csv(output, index=False)
             print(f'Saved: {output}')

@@ -33,8 +33,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 
-from plot_bars_overall import (DEFAULT_MODELS, MODELS, ROOT, TEST_DATASETS, load_scores,
-                               training_subcategory)
+from plot_bars_overall import (DEFAULT_MODELS, MODELS, RESULTS_DIR, ROOT, TEST_DATASETS,
+                               default_if_eval_dir, load_scores, training_subcategory)
 
 
 CORRELATIONS = {"pearson": pearsonr, "spearman": spearmanr}
@@ -179,13 +179,13 @@ def main():
     parser.add_argument("--models", nargs="+", choices=MODELS, default=list(DEFAULT_MODELS),
                         help="Models to correlate and average (default: %(default)s)")
     parser.add_argument("--train-size", type=int, default=1800)
-    parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
+    parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
     parser.add_argument("--output-dir", type=Path, default=ROOT / "figs" / "harmful_overrefusal")
     args = parser.parse_args()
 
     tables = []
     for dataset in args.datasets:
-        data, _ = load_scores(args.results_dir, args.results_dir / "if_eval", args.models,
+        data, _ = load_scores(args.results_dir, default_if_eval_dir(args.results_dir), args.models,
                               f"{args.train_size}_{dataset}")
         data = harmful_rates(data.loc[~data["version"].isin(["-ins", "-20k"])], dataset)
         columns = ["overrefusal_score_pct", *HARMFUL_RATES]

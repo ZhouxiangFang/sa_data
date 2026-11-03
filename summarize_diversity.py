@@ -2,7 +2,7 @@
 
 Each value is the mean of the Pearson and Spearman coefficients between a
 diversity metric and the model-average harmful score, read from
-results/diversity/<model>/csv/<dataset>_diversity_safety_correlations.csv
+diversity/<model>/csv/<dataset>_diversity_safety_correlations.csv
 (written by plot_bars_diversity.py). Rows are grouped structural, lexical, then
 semantic, and sorted alphabetically within each group. In each group, the
 lowest (most negative: more diversity, less harm) value of every model column is
@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from plot_bars_diversity import FIGURE_METRICS, PLOT_METHODS, ROOT
+from plot_bars_diversity import FIGURE_METRICS, PLOT_METHODS
+from plot_bars_overall import DIVERSITY_DIR
 
 GROUP_ORDER = ('structural', 'lexical', 'semantic')
 
@@ -56,7 +57,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--datasets', nargs='+', default=['aegis', 'gretel', 'wildguardmix'])
-    parser.add_argument('--diversity_dir', type=Path, default=ROOT / 'results' / 'diversity')
+    parser.add_argument('--diversity_dir', type=Path, default=DIVERSITY_DIR)
     parser.add_argument('--output_dir', type=Path, help='Default: <diversity_dir>/summary')
     args = parser.parse_args()
     output_dir = args.output_dir or args.diversity_dir / 'summary'

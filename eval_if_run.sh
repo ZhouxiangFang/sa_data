@@ -17,7 +17,7 @@ Examples:
   ./eval_if_run.sh --gpus 0,2 --models qwen2.5-ins llama3-ins
   ./eval_if_run.sh --gpus 0,1,2,3 --tensor_parallel_size 2 --models qwen2.5-ins llama3-ins
 
-Results default to ../results/if_eval relative to this script. Override with --output_dir DIR.
+Results default to ../if_eval relative to this script. Override with --output_dir DIR.
 Aligned checkpoints save to <model>_<num_train>_<dataset_name>/ with
 <dataset>_<subcategory>_if_{summary,responses}.csv filenames. Baseline files
 save directly in the result root as <model>_if_{summary,responses}.csv.
@@ -32,7 +32,7 @@ EOF
 models=()
 folders=()
 gpus=()
-eval_args=(--output_dir "$script_dir/../results/if_eval")
+eval_args=(--output_dir "$script_dir/../if_eval")
 tensor_parallel_size=1
 
 while (( $# > 0 )); do

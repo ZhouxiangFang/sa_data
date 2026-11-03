@@ -2,10 +2,10 @@
 
 Example (run from any directory):
     python sa_data/plot_bars_diversity.py \
-        results/diversity/bge-m3/csv/wildguardmix_train_diversity_600_1.0.csv \
+        diversity/bge-m3/csv/wildguardmix_train_diversity_600_1.0.csv \
         --suffix 1800_wildguardmix --corr all
 
-Each embedding model has one folder, results/diversity/<model>/, with csv/ (the
+Each embedding model has one folder, diversity/<model>/, with csv/ (the
 diversity CSVs from calculate_diversity.py and this script's correlations) and
 figs/. Every output file name starts with the dataset.
 
@@ -58,10 +58,9 @@ import numpy as np
 import pandas as pd
 from scipy.stats import kendalltau, pearsonr, spearmanr
 
-from plot_bars_overall import DEFAULT_MODELS, EXCLUDED_ABBRS, MODELS
+from plot_bars_overall import DEFAULT_MODELS, DIVERSITY_DIR, EXCLUDED_ABBRS, MODELS, RESULTS_DIR
 
 
-ROOT = Path(__file__).resolve().parent.parent
 # Column prefix: (section title, color). Colors are the first three slots of the
 # reference categorical palette, which stay distinguishable in scatter plots.
 GROUPS = {
@@ -433,7 +432,10 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("csv", type=Path, nargs="?", help="Diversity CSV path")
     parser.add_argument("--csv", type=Path, dest="csv_option", help="Alternative to positional CSV")
-    parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
+    parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR,
+                        help="Safety result folder (default: ROOT/results)")
+    parser.add_argument("--diversity-dir", type=Path, default=DIVERSITY_DIR,
+                        help="Diversity root used when no CSV is given (default: ROOT/diversity)")
     parser.add_argument("--output-dir", type=Path,
                         help="One folder for figures and CSVs; default: figs/ and csv/ of the "
                              "input's embedding-model folder")
@@ -463,7 +465,7 @@ def main():
     csv_path = args.csv or args.csv_option
     if csv_path is None:
         dataset = (args.dataset or "wildguardmix").removesuffix("_train")
-        csv_path = args.results_dir / "diversity" / args.embedder / "csv" / (
+        csv_path = args.diversity_dir / args.embedder / "csv" / (
             f"{dataset}_train_diversity_{args.train_size or 800}_1.0.csv"
         )
     try:
@@ -498,7 +500,7 @@ def main():
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
 
-    # results/diversity/<model>/csv/<CSV> -> figures in <model>/figs, CSVs in <model>/csv.
+    # diversity/<model>/csv/<CSV> -> figures in <model>/figs, CSVs in <model>/csv.
     grouped = csv_path.parent.name == "csv"
     embedder = csv_path.parent.parent.name if grouped else None
     fig_dir = args.output_dir or (csv_path.parent.parent if grouped else csv_path.parent) / "figs"

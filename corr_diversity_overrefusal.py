@@ -6,14 +6,14 @@ Example (run from any directory):
 The counterpart of plot_bars_diversity.py with overrefusal (the Avg row of
 <run>_overrefusal.csv, a macro-average over XSTest and OR-Bench-Hard; lower is
 better) in place of the harmful score. Diversity is read from
-results/diversity/<embedder>/csv/<dataset>_train_diversity_*.csv and overrefusal
+diversity/<embedder>/csv/<dataset>_train_diversity_*.csv and overrefusal
 from results/<model>_git20k_<size>_<dataset>/, through
 plot_bars_overall.load_scores, so it matches the plotted bars. As in
 plot_bars_diversity.py, the benign training subcategory is dropped, --exclude
 subcategories are plotted but left out of correlations, Self-BLEU is negated so larger always means more
 diverse, and "Average" correlates the equally weighted model-mean overrefusal;
 "Mean coefficient" averages the per-model coefficients.
-Outputs go to figs/diversity_overrefusal/ (or --output-dir): per training
+Outputs go to diversity/overrefusal/ (or --output-dir): per training
 dataset, <dataset>/<model>_<group>_diversity_vs_overrefusal.png for the lexical,
 semantic and structural groups (every model and the average),
 <dataset>/correlations.png (Pearson and Spearman heatmaps, * marks p < 0.05) and
@@ -33,7 +33,8 @@ import pandas as pd
 from plot_bars_diversity import (CORRELATIONS, FIGURE_METRICS, GROUPS, LABELS, PLOT_METHODS,
                                  correlation_table, join_scores, load_diversity, plot_scatter,
                                  save_figure)
-from plot_bars_overall import (DEFAULT_MODELS, MODELS, ROOT, TEST_DATASETS, load_scores,
+from plot_bars_overall import (DEFAULT_MODELS, DIVERSITY_DIR, MODELS, RESULTS_DIR,
+                               TEST_DATASETS, default_if_eval_dir, load_scores,
                                training_subcategory)
 
 
@@ -42,15 +43,15 @@ SCORE = "overrefusal_score_pct"
 
 def load_overrefusal(results_dir, models, suffix):
     """Overrefusal per model and training subcategory, without instruct baselines."""
-    data, _ = load_scores(results_dir, results_dir / "if_eval", models, suffix)
+    data, _ = load_scores(results_dir, default_if_eval_dir(results_dir), models, suffix)
     data = data.loc[~data["version"].isin(["-ins", "-20k"])]
     return data.assign(abbr=data["version"].map(training_subcategory))[
         ["model", "abbr", "run", SCORE]
     ]
 
 
-def diversity_csv(results_dir, embedder, dataset):
-    paths = sorted((results_dir / "diversity" / embedder / "csv").glob(
+def diversity_csv(diversity_dir, embedder, dataset):
+    paths = sorted((diversity_dir / embedder / "csv").glob(
         f"{dataset}_train_diversity_*.csv"
     ))
     if len(paths) != 1:
@@ -113,20 +114,20 @@ def main():
     parser.add_argument("--models", nargs="+", choices=MODELS, default=list(DEFAULT_MODELS),
                         help="Models to correlate and average (default: %(default)s)")
     parser.add_argument("--embedder", default="bge-m3",
-                        help="Embedding-model folder under results/diversity (default: bge-m3)")
+                        help="Embedding-model folder under --diversity-dir (default: bge-m3)")
     parser.add_argument("--train-size", type=int, default=1800)
     parser.add_argument("--exclude", nargs="*", default=[],
                         help="Subcategories to exclude from correlations")
-    parser.add_argument("--results-dir", type=Path, default=ROOT / "results")
-    parser.add_argument("--output-dir", type=Path,
-                        default=ROOT / "figs" / "diversity_overrefusal")
+    parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
+    parser.add_argument("--diversity-dir", type=Path, default=DIVERSITY_DIR)
+    parser.add_argument("--output-dir", type=Path, default=DIVERSITY_DIR / "overrefusal")
     args = parser.parse_args()
 
     methods = list(CORRELATIONS)
     excluded = {abbr.lower() for abbr in args.exclude}
     tables = []
     for dataset in args.datasets:
-        diversity = load_diversity(diversity_csv(args.results_dir, args.embedder, dataset))
+        diversity = load_diversity(diversity_csv(args.diversity_dir, args.embedder, dataset))
         suffix = f"{args.train_size}_{dataset}"
         safety = load_overrefusal(args.results_dir, args.models, suffix)
         pairs = join_scores(diversity, safety, SCORE)

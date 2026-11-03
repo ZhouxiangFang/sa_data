@@ -130,7 +130,7 @@ def summarize_model(input_dir, model, dataset="wildguardmix", num_train=800):
 
 def parse_args():
     project_dir = Path(__file__).resolve().parent.parent
-    default_input = project_dir / "results" / "if_eval"
+    default_input = project_dir / "if_eval"
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
