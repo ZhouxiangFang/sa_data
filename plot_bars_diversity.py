@@ -559,7 +559,8 @@ def main():
     excluded_abbrs = {abbr.lower() for abbr in args.exclude}
     pairs["included_in_correlation"] = ~pairs["abbr"].str.lower().isin(excluded_abbrs)
     print(f"Matched {len(safety)} runs across {safety['model'].nunique()} models "
-          f"and {safety['abbr'].nunique()} subcategories")
+          f"and {safety['abbr'].nunique()} training sets "
+          f"({safety['abbr'].isin(BASELINE_ABBRS).sum() // max(safety['model'].nunique(), 1)} baselines)")
     methods = list(CORRELATIONS) if args.corr == "all" else [args.corr]
     table = correlation_table(pairs, methods)
     table.to_csv(csv_dir / f"{dataset}_diversity_safety_correlations.csv", index=False)
