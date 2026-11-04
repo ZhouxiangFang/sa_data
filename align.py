@@ -10,7 +10,12 @@ Defaults are sized for full fine-tuning a 7B/8B model on four 48 GB A6000s::
 
 The default 1,800 examples mix the three sources 1:1:1 (600 each). General
 instructions default to data/git_data_20k.csv. Safety targets use only
-safe/unharmful responses. All sampling and shuffling use --seed. With four
+safe/unharmful responses. --seed decides every sampled example (through
+helper.sample_examples, the same code calculate_diversity.py samples with), the
+shuffle and the training order. Run n of a setting uses seed n * 42
+(align_run.sh trains runs 1-3 by default). The checkpoint name ends in
+_seed<seed>, and eval_run.sh writes its results to <results>/seed<seed>/
+(IF results to <results>/seed<seed>/if_eval/). With four
 GPUs, the default micro-batch of 1 and eight accumulation steps give an
 effective batch size of 32 examples.
 
@@ -21,6 +26,11 @@ Use --abbr random or --abbr evenly for baselines over the non-benign
 subcategories that align_run.sh trains on their own: random samples their
 pooled prompts uniformly, so larger subcategories contribute more; evenly gives
 each subcategory the same share.
+
+Use --group_by tactic (Gretel only) to train on one jailbreak tactic instead,
+e.g. --alignment_dataset gretel --group_by tactic --abbr phishing. Tactic rows
+pass the same filters as the subcategories (helper.tactic_pools); random and
+evenly then pool the tactics with enough rows for harmful_count.
 """
 
 import argparse
@@ -37,8 +47,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
 from helper import (
-    BASELINE_ABBRS, BENIGN_DATA_TYPES, baseline_abbrs, build_training_data,
-    mixture_counts, model_mapping, print_config,
+    BENIGN_DATA_TYPES, DEFAULT_SEED, GROUP_BYS, build_training_data,
+    mixture_counts, model_mapping, print_config, seed_suffix,
 )
 
 
@@ -79,6 +89,13 @@ def parse_args() -> argparse.Namespace:
             "on their own: 'random' samples them in proportion to their size; "
             "'evenly' samples each equally."
         ),
+    )
+    parser.add_argument(
+        "--group_by",
+        choices=GROUP_BYS,
+        default="subcategory",
+        help=("Select harmful prompts by subcategory, or by jailbreak tactic "
+              "(gretel only; --abbr is then a tactic abbreviation)."),
     )
     parser.add_argument(
         "--num_train",
@@ -134,7 +151,11 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help="Processes used by TRL to format/tokenize the dataset (default: 4).",
     )
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--seed", type=int, default=DEFAULT_SEED,
+        help=("Run seed; run n of a setting uses n * 42 (default: 42). The checkpoint "
+              "name ends in _seed<seed>."),
+    )
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument(
         "--deepspeed",
@@ -152,7 +173,7 @@ def parse_args() -> argparse.Namespace:
         "--run_name",
         help=(
             "Optional output subdirectory name. The default is "
-            "<model>_<num_train>_<benign_data_type>_<dataset>_<subcategory>."
+            "<model>_<num_train>_<dataset>_<subcategory>_seed<seed>."
         ),
     )
     parser.add_argument(
@@ -168,6 +189,8 @@ def parse_args() -> argparse.Namespace:
         )
     except ValueError as error:
         parser.error(str(error))
+    if args.group_by == "tactic" and args.alignment_dataset != "gretel":
+        parser.error("--group_by tactic requires --alignment_dataset gretel")
     args.general_dataset = args.general_dataset.expanduser()
     if general_count and not args.general_dataset.is_file():
         parser.error(f"General instruction CSV not found: {args.general_dataset}")
@@ -234,18 +257,19 @@ def main() -> None:
         prompt_kind = "benign" if args.abbr.lower() == "benign" else "harmful"
         print(
             f"Training mixture: {harmful_count:,} {prompt_kind} prompts from "
-            f"{args.alignment_dataset}/{args.abbr} ({harmful_available:,} available) + "
+            f"{args.alignment_dataset} {args.group_by} {args.abbr} "
+            f"({harmful_available:,} available) + "
             f"{benign_count:,} benign prompts from WildJailbreak/"
             f"{args.benign_data_type} ({benign_available:,} available) + "
             f"{general_count:,} general instructions from {args.general_dataset} "
             f"({train_df.attrs['general_available']:,} available)"
         )
-        if args.abbr in BASELINE_ABBRS:
-            pooled = baseline_abbrs(args.alignment_dataset, harmful_count)
-            print(f"Baseline subcategories ({len(pooled)}): {', '.join(pooled)}")
+        pooled = train_df.attrs.get("baseline_groups")
+        if pooled:
+            print(f"Baseline {args.group_by} groups ({len(pooled)}): {', '.join(pooled)}")
         subcategory_counts = train_df.attrs.get("harmful_subcategory_counts")
         if subcategory_counts:
-            print("Examples per subcategory:")
+            print(f"Examples per {args.group_by}:")
             for abbr, count in sorted(subcategory_counts.items()):
                 print(f"  {abbr}: {count:,}")
         print(f"Overlong candidates skipped while sampling: {overlong_count:,}")
@@ -264,7 +288,7 @@ def main() -> None:
 
     checkpoint_name = filename_component(args.run_name) if args.run_name else (
         f"{filename_component(Path(args.model).name)}_{args.num_train}_"
-        f"{args.alignment_dataset}_{filename_component(args.abbr)}"
+        f"{args.alignment_dataset}_{filename_component(args.abbr)}{seed_suffix(args.seed)}"
     )
     output_dir = args.output_dir / checkpoint_name
     if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite_output_dir:

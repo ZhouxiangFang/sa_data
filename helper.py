@@ -4,6 +4,9 @@ logging.getLogger("vllm").setLevel(logging.WARNING)
 logging.getLogger("Gloo").setLevel(logging.WARNING)
 import json
 import os
+import re
+from pathlib import Path
+
 import pandas as pd
 from datasets import load_dataset
 
@@ -17,6 +20,55 @@ BENIGN_DATA_TYPES = ("vanilla_benign", "adversarial_benign", "mix")
 # "random" samples their pooled prompts uniformly (so larger subcategories
 # contribute more), while "evenly" gives each subcategory the same share.
 BASELINE_ABBRS = ("random", "evenly")
+# How training prompts are grouped: by safety subcategory, or (Gretel only) by
+# jailbreak tactic, for both training (align.py) and diversity scoring.
+GROUP_BYS = ("subcategory", "tactic")
+# Run n (1, 2, 3, ...) of a training setting uses seed n * DEFAULT_SEED (42, 84,
+# 126, ...); align_run.sh trains DEFAULT_RUNS runs per group by default and
+# calculate_diversity.py scores the same seeds. Seeds decide every sampled example
+# (sample_examples) and the training order. Each seed's outputs live in its own
+# seed<seed> folder: results/seed42/, results/seed42/if_eval/, diversity/seed42/...
+DEFAULT_SEED = 42
+DEFAULT_RUNS = 3
+
+
+def run_seeds(runs=DEFAULT_RUNS, base=DEFAULT_SEED):
+    """Seeds of runs 1..runs: base, 2 * base, ..., runs * base."""
+    if runs < 1 or base < 1:
+        raise ValueError("runs and the base seed must be positive")
+    return [base * n for n in range(1, runs + 1)]
+
+
+def seed_suffix(seed):
+    """Checkpoint-name suffix of a run seed, e.g. _seed42 (align.py, align_run.sh)."""
+    return f"_seed{int(seed)}"
+
+
+def seed_dir(seed):
+    """Folder of one seed's outputs, e.g. seed42."""
+    return f"seed{int(seed)}"
+
+
+def insert_seed_dir(path, seed):
+    """Per-seed counterpart of an output folder: <parent>/seed<seed>/<name>.
+
+    results/if_eval -> results/seed42/if_eval, diversity/bge-m3 ->
+    diversity/seed42/bge-m3, figs/git20k_1800_aegis -> figs/seed42/git20k_1800_aegis.
+    (A results root itself holds its seed folders: results/seed42.)
+    """
+    path = Path(os.path.normpath(path))
+    return path.parent / seed_dir(seed) / path.name
+
+
+def seed_diversity_csv(mean_csv, seed):
+    """Per-seed CSV of a mean diversity CSV.
+
+    diversity/<embedder>/csv/<name> -> diversity/seed<seed>/<embedder>/csv/<name>.
+    """
+    mean_csv = Path(mean_csv)
+    if mean_csv.parent.name == "csv":
+        return insert_seed_dir(mean_csv.parent.parent, seed) / "csv" / mean_csv.name
+    return insert_seed_dir(mean_csv.parent, seed) / mean_csv.name
 
 
 model_mapping = {
@@ -356,6 +408,67 @@ def select_harmful_subcategory(
     return clean_pairs(df[is_subcategory & has_target_prompt_label & is_safe_response])
 
 
+def tactic_abbr(tactic):
+    """snake_case form of a jailbreak tactic, e.g. 'quid pro quo' -> 'quid_pro_quo'."""
+    return re.sub(r"[^a-z0-9]+", "_", str(tactic).lower()).strip("_")
+
+
+def tactic_pools(df, dataset_name):
+    """Group the training rows eligible under any non-benign subcategory by tactic.
+
+    Each row passes exactly the filters select_harmful_subcategory applies to
+    subcategories; multi-label rows are counted once, in their original order.
+    Pool rows get a tactic_abbrs column ([abbr]) for sample_evenly.
+    Returns ({abbr: tactic name}, {abbr: pool}).
+    """
+    if "tactic" not in df.columns:
+        raise ValueError(f"{dataset_name} has no tactic column")
+    subcategories = list(dict.fromkeys(
+        abbr for abbrs in df["sub_abbrs"] for abbr in abbrs if abbr != "benign"
+    ))
+    eligible = pd.concat([select_harmful_subcategory(df, dataset_name, abbr)
+                          for abbr in subcategories])
+    eligible = eligible[~eligible.index.duplicated()].sort_index()
+    eligible = eligible[eligible["tactic"].notna()
+                        & (eligible["tactic"].astype(str).str.strip() != "")]
+    tactics = eligible["tactic"].astype(str).str.strip()
+    names = {}
+    for tactic in dict.fromkeys(tactics):
+        if names.setdefault(tactic_abbr(tactic), tactic) != tactic:
+            raise ValueError(f"Tactics {names[tactic_abbr(tactic)]!r} and {tactic!r} "
+                             "share an abbreviation")
+    eligible = eligible.assign(tactic_abbrs=tactics.map(lambda tactic: [tactic_abbr(tactic)]))
+    return names, {abbr: eligible[tactics == tactic] for abbr, tactic in names.items()}
+
+
+def select_tactic(df, dataset_name, abbr, harmful_count=None):
+    """Training rows for one tactic, or the pooled tactics for a baseline abbr.
+
+    The random and evenly baselines pool the tactics with at least
+    harmful_count eligible rows, the tactics align_run.sh trains on their own.
+    """
+    _, pools = tactic_pools(df, dataset_name)
+    if abbr in BASELINE_ABBRS:
+        if harmful_count is None:
+            raise ValueError(f"Baseline {abbr!r} needs harmful_count to pick tactics")
+        chosen = [pools[tactic] for tactic in pools if len(pools[tactic]) >= harmful_count]
+        if not chosen:
+            raise ValueError(f"No {dataset_name} tactic has {harmful_count:,} eligible rows")
+        return pd.concat(chosen).sort_index()
+    if abbr not in pools:
+        raise ValueError(f"Unknown tactic {abbr!r} in {dataset_name}; "
+                         f"choose from {sorted(pools)}")
+    return pools[abbr]
+
+
+def load_harmful_group(dataset_name, abbr, harmful_count=None, group_by="subcategory"):
+    """Training rows for one subcategory or tactic (or a baseline over them)."""
+    if group_by == "tactic":
+        return select_tactic(load_safety_dataset(dataset_name, "train"), dataset_name,
+                             abbr, harmful_count)
+    return load_harmful_subcategory(dataset_name, abbr, harmful_count)
+
+
 def load_wildjailbreak_benign(data_type: str) -> pd.DataFrame:
     """Load benign prompt/completion pairs from WildJailbreak."""
     df = load_dataset(
@@ -448,12 +561,14 @@ def sample_evenly(
     seed: int,
     tokenizer,
     max_length: int,
+    column: str = "sub_abbrs",
 ) -> tuple[pd.DataFrame, int, dict[str, int]]:
     """Split count as evenly as possible across subcategories.
 
     Subcategories are filled smallest first, so one that runs short passes its
     unused share to the larger ones. A multi-label row is drawn at most once
-    and counts toward the subcategory that drew it.
+    and counts toward the subcategory that drew it. `column` holds each row's
+    group list (sub_abbrs, or tactic_abbrs for tactics).
     """
     if count == 0:
         return pd.DataFrame(columns=["prompt", "response"]), 0, {}
@@ -469,7 +584,7 @@ def sample_evenly(
     fits = pd.Series(lengths, index=df.index, dtype=int) < max_length
     available = df[fits]
     members = {
-        abbr: available.index[available["sub_abbrs"].apply(lambda subs: abbr in subs)]
+        abbr: available.index[available[column].apply(lambda subs: abbr in subs)]
         for abbr in abbrs
     }
 
@@ -508,18 +623,117 @@ def mixture_counts(total, harmful_rate, general_rate=0.0):
     return harmful, total - harmful - general, general
 
 
+def sample_examples(
+    seed: int,
+    tokenizer,
+    max_length: int,
+    *,
+    harmful_pool: pd.DataFrame,
+    harmful_count: int,
+    abbr: str,
+    dataset_name: str,
+    group_by: str = "subcategory",
+    benign_pool: pd.DataFrame | None = None,
+    benign_count: int = 0,
+    benign_data_type: str = "vanilla_benign",
+    general_pool: pd.DataFrame | None = None,
+    general_count: int = 0,
+) -> tuple[dict[str, pd.DataFrame], dict]:
+    """Draw the examples of one run; given the pools and counts, only the seed decides.
+
+    This is the only code that picks training examples. align.py calls it
+    through build_training_data and calculate_diversity.py calls it directly,
+    so a diversity sample drawn with seed s holds exactly the harmful (and
+    benign) examples of the training run with seed s. Each part has its own
+    seed offset (harmful: seed, benign: seed + 1, general: seed + 2), so a
+    part depends only on its pool, its count and the run seed.
+
+    Returns ({"harmful", "benign", "general": prompt/response frames}, info),
+    where info has the overlong count skipped while sampling and, for the
+    random and evenly baselines, the pooled groups ("baseline_groups") and,
+    for evenly, the examples per group ("harmful_subcategory_counts").
+    """
+    empty = pd.DataFrame(columns=["prompt", "response"])
+    info = {"overlong": 0, "baseline_groups": None, "harmful_subcategory_counts": None}
+    harmful_source = f"{group_by} {abbr!r} in {dataset_name}"
+    if abbr in BASELINE_ABBRS and harmful_count:
+        # Groups pooled by a baseline: tactics in the pool, or align_run.sh's subcategories.
+        info["baseline_groups"] = (
+            sorted({group for groups in harmful_pool["tactic_abbrs"] for group in groups})
+            if group_by == "tactic"
+            else baseline_abbrs(dataset_name, harmful_count)
+        )
+    if abbr == "evenly":
+        harmful, overlong, info["harmful_subcategory_counts"] = sample_evenly(
+            harmful_pool,
+            harmful_count,
+            info["baseline_groups"],
+            harmful_source,
+            seed,
+            tokenizer,
+            max_length,
+            column="tactic_abbrs" if group_by == "tactic" else "sub_abbrs",
+        )
+    else:
+        harmful, overlong = sample_pairs(
+            harmful_pool, harmful_count, harmful_source, seed, tokenizer, max_length
+        )
+    info["overlong"] += overlong
+
+    if not benign_count:
+        benign = empty
+    elif benign_data_type == "mix":
+        # Equal halves of vanilla and adversarial benign examples (vanilla gets
+        # the extra one when benign_count is odd).
+        parts = [
+            sample_pairs(
+                benign_pool[benign_pool["data_type"] == data_type],
+                share,
+                f"WildJailbreak {data_type!r}",
+                seed + 1,
+                tokenizer,
+                max_length,
+            )
+            for data_type, share in (
+                ("vanilla_benign", benign_count - benign_count // 2),
+                ("adversarial_benign", benign_count // 2),
+            )
+        ]
+        benign = pd.concat([part for part, _ in parts], ignore_index=True)
+        info["overlong"] += sum(overlong for _, overlong in parts)
+    else:
+        benign, overlong = sample_pairs(
+            benign_pool,
+            benign_count,
+            f"WildJailbreak {benign_data_type!r}",
+            seed + 1,
+            tokenizer,
+            max_length,
+        )
+        info["overlong"] += overlong
+
+    general, overlong = (
+        sample_pairs(general_pool, general_count, "general instruction data",
+                     seed + 2, tokenizer, max_length)
+        if general_count else (empty, 0)
+    )
+    info["overlong"] += overlong
+    return {"harmful": harmful, "benign": benign, "general": general}, info
+
+
 def build_training_data(
     args: argparse.Namespace, tokenizer, *, harmful_pool=None, benign_pool=None,
     general_pool=None,
 ) -> tuple[pd.DataFrame, int, int, int]:
-    """Build the alignment mixture, optionally reusing already filtered pools."""
-    # Older callers (e.g. diversity scoring) keep their two-source mixture.
+    """Build the shuffled alignment mixture of one run (sample_examples, seed args.seed)."""
+    # Callers without general_rate (e.g. older scripts) keep a two-source mixture.
     harmful_count, benign_count, general_count = mixture_counts(
         args.num_train, args.harmful_rate, getattr(args, "general_rate", 0.0)
     )
 
+    group_by = getattr(args, "group_by", "subcategory")
     harmful_pool = harmful_pool if harmful_pool is not None else (
-        load_harmful_subcategory(args.alignment_dataset, args.abbr, harmful_count)
+        load_harmful_group(args.alignment_dataset, args.abbr, harmful_count, group_by)
         if harmful_count
         else pd.DataFrame(columns=["prompt", "response"])
     )
@@ -534,71 +748,18 @@ def build_training_data(
             if general_count else pd.DataFrame(columns=["prompt", "response"])
         )
 
-    harmful_source = f"subcategory {args.abbr!r} in {args.alignment_dataset}"
-    harmful_counts = None
-    if args.abbr == "evenly":
-        harmful, harmful_overlong, harmful_counts = sample_evenly(
-            harmful_pool,
-            harmful_count,
-            baseline_abbrs(args.alignment_dataset, harmful_count),
-            harmful_source,
-            args.seed,
-            tokenizer,
-            args.max_length,
-        )
-    else:
-        harmful, harmful_overlong = sample_pairs(
-            harmful_pool,
-            harmful_count,
-            harmful_source,
-            args.seed,
-            tokenizer,
-            args.max_length,
-        )
-    if args.benign_data_type == "mix":
-        # Equal halves of vanilla and adversarial benign examples (vanilla gets
-        # the extra one when benign_count is odd).
-        parts = [
-            sample_pairs(
-                benign_pool[benign_pool["data_type"] == data_type],
-                share,
-                f"WildJailbreak {data_type!r}",
-                args.seed + 1,
-                tokenizer,
-                args.max_length,
-            )
-            for data_type, share in (
-                ("vanilla_benign", benign_count - benign_count // 2),
-                ("adversarial_benign", benign_count // 2),
-            )
-        ]
-        benign = pd.concat([part for part, _ in parts], ignore_index=True)
-        benign_overlong = sum(overlong for _, overlong in parts)
-    else:
-        benign, benign_overlong = sample_pairs(
-            benign_pool,
-            benign_count,
-            f"WildJailbreak {args.benign_data_type!r}",
-            args.seed + 1,
-            tokenizer,
-            args.max_length,
-        )
-    general, general_overlong = sample_pairs(
-        general_pool,
-        general_count,
-        "general instruction data",
-        args.seed + 2,
-        tokenizer,
-        args.max_length,
+    parts, info = sample_examples(
+        args.seed, tokenizer, args.max_length,
+        harmful_pool=harmful_pool, harmful_count=harmful_count, abbr=args.abbr,
+        dataset_name=args.alignment_dataset, group_by=group_by,
+        benign_pool=benign_pool, benign_count=benign_count,
+        benign_data_type=args.benign_data_type,
+        general_pool=general_pool, general_count=general_count,
     )
-    train_df = pd.concat([harmful, benign, general], ignore_index=True)
+    train_df = pd.concat(list(parts.values()), ignore_index=True)
     train_df = train_df.sample(frac=1, random_state=args.seed).reset_index(drop=True)
     train_df.attrs["general_available"] = len(general_pool)
-    if harmful_counts is not None:
-        train_df.attrs["harmful_subcategory_counts"] = harmful_counts
-    return (
-        train_df,
-        len(harmful_pool),
-        len(benign_pool),
-        harmful_overlong + benign_overlong + general_overlong,
-    )
+    for key in ("harmful_subcategory_counts", "baseline_groups"):
+        if info[key] is not None:
+            train_df.attrs[key] = info[key]
+    return train_df, len(harmful_pool), len(benign_pool), info["overlong"]

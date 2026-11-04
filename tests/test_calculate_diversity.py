@@ -98,5 +98,15 @@ class MergeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cd.merge_rows(existing, scored.rename(columns={'value': 'other'}))
 
+    def test_seed_means_average_each_group_over_its_seeds(self):
+        by_seed = pd.DataFrame({'subcategory': ['A', 'A', 'B'], 'abbr': ['a', 'a', 'b'],
+                                'seed': [84, 42, 42], 'count': [9, 9, 5],
+                                'lexical_hdd↑': [0.2, 0.4, 0.5]})
+        means = cd.seed_means(by_seed)
+        self.assertEqual(means.columns.tolist(),
+                         ['subcategory', 'abbr', 'count', 'seeds', 'lexical_hdd↑'])
+        self.assertEqual(means['seeds'].tolist(), ['42 84', '42'])
+        self.assertEqual(means['lexical_hdd↑'].tolist(), [0.3, 0.5])
+
 if __name__ == '__main__':
     unittest.main()

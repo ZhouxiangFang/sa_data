@@ -18,7 +18,7 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
-from helper import BENIGN_DATA_TYPES, model_mapping
+from helper import BENIGN_DATA_TYPES, DEFAULT_SEED, insert_seed_dir, model_mapping
 
 
 SCORE_NAMES = [
@@ -45,12 +45,19 @@ def resolve_model(name):
 def result_location(
     output_dir, checkpoint_name, model_name=None, num_train=None, benign_data_type=None
 ):
-    """Group aligned runs by model/count/dataset with dataset/subcategory filenames."""
+    """Group aligned runs by seed and model/count/dataset, with dataset/subcategory filenames.
+
+    An aligned checkpoint <model>_<count>_<dataset>_<abbr>[_seed<seed>] goes to
+    <parent>/seed<seed>/<name>/<model>_<count>_<dataset>/ for an output_dir of
+    <parent>/<name> (results/if_eval -> results/seed42/if_eval/...; seed 42 when
+    the name has no seed); any other model goes to output_dir.
+    """
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", checkpoint_name)
     match = re.fullmatch(
         r"(?P<model>.+)_(?P<count>[1-9][0-9]*)_"
         r"(?:(?P<benign>vanilla_benign|adversarial_benign|mix)_)?"
-        r"(?P<category>(?:wildguardmix|aegis|gretel)_.+?)(?P<variant>_permit)?",
+        r"(?P<category>(?:wildguardmix|aegis|gretel)_.+?)(?:_seed(?P<seed>[1-9][0-9]*))?"
+        r"(?P<variant>_permit)?",
         safe_name,
     ) or re.fullmatch(
         # Accept checkpoints saved before the training metadata moved up front.
@@ -80,8 +87,9 @@ def result_location(
         raise ValueError(f"Unsupported benign data type: {benign_data_type}")
     variant = match["variant"] or ""
     dataset_name = match["category"].split("_", 1)[0]
+    seed = match.groupdict().get("seed") or DEFAULT_SEED
     directory = os.path.join(
-        output_dir, f"{model_name}_{num_train}_{dataset_name}{variant}"
+        insert_seed_dir(output_dir, seed), f"{model_name}_{num_train}_{dataset_name}{variant}"
     )
     return directory, match["category"] + variant
 

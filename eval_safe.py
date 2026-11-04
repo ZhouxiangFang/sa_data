@@ -12,6 +12,7 @@ import pandas as pd
 from helper import (
     BENIGN_DATA_TYPES,
     BENIGN_PROMPT,
+    DEFAULT_SEED,
     HARMFUL_PROMPT,
     generate_responses,
     load_safety_dataset,
@@ -19,6 +20,7 @@ from helper import (
     overrefusal_test_datasets,
     prompt_types,
     safety_test_datasets,
+    seed_dir,
     to_abbr,
     wildguard_instruction_format,
 )
@@ -81,12 +83,18 @@ def resolve_model(model):
 def result_location(
     output_dir, checkpoint_name, model_name=None, num_train=None, benign_data_type=None
 ):
-    """Group aligned runs by model/count/dataset, then dataset/subcategory."""
+    """Group aligned runs by seed, model/count/dataset, then dataset/subcategory.
+
+    An aligned checkpoint <model>_<count>_<dataset>_<abbr>[_seed<seed>] goes to
+    <output_dir>/seed<seed>/<model>_<count>_<dataset>/<dataset>_<abbr>/ (seed 42
+    when the name has no seed); any other model goes to <output_dir>/<name>.
+    """
     safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", checkpoint_name)
     match = re.fullmatch(
         r"(?P<model>.+)_(?P<count>[1-9][0-9]*)_"
         r"(?:(?P<benign>vanilla_benign|adversarial_benign|mix)_)?"
-        r"(?P<category>(?:wildguardmix|aegis|gretel)_.+?)(?P<variant>_permit)?",
+        r"(?P<category>(?:wildguardmix|aegis|gretel)_.+?)(?:_seed(?P<seed>[1-9][0-9]*))?"
+        r"(?P<variant>_permit)?",
         safe_name,
     ) or re.fullmatch(
         # Accept checkpoints saved before the training metadata moved up front.
@@ -116,8 +124,9 @@ def result_location(
         raise ValueError(f"Unsupported benign data type: {benign_data_type}")
     variant = match["variant"] or ""
     dataset_name = match["category"].split("_", 1)[0]
+    seed = match.groupdict().get("seed") or DEFAULT_SEED
     directory = os.path.join(
-        output_dir, f"{model_name}_{num_train}_{dataset_name}{variant}"
+        output_dir, seed_dir(seed), f"{model_name}_{num_train}_{dataset_name}{variant}"
     )
     directory = os.path.join(directory, match["category"])
     return directory, match["category"] + variant

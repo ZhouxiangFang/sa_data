@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-# Concrete eight-A6000 launcher. Model/dataset/subcategory jobs share one queue;
-# whichever four-GPU group is idle takes the next job. Jobs whose checkpoint is
-# already saved are skipped, so rerunning the same command resumes a run.
+# Concrete eight-A6000 launcher. Model/dataset/subcategory/seed jobs share one
+# queue; whichever four-GPU group is idle takes the next job. Each group is
+# trained --runs times (default 3) with seeds 42, 2*42, 3*42, ... Jobs whose
+# checkpoint is already saved are skipped, so rerunning the same command resumes.
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
@@ -21,12 +22,21 @@ Launcher options:
   --abbrs ABBR [ABBR ...]         Space- or comma-separated subcategories to run
                                  Default: every eligible subcategory plus the
                                  random and evenly baselines
+  --group_by subcategory|tactic   Group harmful prompts by subcategory (default)
+                                 or by jailbreak tactic (gretel only; --abbrs
+                                 then lists tactics, and the baselines pool the
+                                 eligible tactics)
   --num_train N                  Total examples per job (default: 1800)
   --epochs N                      Training epochs per job (default: 2)
   --harmful_rate RATE             Safety subcategory fraction (default: 1/3)
   --general_rate RATE             General instruction fraction (default: 1/3)
   --general_dataset CSV           General instruction data (default: data/git_data_20k.csv)
-  --seed N                       Sampling/training seed, passed to align.py (default: 42)
+  --runs N                        Runs per model/dataset/group (default: 3); run n
+                                 uses seed n * SEED (42, 84, 126, ...)
+  --seed SEED                     Seed of run 1 (default: 42)
+  --seeds SEED [SEED ...]         Train exactly these seeds instead, e.g. 84 126 to add
+                                 runs 2-3 where run 1's checkpoints were already
+                                 evaluated and deleted
   -h, --help                      Show this help
 
 Examples:
@@ -34,13 +44,23 @@ Examples:
   ./align_run.sh --models qwen2.5-ins,llama3.1-ins --datasets wildguardmix aegis
   ./align_run.sh --models qwen2.5-ins --datasets gretel
   ./align_run.sh --models qwen2.5-ins --abbrs random evenly
+  ./align_run.sh --models qwen2.5-ins --runs 1      # only seed 42
+  ./align_run.sh --folder /home/zf28/models/20k --datasets aegis --seeds 84 126
+  ./align_run.sh --folder /home/zf28/models/20k --datasets gretel --group_by tactic \
+      --num_train 900
   ./align_run.sh --folder /home/zf28/models/20k --datasets wildguardmix
   ./align_run.sh --folder /home/zf28/models/20k --models qwen2.5-ins \
       --num_train 1800 --general_dataset ../data/git_data_20k.csv --epochs 2 --lr 1e-5
 
+The seed decides every sampled example (helper.sample_examples, which
+calculate_diversity.py also samples with) and the training order. Checkpoints
+are named <model>_<num_train>_<dataset>_<abbr>_seed<seed>, and eval_run.sh
+writes each one's results to <results>/seed<seed>/ (IF: <results>/seed<seed>/if_eval/).
+All jobs of run 1 are queued before run 2, and so on.
+
 Benign safety examples fill the remaining fraction: the default mixture is
 600 harmful safety + 600 benign safety + 600 general instructions (1:1:1).
-Default-mixture results go to ../results and ../results/if_eval (eval_run.sh defaults);
+Default-mixture results go to ../results/seed<seed> (eval_run.sh defaults);
 evaluate every other setting into ../ablations/<setting>/ instead
 (--safe-output-dir ../ablations/<setting> --if-output-dir ../ablations/<setting>/if_eval).
 
@@ -60,11 +80,15 @@ models=()
 folders=()
 datasets=()
 abbrs=()
+seeds=()
 extra_args=()
 num_train=1800
 harmful_rate=0.3333333333333333
 general_rate=0.3333333333333333
 general_dataset="$script_dir/../data/git_data_20k.csv"
+group_by=subcategory
+runs=3
+base_seed=42
 
 append_csv_values() {
     local target_name="$1" raw="$2" value
@@ -79,7 +103,7 @@ append_csv_values() {
 
 while (( $# > 0 )); do
     case "$1" in
-        --models|--datasets|--abbrs)
+        --models|--datasets|--abbrs|--seeds)
             option="$1"
             shift
             (( $# > 0 )) && [[ "$1" != --* ]] || {
@@ -92,7 +116,7 @@ while (( $# > 0 )); do
                 shift
             done
             ;;
-        --models=*|--datasets=*|--abbrs=*)
+        --models=*|--datasets=*|--abbrs=*|--seeds=*)
             option="${1%%=*}"
             append_csv_values "${option#--}" "${1#*=}" || exit $?
             shift
@@ -127,6 +151,19 @@ while (( $# > 0 )); do
             shift 2
             ;;
         --general_dataset=*) general_dataset="${1#*=}"; shift ;;
+        --group_by)
+            (( $# >= 2 )) || { echo "--group_by needs a value." >&2; exit 2; }
+            group_by="$2"
+            shift 2
+            ;;
+        --group_by=*) group_by="${1#*=}"; shift ;;
+        --runs|--seed)
+            (( $# >= 2 )) || { echo "$1 needs a value." >&2; exit 2; }
+            if [[ "$1" == --runs ]]; then runs="$2"; else base_seed="$2"; fi
+            shift 2
+            ;;
+        --runs=*) runs="${1#*=}"; shift ;;
+        --seed=*) base_seed="${1#*=}"; shift ;;
         -h|--help) usage; exit 0 ;;
         --)
             shift
@@ -137,8 +174,38 @@ while (( $# > 0 )); do
     esac
 done
 
+case "$group_by" in
+    subcategory|tactic) ;;
+    *) echo "--group_by must be subcategory or tactic." >&2; exit 2 ;;
+esac
+[[ "$runs" =~ ^[1-9][0-9]*$ && "$base_seed" =~ ^[1-9][0-9]*$ ]] || {
+    echo "--runs and --seed must be positive integers." >&2
+    exit 2
+}
+if (( ${#seeds[@]} == 0 )); then
+    # Run n uses seed n * base_seed, as helper.run_seeds.
+    for ((run = 1; run <= runs; run++)); do
+        seeds+=($((run * base_seed)))
+    done
+fi
+declare -A seen_seeds=()
+for seed in "${seeds[@]}"; do
+    [[ "$seed" =~ ^[1-9][0-9]*$ && -z "${seen_seeds[$seed]:-}" ]] || {
+        echo "--seeds must be distinct positive integers." >&2
+        exit 2
+    }
+    seen_seeds[$seed]=1
+done
 if (( ${#datasets[@]} == 0 )); then
-    datasets=(wildguardmix aegis gretel)
+    if [[ "$group_by" == tactic ]]; then
+        datasets=(gretel)
+    else
+        datasets=(wildguardmix aegis gretel)
+    fi
+fi
+if [[ "$group_by" == tactic && "${datasets[*]}" != gretel ]]; then
+    echo "--group_by tactic supports only --datasets gretel." >&2
+    exit 2
 fi
 
 # A folder contributes each immediate checkpoint directory containing config.json.
@@ -243,14 +310,27 @@ stats_file="$script_dir/../data/subcategory_stats.json"
 job_models=()
 job_datasets=()
 job_abbrs=()
+job_seeds=()
 skipped=()
-declare -A requested=() matched=()
+declare -A requested=() matched=() dataset_eligible=()
 for abbr in "${abbrs[@]}"; do
     requested[$abbr]=1
 done
 
 for dataset in "${datasets[@]}"; do
-    category_lines=$(python -c '
+    if [[ "$group_by" == tactic ]]; then
+        # Tactic pool sizes come from the data itself (helper.tactic_pools).
+        category_lines=$(python -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from helper import load_safety_dataset, tactic_pools
+
+_, pools = tactic_pools(load_safety_dataset(sys.argv[2], "train"), sys.argv[2])
+for abbr, pool in pools.items():
+    print(abbr, len(pool), sep="\t")
+' "$script_dir" "$dataset" 2>/dev/null) || exit $?
+    else
+        category_lines=$(python -c '
 import json
 import sys
 
@@ -259,6 +339,7 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 for category in categories.values():
     print(category["abbr"], category["train"]["safe_response"], sep="\t")
 ' "$stats_file" "$dataset") || exit $?
+    fi
 
     eligible=()
     while IFS=$'\t' read -r abbr available; do
@@ -282,12 +363,21 @@ for category in categories.values():
         fi
     done
 
-    echo "$dataset: selected ${#eligible[@]} subcategory(s)."
-    for model in "${models[@]}"; do
-        for abbr in "${eligible[@]}"; do
-            job_models+=("$model")
-            job_datasets+=("$dataset")
-            job_abbrs+=("$abbr")
+    echo "$dataset: selected ${#eligible[@]} ${group_by} group(s)."
+    dataset_eligible[$dataset]="${eligible[*]}"
+done
+
+# Every job of run 1 comes before run 2, so whole runs finish one at a time.
+for seed in "${seeds[@]}"; do
+    for dataset in "${datasets[@]}"; do
+        read -r -a eligible <<< "${dataset_eligible[$dataset]}"
+        for model in "${models[@]}"; do
+            for abbr in "${eligible[@]}"; do
+                job_models+=("$model")
+                job_datasets+=("$dataset")
+                job_abbrs+=("$abbr")
+                job_seeds+=("$seed")
+            done
         done
     done
 done
@@ -306,7 +396,7 @@ fi
 (( ${#job_models[@]} > 0 )) || { echo "No eligible jobs remain." >&2; exit 2; }
 
 # ---- skip jobs whose checkpoint was already saved ----
-# Mirrors align.py: <output_dir>/<model>_<num_train>_<dataset>_<abbr>.
+# Mirrors align.py: <output_dir>/<model>_<num_train>_<dataset>_<abbr>_seed<seed>.
 output_root=/scratch/zf28/ckpts
 use_run_name=0
 for ((i = 0; i < ${#extra_args[@]}; i++)); do
@@ -314,8 +404,21 @@ for ((i = 0; i < ${#extra_args[@]}; i++)); do
         --output_dir) output_root="${extra_args[i + 1]:-}" ;;
         --output_dir=*) output_root="${extra_args[i]#*=}" ;;
         --run_name|--run_name=*) use_run_name=1 ;;
+        --seed|--seed=*)
+            echo "--seed after -- would give every run the same seed; use the launcher's --seed (run 1's seed)." >&2
+            exit 2
+            ;;
     esac
 done
+if (( use_run_name == 1 && ${#seeds[@]} > 1 )); then
+    echo "--run_name would give every run the same checkpoint; use --runs 1." >&2
+    exit 2
+fi
+
+# Same rule as helper.seed_suffix.
+seed_suffix() {
+    printf '_seed%s' "$1"
+}
 
 # Same rule as align.filename_component.
 filename_component() {
@@ -325,11 +428,18 @@ filename_component() {
 }
 
 job_is_saved() {
-    local index="$1" model="${job_models[$1]%/}" checkpoint
+    local index="$1" model="${job_models[$1]%/}" name checkpoint
+    local -a candidates
     (( use_run_name == 0 )) || return 1
-    checkpoint="$output_root/$(filename_component "${model##*/}")_${num_train}_${job_datasets[$index]}_$(filename_component "${job_abbrs[$index]}")"
-    # tokenizer files are written after the weights, so they mark a full save.
-    [[ -f "$checkpoint/config.json" && -f "$checkpoint/tokenizer_config.json" ]]
+    name="$output_root/$(filename_component "${model##*/}")_${num_train}_${job_datasets[$index]}_$(filename_component "${job_abbrs[$index]}")"
+    candidates=("$name$(seed_suffix "${job_seeds[$index]}")")
+    # Checkpoints saved before seeds were named have no suffix and are seed 42.
+    (( job_seeds[index] != 42 )) || candidates+=("$name")
+    for checkpoint in "${candidates[@]}"; do
+        # tokenizer files are written after the weights, so they mark a full save.
+        [[ -f "$checkpoint/config.json" && -f "$checkpoint/tokenizer_config.json" ]] && return 0
+    done
+    return 1
 }
 
 pending=()
@@ -445,9 +555,10 @@ run_job() {
     local model="${job_models[$index]}"
     local dataset="${job_datasets[$index]}"
     local abbr="${job_abbrs[$index]}"
-    local log_file="$log_dir/align_$(model_tag "$model")_${dataset}_${abbr}_${timestamp}_$((index + 1)).log"
+    local seed="${job_seeds[$index]}"
+    local log_file="$log_dir/align_$(model_tag "$model")_${dataset}_${abbr}_seed${seed}_${timestamp}_$((index + 1)).log"
 
-    echo "Starting [$((index + 1))/${#job_models[@]}] on GPUs $gpu_group: $model | $dataset | $abbr"
+    echo "Starting [$((index + 1))/${#job_models[@]}] on GPUs $gpu_group: $model | $dataset | $abbr | seed $seed"
     echo "LOG_FILE=$log_file"
 
     env -u CUDA_VISIBLE_DEVICES PYTHONUNBUFFERED=1 \
@@ -460,15 +571,17 @@ run_job() {
         --num_train "$num_train" \
         --harmful_rate "$harmful_rate" \
         --general_rate "$general_rate" \
-        --general_dataset "$general_dataset" 2>&1 | tee -a "$log_file"
+        --general_dataset "$general_dataset" \
+        --group_by "$group_by" \
+        --seed "$seed" 2>&1 | tee -a "$log_file"
 }
 
 job_label() {
-    printf '[%d/%d] %s | %s | %s' "$(($1 + 1))" "${#job_models[@]}" \
-        "${job_models[$1]}" "${job_datasets[$1]}" "${job_abbrs[$1]}"
+    printf '[%d/%d] %s | %s | %s | seed %s' "$(($1 + 1))" "${#job_models[@]}" \
+        "${job_models[$1]}" "${job_datasets[$1]}" "${job_abbrs[$1]}" "${job_seeds[$1]}"
 }
 
-echo "Configuration: models=${models[*]} datasets=${datasets[*]} abbrs=${abbrs[*]:-all} num_train=$num_train harmful_rate=$harmful_rate general_rate=$general_rate general_dataset=$general_dataset"
+echo "Configuration: models=${models[*]} datasets=${datasets[*]} group_by=$group_by abbrs=${abbrs[*]:-all} seeds=${seeds[*]} num_train=$num_train harmful_rate=$harmful_rate general_rate=$general_rate general_dataset=$general_dataset"
 echo "Required subcategory examples: $category_required"
 echo "Queued ${#pending[@]} job(s) on GPU groups: ${gpu_groups[*]} (attempts per job: $max_attempts)"
 

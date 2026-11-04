@@ -5,8 +5,8 @@ set -uo pipefail
 # examples (harmful_rate 0.5, general_rate 0.5, no WildJailbreak benign data),
 # trained from four 20k models on aegis, wildguardmix and gretel, then evaluated.
 # Checkpoints and results are kept apart from other runs:
-# /scratch/zf28/ckpts/h0.5_nobenign/ and ablations/h0.5_nobenign/ (IF results in
-# ablations/h0.5_nobenign/if_eval/). eval_run.sh deletes checkpoints only after both
+# /scratch/zf28/ckpts/h0.5_nobenign/ and ablations/h0.5_nobenign/seed<seed>/ (IF results in
+# ablations/h0.5_nobenign/seed<seed>/if_eval/). eval_run.sh deletes checkpoints only after both
 # evaluations succeed. align_run.sh skips saved checkpoints, so rerunning resumes.
 # SKIP_STAGES lists comma-separated stage names to skip, e.g. SKIP_STAGES="train".
 

@@ -29,9 +29,24 @@ qwen2.5). The per-test plots use each test dataset's harmful score,
 averaged equally across models.
 Their plotted scores and correlations are exported in average_diversity_safety_*
 CSVs with a test_dataset column. Correlations use negative Self-BLEU so larger always
-means more diverse. Average correlations are computed against equally weighted
-model-mean harmful scores on subcategories available for every model; they
-are not averages of correlation coefficients. The pooled overall diversity
+means more diverse.
+
+Seeds: each group is trained once per seed (align_run.sh: 42, 84, 126), and
+calculate_diversity.py scores the very sample each seed trained on, in
+diversity/seed<seed>/<embedder>/csv/ (the input CSV is their mean over seeds,
+whose seeds column lists them). Every run, read from
+<results>/seed<seed>/<model>_<suffix>/, is paired with the diversity of its own
+training sample. A point is one model (or the average) and group: its harmful
+score and its diversity are both means over the same seeds, and the error bars
+span +-1 SD of the harmful score across those seeds. The coefficients in the
+correlation CSV and figures in diversity/<embedder>/ are computed across these
+seed-mean points. Each seed's runs are also analyzed on their own, with the same
+default outputs written to diversity/seed<seed>/<embedder>/{csv,figs}/, and the
+seed-mean CSV adds the mean and SD of those per-seed coefficients
+(seed_coefficient_mean/_std; also shown in the figures when there are at least
+two seeds). Average correlations use the equally weighted model-mean harmful
+score of each group and seed that every model has; they are not averages of
+correlation coefficients. The pooled overall diversity
 reference is excluded from correlations. The random and evenly training-data
 baselines (rows written by calculate_diversity.py, trained by align_run.sh)
 are correlated with the subcategories by default and drawn as squares;
@@ -40,6 +55,8 @@ dropped from figures and CSVs (plot_bars_overall.EXCLUDED_ABBRS); --exclude
 subcategories are plotted but excluded from correlation coefficients and fitted
 lines. CSV exports contain plotted pairs
 and coefficients, including sample counts and p-values.
+A *_tactic_diversity_* CSV (calculate_diversity.py --group_by tactic) is read as
+tactic runs: points are tactics and outputs are named <dataset>_tactic_*.
 Run names encode dataset, subcategory, and size, but not the mixture fraction;
 use --suffix to select grouped result folders for the intended configuration.
 Outputs are named by dataset only, so use --output-dir to keep the results of
@@ -61,6 +78,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import kendalltau, pearsonr, spearmanr
 
+from helper import DEFAULT_SEED, insert_seed_dir, seed_dir, seed_diversity_csv
 from plot_bars_overall import (BASELINE_ABBRS, DEFAULT_MODELS, DIVERSITY_DIR, EXCLUDED_ABBRS,
                                MODELS, RESULTS_DIR)
 
@@ -115,15 +133,33 @@ TEST_DATASETS = {
 
 
 def load_diversity(path, baselines=True):
-    """Read a diversity CSV; baselines=False drops the random and evenly rows."""
-    data = pd.read_csv(path)
+    """Read the per-seed diversity rows behind a mean diversity CSV.
+
+    `path` is the mean CSV from calculate_diversity.py,
+    diversity/<embedder>/csv/<name>; its seeds column names the seeds, whose
+    rows are read from diversity/seed<seed>/<embedder>/csv/<name>. Returns one
+    row per group and seed; baselines=False drops the random and evenly rows.
+    """
+    means = pd.read_csv(path)
+    if "seeds" not in means:
+        raise ValueError(f"{path} has no seeds column: rerun calculate_diversity.py, which "
+                         "scores the samples of the training seeds (older CSVs averaged "
+                         "seeds 42-51)")
+    seeds = sorted({int(seed) for seeds in means["seeds"] for seed in str(seeds).split()})
+    frames = []
+    for seed in seeds:
+        seed_path = seed_diversity_csv(path, seed)
+        if not seed_path.exists():
+            raise ValueError(f"{seed_path} not found (seed {seed} is listed in {path})")
+        frames.append(pd.read_csv(seed_path).assign(seed=seed))
+    data = pd.concat(frames, ignore_index=True)
     excluded = EXCLUDED_ABBRS if baselines else (*EXCLUDED_ABBRS, *BASELINE_ABBRS)
     data = data.loc[~data["abbr"].str.lower().isin(excluded)].reset_index(drop=True)
     missing = {"abbr", *METRICS} - set(data.columns)
     if missing:
         raise ValueError(f"{path}: missing columns {sorted(missing)}")
-    if data.empty or data["abbr"].isna().any() or data["abbr"].duplicated().any():
-        raise ValueError(f"{path}: expected nonempty, unique subcategory abbreviations")
+    if data.empty or data["abbr"].isna().any() or data.duplicated(["abbr", "seed"]).any():
+        raise ValueError(f"{path}: expected nonempty, unique subcategory rows per seed")
     for metric in METRICS:
         data[metric] = pd.to_numeric(data[metric], errors="raise").replace(
             [np.inf, -np.inf], np.nan
@@ -134,33 +170,30 @@ def load_diversity(path, baselines=True):
 
 
 def load_safety(results_dir, dataset, train_size, abbreviations, suffix=None,
-                test_dataset="Avg"):
-    """Read one test score from grouped results or legacy flat runs by size."""
-    pattern = re.compile(rf"^(.+)_{re.escape(dataset)}_(.+)_{train_size}$")
+                test_dataset="Avg", seeds=(DEFAULT_SEED,)):
+    """Read one test score of every run of the given seeds.
+
+    Seed s runs are in <results_dir>/seed<s>/<model>_<suffix>/<dataset>_<abbr>/.
+    """
     group_suffix = "_" + (suffix or f"{train_size}_{dataset}")
     candidates = []
     rows = []
-    for directory in sorted(results_dir.iterdir()):
-        if not directory.is_dir():
+    for seed in seeds:
+        seed_results = results_dir / seed_dir(seed)
+        if not seed_results.is_dir():
             continue
-        if directory.name.endswith(group_suffix):
+        for directory in sorted(seed_results.iterdir()):
+            if not directory.is_dir() or not directory.name.endswith(group_suffix):
+                continue
             model = directory.name[:-len(group_suffix)]
             for abbr in sorted(abbreviations):
                 category = f"{dataset}_{abbr}"
                 run_dir = directory / category
                 if run_dir.is_dir():
-                    candidates.append((model, abbr, f"{directory.name}/{category}",
+                    candidates.append((model, abbr, int(seed),
+                                       f"{seed_dir(seed)}/{directory.name}/{category}",
                                        run_dir / f"{category}_overall.csv"))
-        if suffix is not None:
-            continue
-        match = pattern.fullmatch(directory.name)
-        if not match:
-            continue
-        model, abbr = match.groups()
-        if abbr in abbreviations:
-            candidates.append((model, abbr, directory.name,
-                               directory / f"{directory.name}_overall.csv"))
-    for model, abbr, run, path in candidates:
+    for model, abbr, seed, run, path in candidates:
         # Use the run's exact filename, never an arbitrary glob match.
         if not path.exists():
             print(f"Warning: missing {path}; skipping run")
@@ -178,28 +211,64 @@ def load_safety(results_dir, dataset, train_size, abbreviations, suffix=None,
             raise ValueError(f"{path}: invalid harmful percentage {score}")
         # Display model names in the same way as plot_bars_overall.py.
         model = re.sub(r"(?:_git20k|-git20k|-20k)$", "", model)
-        rows.append({"model": model, "abbr": abbr, "run": run,
+        rows.append({"model": model, "abbr": abbr, "seed": seed, "run": run,
                      "harmful_score_pct": score})
-    result = pd.DataFrame(rows, columns=["model", "abbr", "run", "harmful_score_pct"])
-    if result.duplicated(["model", "abbr"]).any():
-        raise ValueError("Multiple runs match the same model and subcategory")
+    result = pd.DataFrame(rows, columns=["model", "abbr", "seed", "run", "harmful_score_pct"])
+    if result.duplicated(["model", "abbr", "seed"]).any():
+        raise ValueError("Multiple runs match the same model, subcategory and seed")
     return result
 
 
 def join_scores(diversity, safety, score="harmful_score_pct"):
-    """Add the equal-model average using only complete subcategory coverage."""
+    """Pair each run with the diversity of its own training sample, then average seeds.
+
+    `diversity` has one row per group and seed (load_diversity) and `safety` one
+    row per model, group and seed. Each run gets the diversity of the sample it
+    was trained on (same group and seed). "Average" runs are the equally
+    weighted model mean of each group and seed that every model has.
+    Returns (points, runs): runs keeps every paired run; points has one row per
+    model (and Average) and group, whose score and diversity are means over the
+    same seeds, with n_seeds, seeds and <score>_std (SD across seeds).
+    """
     subs = diversity.loc[diversity["abbr"] != "overall"]
-    pairs = safety.merge(subs, on="abbr", validate="many_to_one")
-    pairs["model_count"] = 1
-    wide = safety.pivot(index="abbr", columns="model", values=score)
+    runs = safety.merge(subs, on=["abbr", "seed"], how="left", validate="many_to_one",
+                        indicator=True)
+    unpaired = runs["_merge"] != "both"
+    if unpaired.any():
+        listed = ", ".join(f"{row.model}/{row.abbr}/seed {row.seed}"
+                           for row in runs.loc[unpaired].itertuples())
+        print(f"Warning: no diversity for the training sample of {unpaired.sum()} run(s); "
+              f"left out: {listed}")
+    runs = runs.loc[~unpaired].drop(columns="_merge").assign(model_count=1)
+    wide = runs.pivot(index=["abbr", "seed"], columns="model", values=score)
     complete = wide.dropna()
     if complete.empty:
-        print("Warning: no subcategories shared by all models; no average plot")
-        return pairs
-    average = complete.mean(axis=1).rename(score).reset_index()
-    average = average.merge(subs, on="abbr", validate="one_to_one")
-    average = average.assign(model="Average", run="", model_count=len(wide.columns))
-    return pd.concat([pairs, average], ignore_index=True)
+        print("Warning: no subcategory and seed shared by all models; no average plot")
+    else:
+        average = complete.mean(axis=1).rename(score).reset_index()
+        average = average.merge(subs, on=["abbr", "seed"], validate="one_to_one")
+        average = average.assign(model="Average", run="", model_count=len(wide.columns))
+        runs = pd.concat([runs, average], ignore_index=True)
+    return average_seeds(runs, score), runs
+
+
+def average_seeds(runs, score="harmful_score_pct"):
+    """One point per model and group: score and diversity means over the same seeds."""
+    grouped = runs.groupby(["model", "abbr"], sort=False)
+    points = grouped[[score, *METRICS]].mean()
+    # Sample SD across seeds; undefined (NaN) for a single seed.
+    points[f"{score}_std"] = grouped[score].std()
+    points["n_seeds"] = grouped.size()
+    points["seeds"] = grouped["seed"].agg(lambda seeds: " ".join(map(str, sorted(seeds))))
+    points["model_count"] = grouped["model_count"].first()
+    if "subcategory" in runs:
+        points["subcategory"] = grouped["subcategory"].first()
+    return points.reset_index()
+
+
+def mark_excluded(frame, excluded_abbrs):
+    """Flag --exclude subcategories, which stay plotted but leave the statistics."""
+    return frame.assign(included_in_correlation=~frame["abbr"].str.lower().isin(excluded_abbrs))
 
 
 def correlation_mask(scores):
@@ -209,21 +278,31 @@ def correlation_mask(scores):
     return pd.Series(True, index=scores.index)
 
 
-def finite_pairs(scores, metric, for_correlation=False, score="harmful_score_pct"):
-    sign = METRICS[metric][1]
-    x = sign * scores[metric].to_numpy(dtype=float)
-    y = scores[score].to_numpy(dtype=float)
-    valid = np.isfinite(x) & np.isfinite(y)
+def finite_mask(scores, metric, for_correlation=False, score="harmful_score_pct"):
+    valid = (np.isfinite(scores[metric].to_numpy(dtype=float))
+             & np.isfinite(scores[score].to_numpy(dtype=float)))
     if for_correlation:
         valid &= correlation_mask(scores).to_numpy()
+    return valid
+
+
+def finite_pairs(scores, metric, for_correlation=False, score="harmful_score_pct"):
+    sign = METRICS[metric][1]
+    valid = finite_mask(scores, metric, for_correlation, score)
+    x = sign * scores[metric].to_numpy(dtype=float)
+    y = scores[score].to_numpy(dtype=float)
     return x[valid], y[valid], scores.loc[valid, "abbr"].tolist()
 
 
 def correlation_table(pairs, methods, score="harmful_score_pct"):
+    """Coefficients across the points of each model; n_runs counts the runs averaged in."""
     rows = []
     for model, scores in pairs.groupby("model", sort=False):
         for metric in METRICS:
             x, y, _ = finite_pairs(scores, metric, for_correlation=True, score=score)
+            valid = finite_mask(scores, metric, for_correlation=True, score=score)
+            n_runs = (int(scores.loc[valid, "n_seeds"].sum()) if "n_seeds" in scores
+                      else len(x))
             for method in methods:
                 coefficient = pvalue = np.nan
                 if len(x) >= 3 and np.ptp(x) > 0 and np.ptp(y) > 0:
@@ -233,19 +312,44 @@ def correlation_table(pairs, methods, score="harmful_score_pct"):
                     "model": model, "group": metric.split("_", 1)[0],
                     "metric": metric, "method": method,
                     "diversity_multiplier": METRICS[metric][1],
-                    "safety_metric": score, "n_subcategories": len(x),
+                    "safety_metric": score, "n_subcategories": len(x), "n_runs": n_runs,
                     "coefficient": coefficient, "p_value": pvalue,
                 })
     return pd.DataFrame(rows)
 
 
-def coverage_label(counts, baselines=False):
-    """Describe how many training sets (subcategories and baselines) were correlated."""
+def seed_correlations(runs, methods, score="harmful_score_pct"):
+    """Correlate each seed's runs alone: every run against its own sample's diversity."""
+    tables = [correlation_table(seed_runs, methods, score).assign(seed=seed)
+              for seed, seed_runs in runs.groupby("seed")]
+    return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
+
+
+def add_seed_summary(table, by_seed):
+    """Add the mean and SD across seeds of the per-seed coefficients."""
+    if by_seed.empty:
+        return table
+    summary = by_seed.groupby(["model", "metric", "method"]).agg(
+        seed_coefficient_mean=("coefficient", "mean"),
+        seed_coefficient_std=("coefficient", "std"),
+        n_seed_correlations=("coefficient", "count"),
+    ).reset_index()
+    return table.merge(summary, on=["model", "metric", "method"], how="left",
+                       validate="one_to_one")
+
+
+# Plural of the training group a point stands for, by --group-by value.
+GROUP_PLURALS = {"subcategory": "subcategories", "tactic": "tactics"}
+
+
+def coverage_label(counts, baselines=False, point="subcategory"):
+    """Describe how many training sets (subcategories or tactics, and baselines) were correlated."""
     count = (f"{counts.iloc[0]}" if counts.nunique() == 1
              else f"{counts.min()}–{counts.max()}")
     if baselines:
-        return f"Correlations across {count} training sets (subcategories + random/evenly baselines)"
-    return f"Correlations across {count} subcategories"
+        return (f"Correlations across {count} training sets "
+                f"({GROUP_PLURALS[point]} + random/evenly baselines)")
+    return f"Correlations across {count} {GROUP_PLURALS[point]}"
 
 
 def style_axis(ax):
@@ -310,6 +414,15 @@ def plot_scatter_panel(ax, scores, correlations, metric, test_dataset, show_ylab
                        bold=False, highlight=False, score="harmful_score_pct"):
     label, sign, color = METRICS[metric]
     x, y, abbreviations = finite_pairs(scores, metric, score=score)
+    # +-1 SD of the score across the seeds averaged into each point (0 for one seed).
+    spread = f"{score}_std"
+    yerr = np.zeros_like(y)
+    if spread in scores:
+        yerr = np.nan_to_num(
+            scores[spread].to_numpy(dtype=float)[finite_mask(scores, metric, score=score)])
+        if yerr.any():
+            ax.errorbar(x, y, yerr=yerr, fmt="none", ecolor=color, alpha=0.35,
+                        elinewidth=1, capsize=2, zorder=2)
     excluded_abbrs = set(scores.loc[~correlation_mask(scores), "abbr"])
     excluded = np.array([abbr in excluded_abbrs for abbr in abbreviations], dtype=bool)
     baseline = np.array([abbr in BASELINE_ABBRS for abbr in abbreviations], dtype=bool)
@@ -331,6 +444,8 @@ def plot_scatter_panel(ax, scores, correlations, metric, test_dataset, show_ylab
     summary = []
     for row in stats.itertuples():
         value = f"{row.coefficient:+.3f}" if np.isfinite(row.coefficient) else "undefined"
+        if getattr(row, "n_seed_correlations", 0) >= 2 and np.isfinite(row.seed_coefficient_mean):
+            value += f" (seeds {row.seed_coefficient_mean:+.2f} ± {row.seed_coefficient_std:.2f})"
         summary.append(f"{row.method.title()}: {value}")
     if len(stats) > 1:
         mean = stats["coefficient"].mean()
@@ -350,10 +465,10 @@ def plot_scatter_panel(ax, scores, correlations, metric, test_dataset, show_ylab
         ax.set_ylabel(f"{safety_label} {SCORE_LABELS[score]} (%) ↓", fontsize=11)
     ax.margins(x=0.18)
     if len(y):
-        span = max(float(np.ptp(y)), 1.0)
-        # Reserve room for the statistics above every annotated point.
-        ax.set_ylim(max(0, y.min() - span * 0.15),
-                    y.max() + span * (0.18 + 0.10 * len(summary)))
+        low, high = float((y - yerr).min()), float((y + yerr).max())
+        span = max(high - low, 1.0)
+        # Reserve room for the statistics above every annotated point and error bar.
+        ax.set_ylim(max(0, low - span * 0.15), high + span * (0.18 + 0.10 * len(summary)))
     style_axis(ax)
     ax.tick_params(axis="both", labelsize=9)
     ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
@@ -365,7 +480,7 @@ def plotted_methods(methods):
 
 
 def plot_scatter(scores, correlations, title, context, path, group, test_dataset="Avg",
-                 score="harmful_score_pct"):
+                 score="harmful_score_pct", point="subcategory"):
     """Draw one panel per metric of a lexical, semantic or structural group."""
     correlations = correlations.loc[
         correlations["method"].isin(plotted_methods(correlations["method"].unique()))
@@ -391,7 +506,7 @@ def plot_scatter(scores, correlations, title, context, path, group, test_dataset
             ax.set_visible(False)
     handles = [
         Line2D([], [], marker="o", linestyle="", color=color, markersize=8,
-               label="Subcategory"),
+               label=point.title()),
     ]
     if scores["abbr"].isin(BASELINE_ABBRS).any():
         handles.append(Line2D([], [], marker="s", linestyle="", color=color,
@@ -399,6 +514,9 @@ def plot_scatter(scores, correlations, title, context, path, group, test_dataset
                               label="Random / evenly baseline"))
     handles.append(Line2D([], [], color=color, alpha=0.65, linewidth=1.5,
                           label="Least-squares fit on correlated points"))
+    if f"{score}_std" in scores and scores[f"{score}_std"].notna().any():
+        handles.append(Line2D([], [], color=color, alpha=0.35, linewidth=1, marker="_",
+                              markersize=8, label="±1 SD across seeds"))
     if (~correlation_mask(scores)).any():
         handles.append(Line2D([], [], marker="D", linestyle="", markerfacecolor="none",
                               markeredgecolor="0.3", markersize=8,
@@ -406,19 +524,26 @@ def plot_scatter(scores, correlations, title, context, path, group, test_dataset
     fig.legend(handles=handles, loc="outside lower center",
                ncols=len(handles) if width > 12 else 1, fontsize=11, frameon=False)
     coverage = coverage_label(group_correlations["n_subcategories"],
-                              scores["abbr"].isin(BASELINE_ABBRS).any())
+                              scores["abbr"].isin(BASELINE_ABBRS).any(), point)
     methods = "/".join(method.title() for method in group_correlations["method"].unique())
+    if "n_seeds" in scores and scores["n_seeds"].max() > 1:
+        counts = scores["n_seeds"]
+        coverage += ("; points are means over "
+                     f"{counts.min()}{'' if counts.nunique() == 1 else f'–{counts.max()}'} "
+                     "seed(s); (seeds) = mean ± SD of per-seed correlations")
     coverage += f"; shaded = two lowest mean {methods} correlations, bold = lowest"
     if test_dataset != "Avg":
         context += f"; test: {TEST_DATASETS[test_dataset]}"
     # Wrap the run details so narrow figures keep them visible.
-    details = f"{textwrap.fill(context, width=int(width * 7))}\n{coverage}"
+    details = (f"{textwrap.fill(context, width=int(width * 7))}\n"
+               f"{textwrap.fill(coverage, width=int(width * 7))}")
     fig.suptitle(f"{title}: {name.lower()} diversity vs. post-training {SCORE_LABELS[score]}"
                  f"\n{details}", fontsize=16)
     save_figure(fig, path)
 
 
-def plot_correlations(table, metric, method, context, path, baselines=False):
+def plot_correlations(table, metric, method, context, path, baselines=False,
+                      point="subcategory"):
     scores = table.loc[(table["metric"] == metric) & (table["method"] == method)]
     x = np.arange(len(scores), dtype=float)
     colors = ["#999999" if model == "Average" else METRICS[metric][2]
@@ -443,7 +568,7 @@ def plot_correlations(table, metric, method, context, path, baselines=False):
     label, sign, _ = METRICS[metric]
     ax.set_title(f"Diversity ({'negative ' if sign < 0 else ''}{label}) vs. overall harmful score",
                  fontsize=23, pad=20)
-    coverage = coverage_label(scores["n_subcategories"], baselines)
+    coverage = coverage_label(scores["n_subcategories"], baselines, point)
     if scores["n_subcategories"].nunique() > 1:
         coverage += " (varies by model)"
     ax.set_xlabel(f"{context}\n{coverage}; outliers excluded", fontsize=14, labelpad=12)
@@ -476,6 +601,9 @@ def main():
     parser.add_argument("--exclude", nargs="*", default=[],
                         help="Subcategories to exclude from correlations, "
                              "while keeping them plotted and in CSVs")
+    parser.add_argument("--group-by", choices=list(GROUP_PLURALS),
+                        help="What each point is; default: tactic for a *_tactic_diversity_* "
+                             "CSV, else subcategory")
     parser.add_argument("--no-baselines", dest="baselines", action="store_false",
                         help="Leave the random and evenly training-data baselines out of "
                              "correlations and figures (default: include them)")
@@ -497,8 +625,12 @@ def main():
         )
     try:
         diversity = load_diversity(csv_path, args.baselines)
+        seeds = sorted(diversity["seed"].unique())
+        point = args.group_by or ("tactic" if "_tactic_diversity_" in csv_path.name
+                                  else "subcategory")
         dataset = args.dataset or csv_path.stem.split("_diversity")[0]
-        dataset = dataset.removesuffix("_train").removesuffix("_test")
+        dataset = (dataset.removesuffix("_tactic").removesuffix("_train")
+                   .removesuffix("_test"))
         size = args.train_size
         # The size is the first all-digit field, e.g. 1800 in git20k_1800_aegis.
         size_match = re.search(r"(?:^|_)([1-9][0-9]*)_", args.suffix or "")
@@ -518,7 +650,7 @@ def main():
         for test in ["Avg", *TEST_DATASETS]:
             scores = load_safety(args.results_dir, dataset, size,
                                  set(diversity["abbr"]) - {"overall"}, args.suffix,
-                                 test_dataset=test)
+                                 test_dataset=test, seeds=seeds)
             safety_by_test[test] = scores.loc[scores["model"].isin(args.models)]
         missing = set(args.models) - set(safety_by_test["Avg"]["model"])
         if missing:
@@ -527,18 +659,32 @@ def main():
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
 
-    # diversity/<model>/csv/<CSV> -> figures in <model>/figs, CSVs in <model>/csv.
+    # diversity/<model>/csv/<CSV> -> figures in <model>/figs, CSVs in <model>/csv;
+    # seed s's own analysis goes to diversity/seed<s>/<model>/{figs,csv}.
     grouped = csv_path.parent.name == "csv"
     embedder = csv_path.parent.parent.name if grouped else None
     fig_dir = args.output_dir or (csv_path.parent.parent if grouped else csv_path.parent) / "figs"
     csv_dir = args.output_dir or csv_path.parent
     fig_dir.mkdir(parents=True, exist_ok=True)
     csv_dir.mkdir(parents=True, exist_ok=True)
-    context_parts = [dataset]
+
+    def seed_output_dirs(seed):
+        if grouped and args.output_dir is None:
+            base = insert_seed_dir(csv_path.parent.parent, seed)
+            return base / "figs", base / "csv"
+        base = (args.output_dir or csv_path.parent) / seed_dir(seed)
+        return base, base
+
+    # Tactic outputs are named <dataset>_tactic_* to keep subcategory outputs intact.
+    name = f"{dataset}_tactic" if point == "tactic" else dataset
+    context_parts = [name]
     if embedder:
         context_parts.append(f"embeddings: {embedder}")
     if args.suffix:
         context_parts.append(f"results: {args.suffix}")
+    # Replaced by "seed <s>" in each seed's own figures.
+    seeds_part = len(context_parts)
+    context_parts.append(f"seeds {', '.join(map(str, seeds))}")
     if "scored_on" in diversity and diversity["scored_on"].nunique() == 1:
         context_parts.append(f"{int(diversity['scored_on'].iloc[0]):,} diversity examples")
     if {"subcategory_count", "scored_on"} <= set(diversity):
@@ -547,23 +693,58 @@ def main():
             context_parts.append(f"harmful fraction {fractions.iloc[0]:g}")
     context = ", ".join(context_parts)
     if args.all_plots:
+        # Bars show each group's mean over its seeds.
+        metadata = [column for column in diversity if column not in (*METRICS, "seed")]
+        mean_diversity = diversity.groupby("abbr", sort=False).agg(
+            {**{column: "first" for column in metadata if column != "abbr"},
+             **{metric: "mean" for metric in METRICS}}).reset_index()
         for metric in FIGURE_METRICS:
-            plot_diversity(diversity, metric, context,
-                           fig_dir / f"{dataset}_diversity_{metric.rstrip('↑↓')}.png")
+            plot_diversity(mean_diversity, metric, context,
+                           fig_dir / f"{name}_diversity_{metric.rstrip('↑↓')}.png")
     if safety.empty:
         print(f"No {dataset} safety runs with training size {size}; saved diversity plots only. "
               "Check --suffix, --results-dir, or --train-size for the intended runs.")
         return
 
-    pairs = join_scores(diversity, safety)
     excluded_abbrs = {abbr.lower() for abbr in args.exclude}
-    pairs["included_in_correlation"] = ~pairs["abbr"].str.lower().isin(excluded_abbrs)
-    print(f"Matched {len(safety)} runs across {safety['model'].nunique()} models "
-          f"and {safety['abbr'].nunique()} training sets "
-          f"({safety['abbr'].isin(BASELINE_ABBRS).sum() // max(safety['model'].nunique(), 1)} baselines)")
+    pairs, runs = (mark_excluded(frame, excluded_abbrs) for frame in join_scores(diversity, safety))
+    trained = runs.loc[runs["model"] != "Average"]
+    print(f"Matched {len(trained)} runs across {trained['model'].nunique()} models, "
+          f"{trained['abbr'].nunique()} training sets "
+          f"({trained.loc[trained['abbr'].isin(BASELINE_ABBRS), 'abbr'].nunique()} baselines) "
+          f"and seeds {', '.join(map(str, sorted(trained['seed'].unique())))}")
+    partial = pairs.loc[pairs["n_seeds"] < len(seeds)]
+    if not partial.empty:
+        found = "; ".join(f"{count} with seed(s) {seeds_found}" for seeds_found, count
+                          in partial["seeds"].value_counts().items())
+        print(f"Warning: {len(partial)} of {len(pairs)} points average fewer than the "
+              f"{len(seeds)} diversity seeds, as runs are missing: {found}")
     methods = list(CORRELATIONS) if args.corr == "all" else [args.corr]
-    table = correlation_table(pairs, methods)
-    table.to_csv(csv_dir / f"{dataset}_diversity_safety_correlations.csv", index=False)
+    # Each seed alone: its runs against the diversity of their own samples.
+    by_seed = []
+    for seed, seed_runs in runs.groupby("seed"):
+        seed_pairs = mark_excluded(average_seeds(seed_runs), excluded_abbrs)
+        seed_table = correlation_table(seed_pairs, methods)
+        by_seed.append(seed_table.assign(seed=seed))
+        seed_fig_dir, seed_csv_dir = seed_output_dirs(seed)
+        seed_fig_dir.mkdir(parents=True, exist_ok=True)
+        seed_csv_dir.mkdir(parents=True, exist_ok=True)
+        seed_table.to_csv(seed_csv_dir / f"{name}_diversity_safety_correlations.csv", index=False)
+        seed_context = ", ".join([*context_parts[:seeds_part], f"seed {seed}",
+                                  *context_parts[seeds_part + 1:]])
+        seed_context += f"; safety training size {size}"
+        average = seed_pairs.loc[seed_pairs["model"] == "Average"]
+        if not average.empty:
+            title = f"Average across {seed_runs['model'].nunique() - 1} models"
+            for group in GROUPS:
+                plot_scatter(average, seed_table.loc[seed_table["model"] == "Average"], title,
+                             seed_context,
+                             seed_fig_dir / f"{name}_average_{group}_diversity_vs_harmful.png",
+                             group, point=point)
+        print(f"Saved seed {seed}'s correlations in {seed_csv_dir} and figures in {seed_fig_dir}")
+    by_seed = pd.concat(by_seed, ignore_index=True)
+    table = add_seed_summary(correlation_table(pairs, methods), by_seed)
+    table.to_csv(csv_dir / f"{name}_diversity_safety_correlations.csv", index=False)
     context += f"; safety training size {size}"
     for model, scores in pairs.groupby("model", sort=False):
         if model != "Average" and not args.all_plots:
@@ -571,45 +752,48 @@ def main():
         title = model if model != "Average" else f"Average across {safety['model'].nunique()} models"
         for group in GROUPS:
             plot_scatter(scores, table.loc[table["model"] == model], title, context,
-                         fig_dir / f"{dataset}_{model.lower()}_{group}_diversity_vs_harmful.png",
-                         group)
+                         fig_dir / f"{name}_{model.lower()}_{group}_diversity_vs_harmful.png",
+                         group, point=point)
     print(f"Saved figures in {fig_dir} and correlations in {csv_dir}")
     if not args.all_plots:
         return
 
-    pairs.to_csv(csv_dir / f"{dataset}_diversity_safety_scores.csv", index=False)
+    pairs.to_csv(csv_dir / f"{name}_diversity_safety_scores.csv", index=False)
+    runs.to_csv(csv_dir / f"{name}_diversity_safety_scores_by_run.csv", index=False)
     for metric in FIGURE_METRICS:
         for method in plotted_methods(methods):
             plot_correlations(
                 table, metric, method, context,
-                fig_dir / f"{dataset}_corr_{metric.rstrip('↑↓')}_vs_harmful_{method}.png",
-                baselines=pairs["abbr"].isin(BASELINE_ABBRS).any(),
+                fig_dir / f"{name}_corr_{metric.rstrip('↑↓')}_vs_harmful_{method}.png",
+                baselines=pairs["abbr"].isin(BASELINE_ABBRS).any(), point=point,
             )
     test_pairs, test_correlations = [], []
     for test in TEST_DATASETS:
         if safety_by_test[test].empty:
             continue
-        joined = join_scores(diversity, safety_by_test[test])
-        average = joined.loc[joined["model"] == "Average"].copy()
+        joined, test_runs = join_scores(diversity, safety_by_test[test])
+        average = mark_excluded(joined.loc[joined["model"] == "Average"], excluded_abbrs)
         if average.empty:
             continue
-        average["included_in_correlation"] = ~average["abbr"].str.lower().isin(excluded_abbrs)
-        correlations = correlation_table(average, methods)
+        average_runs = mark_excluded(test_runs.loc[test_runs["model"] == "Average"],
+                                     excluded_abbrs)
+        correlations = add_seed_summary(correlation_table(average, methods),
+                                        seed_correlations(average_runs, methods))
         for group in GROUPS:
             plot_scatter(
                 average, correlations,
                 f"Average across {safety_by_test[test]['model'].nunique()} models",
-                context, fig_dir / f"{dataset}_average_{group}_diversity_vs_harmful_{test}.png",
-                group, test_dataset=test,
+                context, fig_dir / f"{name}_average_{group}_diversity_vs_harmful_{test}.png",
+                group, test_dataset=test, point=point,
             )
         test_pairs.append(average.assign(test_dataset=test))
         test_correlations.append(correlations.assign(test_dataset=test))
     if test_pairs:
         pd.concat(test_pairs, ignore_index=True).to_csv(
-            csv_dir / f"{dataset}_average_diversity_safety_scores_by_test.csv", index=False,
+            csv_dir / f"{name}_average_diversity_safety_scores_by_test.csv", index=False,
         )
         pd.concat(test_correlations, ignore_index=True).to_csv(
-            csv_dir / f"{dataset}_average_diversity_safety_correlations_by_test.csv", index=False,
+            csv_dir / f"{name}_average_diversity_safety_correlations_by_test.csv", index=False,
         )
 
 

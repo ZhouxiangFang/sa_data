@@ -6,15 +6,21 @@ Example (run from any directory):
 The counterpart of plot_bars_diversity.py with overrefusal (the Avg row of
 <run>_overrefusal.csv, a macro-average over XSTest and OR-Bench-Hard; lower is
 better) in place of the harmful score. Diversity is read from
-diversity/<embedder>/csv/<dataset>_train_diversity_*.csv and overrefusal
-from results/<model>_git20k_<size>_<dataset>/, through
+diversity/<embedder>/csv/<dataset>_train_diversity_*.csv (and its per-seed CSVs
+in diversity/seed<seed>/<embedder>/csv/) and overrefusal from
+results/seed<seed>/<model>_git20k_<size>_<dataset>/, through
 plot_bars_overall.load_scores, so it matches the plotted bars. As in
 plot_bars_diversity.py, the random and evenly baselines are correlated with
 the subcategories unless --no-baselines is given, the benign training
 subcategory is dropped, --exclude
 subcategories are plotted but left out of correlations, Self-BLEU is negated so larger always means more
 diverse, and "Average" correlates the equally weighted model-mean overrefusal;
-"Mean coefficient" averages the per-model coefficients.
+"Mean coefficient" averages the per-model coefficients. Seeds are handled as in
+plot_bars_diversity.py: each run is paired with the diversity of its own
+training sample, points are means over seeds, and the CSVs add the mean and SD
+of per-seed coefficients; each seed's own coefficients are written to
+diversity/seed<seed>/overrefusal_correlation/<dataset>/correlations.csv. A seed
+other than 42 whose runs are incomplete is skipped with a warning.
 Outputs go to diversity/overrefusal_correlation/ (or --output-dir): per training
 dataset, <dataset>/<model>_<group>_diversity_vs_overrefusal.png for the lexical,
 semantic and structural groups (every model and the average),
@@ -36,9 +42,11 @@ import pandas as pd
 # sa_data/ holds the shared modules this script imports.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from helper import DEFAULT_SEED, insert_seed_dir
 from plot_bars_diversity import (CORRELATIONS, FIGURE_METRICS, GROUPS, LABELS, PLOT_METHODS,
-                                 correlation_table, join_scores, load_diversity, plot_scatter,
-                                 save_figure)
+                                 add_seed_summary, correlation_table, join_scores,
+                                 load_diversity, mark_excluded, plot_scatter, save_figure,
+                                 seed_correlations)
 from plot_bars_overall import (BASELINE_ABBRS, DEFAULT_MODELS, DIVERSITY_DIR, MODELS, RESULTS_DIR,
                                TEST_DATASETS, load_scores, training_subcategory)
 
@@ -46,16 +54,27 @@ from plot_bars_overall import (BASELINE_ABBRS, DEFAULT_MODELS, DIVERSITY_DIR, MO
 SCORE = "overrefusal_score_pct"
 
 
-def load_overrefusal(results_dir, models, suffix):
-    """Overrefusal per model and training subcategory, without instruct baselines."""
-    data, _ = load_scores(results_dir, results_dir / "if_eval", models, suffix)
-    data = data.loc[~data["version"].isin(["-ins", "-20k"])]
-    return data.assign(abbr=data["version"].map(training_subcategory))[
-        ["model", "abbr", "run", SCORE]
-    ]
+def load_overrefusal(results_dir, models, suffix, seeds=(DEFAULT_SEED,)):
+    """Overrefusal per model, training subcategory and seed, without instruct baselines."""
+    frames = []
+    for seed in seeds:
+        try:
+            data, _ = load_scores(results_dir, results_dir / "if_eval", models, suffix, seed)
+        except ValueError as error:
+            if seed == DEFAULT_SEED:
+                raise
+            print(f"Warning: skipping seed {seed} ({suffix}): {error}")
+            continue
+        data = data.loc[~data["version"].isin(["-ins", "-20k"])]
+        frames.append(data.assign(abbr=data["version"].map(training_subcategory),
+                                  seed=int(seed))[["model", "abbr", "seed", "run", SCORE]])
+    if not frames:
+        raise ValueError(f"No overrefusal runs for {suffix}")
+    return pd.concat(frames, ignore_index=True)
 
 
 def diversity_csv(diversity_dir, embedder, dataset):
+    # The mean CSV; load_diversity reads the per-seed CSVs it lists.
     paths = sorted((diversity_dir / embedder / "csv").glob(
         f"{dataset}_train_diversity_*.csv"
     ))
@@ -136,10 +155,12 @@ def main():
         diversity = load_diversity(diversity_csv(args.diversity_dir, args.embedder, dataset),
                                    args.baselines)
         suffix = f"{args.train_size}_{dataset}"
-        safety = load_overrefusal(args.results_dir, args.models, suffix)
-        pairs = join_scores(diversity, safety, SCORE)
-        pairs["included_in_correlation"] = ~pairs["abbr"].str.lower().isin(excluded)
-        table = correlation_table(pairs, methods, SCORE)
+        safety = load_overrefusal(args.results_dir, args.models, suffix,
+                                  sorted(diversity["seed"].unique()))
+        pairs, runs = (mark_excluded(frame, excluded)
+                       for frame in join_scores(diversity, safety, SCORE))
+        by_seed = seed_correlations(runs, methods, SCORE)
+        table = add_seed_summary(correlation_table(pairs, methods, SCORE), by_seed)
         per_model = table.loc[table["model"].isin(args.models)]
         mean = per_model.groupby(["group", "metric", "method"], sort=False).agg(
             n_subcategories=("n_subcategories", "first"), coefficient=("coefficient", "mean"),
@@ -149,6 +170,11 @@ def main():
         dataset_dir = args.output_dir / dataset
         dataset_dir.mkdir(parents=True, exist_ok=True)
         table.to_csv(dataset_dir / "correlations.csv", index=False, float_format="%.4f")
+        for seed, seed_table in by_seed.groupby("seed"):
+            seed_dir = insert_seed_dir(args.output_dir, seed) / dataset
+            seed_dir.mkdir(parents=True, exist_ok=True)
+            seed_table.drop(columns="seed").to_csv(seed_dir / "correlations.csv", index=False,
+                                                   float_format="%.4f")
         context = (f"{dataset}, embeddings: {args.embedder}, results: git20k_{suffix}; "
                    "overrefusal = mean of XSTest / OR-Bench-Hard")
         for model, scores in pairs.groupby("model", sort=False):

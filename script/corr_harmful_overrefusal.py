@@ -3,8 +3,8 @@
 Example (run from any directory):
     python sa_data/script/corr_harmful_overrefusal.py --datasets aegis wildguardmix gretel
 
-For each training dataset, the points are the runs in
-results/<model>_git20k_<size>_<dataset>/ (every subcategory except benign, plus
+For each training dataset, the points are the runs of one training seed (--seed,
+default 42) in results/seed<seed>/<model>_git20k_<size>_<dataset>/ (every subcategory except benign, plus
 the random and evenly baselines; instruct baselines are left out). Overrefusal is the Avg row
 of <run>_overrefusal.csv; scores are read with plot_bars_overall.load_scores, so
 they match the plotted bars. These harmful rates are correlated with it:
@@ -16,7 +16,7 @@ they match the plotted bars. These harmful rates are correlated with it:
 Figures use "Average", the correlation of the equally weighted model-mean
 scores, as in plot_bars_diversity.py. The CSVs also keep each model's
 coefficients and "Mean coefficient", the mean of the per-model coefficients.
-Outputs go to figs/harmful_overrefusal/ (or --output-dir): per training dataset,
+Outputs go to figs/seed<seed>/harmful_overrefusal/ (or --output-dir): per training dataset,
 <dataset>/harmful_vs_overrefusal.png (one scatter panel per harmful rate),
 <dataset>/correlations.png (Pearson and Spearman bars per harmful rate, * marks
 p < 0.05) and <dataset>/correlations.csv; and a combined correlations.csv.
@@ -37,6 +37,7 @@ from scipy.stats import pearsonr, spearmanr
 # sa_data/ holds the shared modules this script imports.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from helper import DEFAULT_SEED, seed_dir
 from plot_bars_overall import (DEFAULT_MODELS, MODELS, RESULTS_DIR, ROOT, TEST_DATASETS,
                                load_scores, training_subcategory)
 
@@ -184,13 +185,17 @@ def main():
                         help="Models to correlate and average (default: %(default)s)")
     parser.add_argument("--train-size", type=int, default=1800)
     parser.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "figs" / "harmful_overrefusal")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                        help="Training seed of the runs (default: %(default)s)")
+    parser.add_argument("--output-dir", type=Path,
+                        help="Default: ROOT/figs/seed<seed>/harmful_overrefusal")
     args = parser.parse_args()
+    args.output_dir = args.output_dir or ROOT / "figs" / seed_dir(args.seed) / "harmful_overrefusal"
 
     tables = []
     for dataset in args.datasets:
         data, _ = load_scores(args.results_dir, args.results_dir / "if_eval", args.models,
-                              f"{args.train_size}_{dataset}")
+                              f"{args.train_size}_{dataset}", args.seed)
         data = harmful_rates(data.loc[~data["version"].isin(["-ins", "-20k"])], dataset)
         columns = ["overrefusal_score_pct", *HARMFUL_RATES]
         scores = {model: data.loc[data["model"] == model].set_index("version")[columns]

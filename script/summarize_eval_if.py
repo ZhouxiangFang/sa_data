@@ -17,6 +17,11 @@ import sys
 from pathlib import Path
 from statistics import fmean
 
+# sa_data/ holds the shared modules this script imports.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from helper import insert_seed_dir as seed_if_dir
+
 
 BENCHMARKS = ("IFBench", "IFEval")
 METRICS = (
@@ -108,14 +113,18 @@ def column_keys():
     ]
 
 
-def summarize_model(input_dir, model, dataset="wildguardmix", num_train=800):
-    """Build one comparison row and return its included subcategories."""
+def summarize_model(input_dir, model, dataset="wildguardmix", num_train=800, seed=42):
+    """Build one comparison row and return its included subcategories.
+
+    The baseline summary is in input_dir (results/if_eval); the trained runs' are
+    in its seed folder (results/seed<seed>/if_eval).
+    """
     before_path = input_dir / f"{model}_if_summary.csv"
     if not before_path.is_file():
         raise FileNotFoundError(f"Missing baseline summary: {before_path}")
 
     before = load_summary(before_path)
-    after_paths = find_after_summaries(input_dir, model, dataset, num_train)
+    after_paths = find_after_summaries(seed_if_dir(input_dir, seed), model, dataset, num_train)
     after = [load_summary(path) for path in after_paths.values()]
 
     row = {"model": model}
@@ -142,7 +151,7 @@ def parse_args():
     parser.add_argument(
         "--output",
         type=Path,
-        help="Output CSV (default: INPUT_DIR/if_scores_before_after_DATASET_SIZE.csv; legacy name for wildguardmix/800)",
+        help="Output CSV (default: <seed IF folder>/if_scores_before_after_DATASET_SIZE.csv; legacy name for wildguardmix/800)",
     )
     parser.add_argument(
         "--models",
@@ -154,6 +163,9 @@ def parse_args():
                         default="wildguardmix", help="Safety training dataset")
     parser.add_argument("--num-train", "--num_train", type=int, default=800,
                         help="Training examples per checkpoint (default: 800)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Training seed; trained runs are read from "
+                             "<input-dir parent>/seed<seed>/if_eval (default: 42)")
     args = parser.parse_args()
     if args.num_train <= 0:
         parser.error("--num-train must be positive")
@@ -166,7 +178,7 @@ def main():
     filename = ("if_scores_before_after.csv"
                 if (args.dataset, args.num_train) == ("wildguardmix", 800)
                 else f"if_scores_before_after_{args.dataset}_{args.num_train}.csv")
-    output = args.output or input_dir / filename
+    output = args.output or seed_if_dir(input_dir, args.seed) / filename
     output = output.resolve()
 
     if not input_dir.is_dir():
@@ -176,7 +188,8 @@ def main():
     expected = expected_subcategories(args.dataset)
     for model in args.models:
         try:
-            row, subcategories = summarize_model(input_dir, model, args.dataset, args.num_train)
+            row, subcategories = summarize_model(input_dir, model, args.dataset, args.num_train,
+                                                 args.seed)
         except (FileNotFoundError, ValueError) as error:
             raise SystemExit(str(error)) from error
         rows.append(row)

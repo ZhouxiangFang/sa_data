@@ -12,12 +12,14 @@ from matplotlib.transforms import ScaledTranslation
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(ROOT, "results")
-FIGS_DIR = os.path.join(ROOT, "figs", "heatmap")
+# Trained runs and figures of one training seed (--seed, default 42); main()
+# points both at that seed's folder. Instruct baselines stay in RESULTS_DIR.
+RUNS_DIR = os.path.join(RESULTS_DIR, "seed42")
+FIGS_DIR = os.path.join(ROOT, "figs", "seed42", "heatmap")
 MODELS = ("llama3", "llama3.1", "mistral", "olmo2", "qwen2.5", "qwen3")
 # Mixed-subcategory training baselines (helper.BASELINE_ABBRS), drawn as the
 # first training columns.
 BASELINE_ABBRS = ("random", "evenly")
-os.makedirs(FIGS_DIR, exist_ok=True)
 
 _BASE_FONT = plt.rcParams["font.size"]
 LABEL_FONTSIZE = _BASE_FONT * 2   # x/y axis labels and colorbar label, doubled
@@ -74,8 +76,8 @@ def load_counts(csv_path):
 
 def train_result_dir(n, model, dataset, short, suffix=None):
     if suffix is not None:
-        return os.path.join(RESULTS_DIR, f"{model}_{suffix}", f"{dataset}_{short}")
-    return os.path.join(RESULTS_DIR, f"{model}_{dataset}_{short}_{n}")
+        return os.path.join(RUNS_DIR, f"{model}_{suffix}", f"{dataset}_{short}")
+    return os.path.join(RUNS_DIR, f"{model}_{dataset}_{short}_{n}")
 
 
 def collect_train_shortnames(n, model, dataset, suffix=None):
@@ -85,7 +87,7 @@ def collect_train_shortnames(n, model, dataset, suffix=None):
     prefix = f"{model}_{dataset}_"
     suffix = f"_{n}"
     shorts = []
-    for d in sorted(os.listdir(RESULTS_DIR)):
+    for d in sorted(os.listdir(RUNS_DIR)):
         if d.startswith(prefix) and d.endswith(suffix):
             shorts.append(d[len(prefix):-len(suffix)])
     return shorts
@@ -293,9 +295,16 @@ def main():
                         help="Number of training examples (default: suffix size, or 400).")
     parser.add_argument("--suffix",
                         help="Grouped result folder suffix (default: 1800_<dataset>).")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Training seed: runs from results/seed<seed>, figures to "
+                             "figs/seed<seed>/heatmap (default: 42).")
     parser.add_argument("--abs", action=argparse.BooleanOptionalAction, default=True,
                         help="Plot the absolute heatmap alongside the difference (default: enabled).")
     args = parser.parse_args()
+    global RUNS_DIR, FIGS_DIR
+    RUNS_DIR = os.path.join(RESULTS_DIR, f"seed{args.seed}")
+    FIGS_DIR = os.path.join(ROOT, "figs", f"seed{args.seed}", "heatmap")
+    os.makedirs(FIGS_DIR, exist_ok=True)
     models = [args.model] if args.model else MODELS
     dataset = args.dataset
     if args.suffix is None:
@@ -320,9 +329,9 @@ def main():
     for model in models:
         # Accept an explicit baseline model or infer the same 20k baseline
         # aliases used by plot_bars_overall.py.
-        if args.suffix is not None and not os.path.isdir(os.path.join(RESULTS_DIR, f"{model}_{args.suffix}")):
+        if args.suffix is not None and not os.path.isdir(os.path.join(RUNS_DIR, f"{model}_{args.suffix}")):
             candidates = [model + baseline for baseline in ("_git20k", "-20k", "-git20k")
-                          if os.path.isdir(os.path.join(RESULTS_DIR, f"{model}{baseline}_{args.suffix}"))]
+                          if os.path.isdir(os.path.join(RUNS_DIR, f"{model}{baseline}_{args.suffix}"))]
             if len(candidates) != 1:
                 parser.error(f"Expected one result group for {model} with suffix {args.suffix!r}; found {candidates}")
             model = candidates[0]

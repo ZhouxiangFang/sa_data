@@ -6,8 +6,8 @@ set -uo pipefail
 # from four 20k models on aegis, wildguardmix and gretel, once with vanilla benign
 # data and once with equal halves of vanilla and adversarial benign data (mix).
 # Each benign variant keeps its checkpoints and results apart from the 1,800-example
-# runs: /scratch/zf28/ckpts/h0.2_<variant>/ and ablations/h0.2_<variant>/ (IF results
-# in ablations/h0.2_<variant>/if_eval/). Each variant is trained then evaluated
+# runs: /scratch/zf28/ckpts/h0.2_<variant>/ and ablations/h0.2_<variant>/seed<seed>/ (IF results
+# in ablations/h0.2_<variant>/seed<seed>/if_eval/). Each variant is trained then evaluated
 # before the next starts; eval_run.sh deletes checkpoints only after both
 # evaluations succeed. align_run.sh skips saved checkpoints, so rerunning resumes.
 # SKIP_STAGES lists comma-separated stage names to skip, e.g.

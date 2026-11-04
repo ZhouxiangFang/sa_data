@@ -1,29 +1,41 @@
 """Lexical, semantic and structural diversity of alignment samples, per subcategory.
 
-Training samples use exactly the filtering, tokenizer length limit, rounding,
-shuffle and seeds used by align.py. CLI samples total 600 examples by default.
-Set --harmful_rate below 1 to include WildJailbreak benign examples. To reproduce
-an alignment run, use its model, num_train, harmful_rate, benign_data_type,
-max_length and seed. Additional rounds use seed + round (default: 10 rounds).
+Each sample is drawn by helper.sample_examples, the code align.py draws its
+training examples with, from the same pools and with the same seeds: run n of a
+training setting uses seed n * 42 (--runs, default 3: seeds 42, 84, 126, as in
+align_run.sh), so the sample scored for seed s holds exactly the harmful prompts
+the run with seed s was trained on. CLI samples total 600 examples by default,
+the harmful part of the default 1,800-example (1:1:1) mixture; use the run's
+harmful example count as --num_train (e.g. 300 for the 900-example tactic runs).
+Set --harmful_rate below 1 to also score WildJailbreak benign examples (drawn
+as in training, with seed + 1). A sample can depend on the tokenizer only when
+a prompt reaches --max_length tokens; that is reported as a warning (no
+training prompt is near 4,096 tokens with any of the four models' tokenizers).
 
 All source-pool prompts, including benign data when used, are tagged with spaCy
-before sampling; tags are reused across groups and rounds. Each metric reports
-the mean across rounds, using the same sample for all metrics within a round.
-The CSV's sample_rounds column records the number of rounds for each row.
+before sampling; tags are reused across groups and seeds. Every metric of a
+seed is computed on that seed's one sample. Per embedding model, each seed's
+scores go to diversity/seed<seed>/<model name>/csv/<name>.csv (one row per
+group; the values plot_bars_diversity.py pairs with the runs trained on that
+seed), and their mean over seeds to diversity/<model name>/csv/<name>.csv, whose
+seeds column lists the seeds averaged.
 
 Training splits also get rows for the random and evenly baselines (after the
 overall row) unless --no_baselines is given. As in align.py, both draw from the
 non-benign subcategories with enough safe responses to train on their own
-(helper.baseline_abbrs): random samples their pooled prompts uniformly, evenly
-gives each subcategory the same share. Their `count` is the pooled pool size.
---merge updates an existing CSV in place: the scored rows replace rows with the
-same abbr and every other row is kept, so baselines can be added with
---abbr random evenly --merge without rescoring every subcategory. With --abbr,
-the overall row (the union of only the selected pools) is not merged.
+(helper.baseline_abbrs), or with --group_by tactic from the tactics with at
+least --num_train eligible rows (helper.select_tactic): random samples their
+pooled prompts uniformly, evenly gives each group the same share. Their
+`count` is the pooled pool size.
+--merge updates each seed's existing CSV in place: the scored rows replace rows
+with the same abbr and every other row is kept (the mean CSV is then recomputed
+from the merged seed CSVs), so baselines can be added with --abbr random evenly
+--merge without rescoring every subcategory. With --abbr, the overall row (the
+union of only the selected pools) is not merged.
 Each embedding model in --embedding_models (default: only BAAI/bge-m3 and
 Qwen/Qwen3-Embedding-0.6B, in float32) gets its own CSV under
 <output_dir>/<model name>/csv/ (default output_dir: diversity/ beside sa_data),
-e.g. diversity/bge-m3/csv/, beside the
+e.g. diversity/bge-m3/csv/ (per seed: diversity/seed42/bge-m3/csv/), beside the
 figs/ folder that plot_bars_diversity.py writes. Metrics that use no
 embedding are computed once and repeated in every model's CSV. Each model is
 loaded once and its embeddings are reused across groups and datasets.
@@ -76,7 +88,6 @@ Examples:
 
 import argparse
 import math
-import re
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
@@ -94,9 +105,16 @@ from tqdm.auto import tqdm
 from helper import (
     BASELINE_ABBRS,
     BENIGN_DATA_TYPES,
-    build_training_data,
+    DEFAULT_RUNS,
+    DEFAULT_SEED,
     load_wildjailbreak_benign,
+    mixture_counts,
+    run_seeds,
+    sample_examples,
+    seed_diversity_csv,
     select_harmful_subcategory,
+    select_tactic,
+    tactic_pools,
     safety_test_datasets,
     to_abbr,
 )
@@ -357,55 +375,32 @@ def category_names(df, dataset_name):
     return names
 
 
-def tactic_abbr(tactic):
-    """snake_case form of a jailbreak tactic, e.g. 'quid pro quo' -> 'quid_pro_quo'."""
-    return re.sub(r'[^a-z0-9]+', '_', str(tactic).lower()).strip('_')
-
-
-def tactic_pools(df, dataset_name):
-    """Group the training rows eligible under any non-benign subcategory by tactic.
-
-    Each row passes exactly the filters select_harmful_subcategory applies to
-    subcategories; multi-label rows are counted once, in their original order.
-    Returns ({abbr: tactic name}, {abbr: pool}).
-    """
-    if 'tactic' not in df.columns:
-        raise ValueError(f'{dataset_name} has no tactic column')
-    subcategories = [abbr for abbr in category_names(df, dataset_name) if abbr != 'benign']
-    eligible = pd.concat([select_harmful_subcategory(df, dataset_name, abbr)
-                          for abbr in subcategories])
-    eligible = eligible[~eligible.index.duplicated()].sort_index()
-    eligible = eligible[eligible['tactic'].notna()
-                        & (eligible['tactic'].astype(str).str.strip() != '')]
-    names = {}
-    for tactic in dict.fromkeys(eligible['tactic'].astype(str).str.strip()):
-        if names.setdefault(tactic_abbr(tactic), tactic) != tactic:
-            raise ValueError(f'Tactics {names[tactic_abbr(tactic)]!r} and {tactic!r} '
-                             'share an abbreviation')
-    tactics = eligible['tactic'].astype(str).str.strip()
-    return names, {abbr: eligible[tactics == tactic] for abbr, tactic in names.items()}
-
-
-def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
+def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
                               harmful_rate=1.0, benign_data_type='vanilla_benign',
-                              max_length=4096, max_n=5, n_rounds=10, seed=42,
+                              max_length=4096, max_n=5, seeds=None,
                               num_proc=4, split='train', abbrs=None, benign_pool=None,
                               embedders=None, n_clusters=12, knn_ks=KNN_KS,
                               group_by='subcategory', baselines=True):
-    """Score fixed-size alignment mixtures; skip groups with insufficient data.
+    """Score the training samples of each group and seed; skip groups with insufficient data.
 
-    The overall row samples the union of eligible dataset rows, preserving their
-    original order and counting multi-label rows once. Each subcategory row
-    reproduces a separate align.py run. `count` is its eligible source-pool size;
-    `scored_on` includes both source and WildJailbreak benign examples.
+    `seeds` defaults to helper.run_seeds() (42, 84, 126). For each seed, a group's
+    sample is drawn by helper.sample_examples exactly as the align.py run with
+    that seed draws its harmful (and benign) examples. The overall row samples
+    the union of eligible dataset rows, preserving their original order and
+    counting multi-label rows once. `count` is a group's eligible source-pool
+    size; `scored_on` includes both source and WildJailbreak benign examples.
     Returns one DataFrame per entry of `embedders` ({name: PosEmbedder}), under
-    the same name; metrics that use no embedding are computed once and shared.
+    the same name, with one row per group and seed (seed_means averages them);
+    metrics that use no embedding are computed once and shared.
     With group_by='tactic', rows are jailbreak tactics (see tactic_pools) and
     abbrs selects tactic abbreviations. With baselines, training subcategory
     scores also get random and evenly rows that reproduce align.py's baselines.
     """
-    if num_train < 2 or n_rounds < 1 or max_n < 1 or num_proc < 1:
-        raise ValueError('num_train >= 2; n_rounds, max_n and num_proc >= 1 required')
+    seeds = list(run_seeds() if seeds is None else seeds)
+    if num_train < 2 or not seeds or max_n < 1 or num_proc < 1:
+        raise ValueError('num_train >= 2, at least one seed, and max_n, num_proc >= 1 required')
+    if len(set(seeds)) != len(seeds):
+        raise ValueError(f'Seeds must be distinct: {seeds}')
     if not 0 <= harmful_rate <= 1 or max_length < 1:
         raise ValueError('harmful_rate must be in [0, 1] and max_length positive')
     if not 1 <= n_clusters <= num_train or not all(1 <= k < num_train for k in knn_ks):
@@ -419,11 +414,11 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
         names, pools = tactic_pools(df, dataset_name)
     else:
         names, pools = category_names(df, dataset_name), {}
-    harmful_count = int(num_train * harmful_rate + 0.5)
-    benign_count = num_train - harmful_count
+    # Same rounding as align.py; diversity samples have no general instructions.
+    harmful_count, benign_count, _ = mixture_counts(num_train, harmful_rate)
     baseline_names = (
         {abbr: BASELINE_NAMES[abbr] for abbr in BASELINE_ABBRS}
-        if baselines and split == 'train' and group_by == 'subcategory' and harmful_count
+        if baselines and split == 'train' and harmful_count
         else {}
     )
     if abbrs:
@@ -452,8 +447,9 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
     eligible_indices = set().union(*(set(pool.index) for pool in pools.values()))
     overall = df.loc[df.index.isin(eligible_indices)].copy()
     overall['prompt'] = overall['prompt'].astype(str).str.strip()
-    # The baseline pools pool the eligible subcategories (align.py's selection).
-    baseline_pools = {abbr: select_harmful_subcategory(df, dataset_name, abbr, harmful_count)
+    # The baseline pools pool the eligible subcategories or tactics (align.py's selection).
+    select_baseline = select_tactic if group_by == 'tactic' else select_harmful_subcategory
+    baseline_pools = {abbr: select_baseline(df, dataset_name, abbr, harmful_count)
                       for abbr in baseline_names}
     groups = ([('overall', 'overall', overall)] if names else []) + [
         (abbr, name, baseline_pools[abbr]) for abbr, name in baseline_names.items()
@@ -479,31 +475,33 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
 
     samples = {}
     for abbr, category, pool in groups:
-        args = argparse.Namespace(
-            alignment_dataset=dataset_name, abbr=abbr, num_train=num_train,
-            harmful_rate=harmful_rate, benign_data_type=benign_data_type,
-            max_length=max_length, seed=seed,
-        )
-        rounds = []
-        for round_index in range(n_rounds):
-            args.seed = seed + round_index
+        runs = []
+        for seed in seeds:
             try:
-                sampled, _, _, _ = build_training_data(
-                    args, tokenizer, harmful_pool=pool, benign_pool=benign_pool,
+                # The same call align.py makes (through build_training_data).
+                parts, info = sample_examples(
+                    seed, tokenizer, max_length, harmful_pool=pool,
+                    harmful_count=harmful_count, abbr=abbr, dataset_name=dataset_name,
+                    group_by=group_by, benign_pool=benign_pool, benign_count=benign_count,
+                    benign_data_type=benign_data_type,
                 )
             except ValueError as exc:
                 if not str(exc).startswith('Requested '):
                     raise
                 print(f'  Skipped {category}: {exc}')
                 break
-            rounds.append(sampled['prompt'].tolist())
+            if info['overlong']:
+                print(f'  Warning: {category}, seed {seed}: skipped {info["overlong"]:,} '
+                      f'prompt(s) of at least {max_length:,} tokens; a model whose '
+                      'tokenizer skips different prompts was trained on a different sample')
+            runs.append(pd.concat([parts['harmful'], parts['benign']])['prompt'].tolist())
         else:
-            samples[abbr] = (category, len(pool), rounds)
+            samples[abbr] = (category, len(pool), runs)
     if not samples:
         raise ValueError(f'No group in {dataset_name} can supply {num_train} examples')
 
-    prompts = list(dict.fromkeys(prompt for _, _, rounds in samples.values()
-                                for sample in rounds for prompt in sample))
+    prompts = list(dict.fromkeys(prompt for _, _, runs in samples.values()
+                                for sample in runs for prompt in sample))
     if any(not tags[prompt] for prompt in prompts):
         raise ValueError('A sampled prompt produced no POS tags; cannot score the full sample')
     if embedders is None:
@@ -512,10 +510,10 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
 
     # Metrics without embeddings are computed once and shared by every embedder.
     shared = {}
-    for abbr, (category, count, rounds) in samples.items():
-        print(f'  Scoring {category}: {num_train} examples x {n_rounds} round(s)')
+    for abbr, (category, count, runs) in samples.items():
+        print(f'  Scoring {category}: {num_train} examples x {len(seeds)} seed(s)')
         shared[abbr] = []
-        for sample in tqdm(rounds, desc=f'{dataset_name} / {category}', unit='round'):
+        for sample in tqdm(runs, desc=f'{dataset_name} / {category}', unit='seed'):
             seqs = [tags[prompt] for prompt in sample]
             sample_words = [words[prompt] for prompt in sample]
             shared[abbr].append({
@@ -535,38 +533,51 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=800,
         pos_embeddings = embedder.encode([tags[prompt] for prompt in prompts])
         semantic_embeddings = embedder.encode_texts(prompts)
         rows = []
-        for abbr, (category, count, rounds) in samples.items():
-            scores = []
-            for round_index, sample in enumerate(rounds):
+        for abbr, (category, count, runs) in samples.items():
+            for seed, sample, common in zip(seeds, runs, shared[abbr]):
                 # One index list selects both representations of the same examples,
                 # including repeats and any WildJailbreak benign examples.
                 sample_indices = [prompt_indices[prompt] for prompt in sample]
                 semantic = semantic_embeddings[sample_indices]
                 structural = pos_embeddings[sample_indices]
-                common = shared[abbr][round_index]
-                scores.append({
+                score = {
                     **{key: value for key, value in common.items() if key.startswith('lexical_')},
                     'semantic_vendi': vendi_score(semantic),
                     'semantic_distsum_cosine': distsum_cosine(semantic),
-                    'semantic_cluster_inertia': cluster_inertia(
-                        semantic, n_clusters, seed + round_index),
+                    'semantic_cluster_inertia': cluster_inertia(semantic, n_clusters, seed),
                     'semantic_radius': radius(semantic),
                     **{key: value for key, value in common.items() if key.startswith('structural_')},
                     'structural_pos_vendi': vendi_score(structural),
                     **{f'structural_knn_cosine_{k}': knn_cosine_distance(structural, k)
                        for k in knn_ks},
+                }
+                rows.append({
+                    'subcategory': category, 'abbr': abbr, 'seed': seed, 'count': count,
+                    'scored_on': num_train, 'subcategory_count': harmful_count,
+                    'benign_count': benign_count,
+                    # Arrows mark whether higher (↑) or lower (↓) values mean more diversity.
+                    **{metric + ('↓' if 'self_bleu' in metric else '↑'): round(float(value), 6)
+                       for metric, value in score.items()},
                 })
-            rows.append({
-                'subcategory': category, 'abbr': abbr, 'count': count,
-                'scored_on': num_train, 'subcategory_count': harmful_count,
-                'benign_count': benign_count, 'sample_rounds': len(rounds),
-                # Arrows mark whether higher (↑) or lower (↓) values mean more diversity.
-                **{metric + ('↓' if 'self_bleu' in metric else '↑'):
-                   round(float(np.mean([score[metric] for score in scores])), 6)
-                   for metric in scores[0]},
-            })
         results[name] = pd.DataFrame(rows)
     return results
+
+
+def is_metric(column):
+    """Metric columns end in the ↑/↓ direction of more diversity."""
+    return column.endswith(('↑', '↓'))
+
+
+def seed_means(by_seed):
+    """One row per group: each metric's mean over the group's seeds, listed in `seeds`."""
+    metrics = [column for column in by_seed if is_metric(column)]
+    rows = []
+    for _, group in by_seed.groupby('abbr', sort=False):
+        row = group.iloc[0].drop(['seed', *metrics]).to_dict()
+        row['seeds'] = ' '.join(str(int(seed)) for seed in sorted(group['seed']))
+        row.update({metric: round(float(group[metric].mean()), 6) for metric in metrics})
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def merge_rows(existing, scored, keep_overall=False):
@@ -602,8 +613,8 @@ def parse_args():
                         help='Leave out the random and evenly baseline rows (default: '
                              'include them for training subcategories)')
     parser.add_argument('--merge', action='store_true',
-                        help='Replace only the scored rows of an existing output CSV and '
-                             'keep the rest (the overall row is kept when --abbr is given)')
+                        help="Replace only the scored rows of each seed's existing CSV and keep "
+                             'the rest (the overall row is kept when --abbr is given)')
     parser.add_argument('--group_by', choices=('subcategory', 'tactic'), default='subcategory',
                         help='Score one row per subcategory, or per jailbreak tactic '
                              '(gretel train only) (default: subcategory)')
@@ -623,9 +634,11 @@ def parse_args():
                         default=list(KNN_KS),
                         help='Neighbor counts for structural KNN cosine distance, one column '
                              f'each (default: {" ".join(map(str, KNN_KS))})')
-    parser.add_argument('--n_rounds', type=int, default=10,
-                        help='Sampling repetitions per metric; report their mean (default: 10)')
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--runs', type=int, default=DEFAULT_RUNS,
+                        help='Training runs to score per group; run n uses seed n * --seed, '
+                             f'as in align_run.sh (default: {DEFAULT_RUNS})')
+    parser.add_argument('--seed', type=int, default=DEFAULT_SEED,
+                        help=f'Seed of run 1 (default: {DEFAULT_SEED})')
     parser.add_argument('--num_proc', type=int, default=4)
     parser.add_argument('--embedding_models', '--embedding_model', dest='embedding_models',
                         nargs='+', default=list(EMBEDDING_MODEL_IDS),
@@ -649,8 +662,12 @@ def parse_args():
         parser.error(f'--split {args.split} supports {SUPPORTED[args.split]}')
     if args.group_by == 'tactic' and (args.split != 'train' or args.datasets != ['gretel']):
         parser.error('--group_by tactic supports only --datasets gretel --split train')
-    if args.num_train < 2 or min(args.max_length, args.max_n, args.n_rounds, args.num_proc) < 1:
-        parser.error('--num_train must be >= 2; length, order, rounds and processes must be positive')
+    if args.num_train < 2 or min(args.max_length, args.max_n, args.runs, args.num_proc) < 1:
+        parser.error('--num_train must be >= 2; length, order, runs and processes must be positive')
+    try:
+        args.seeds = run_seeds(args.runs, args.seed)
+    except ValueError as error:
+        parser.error(str(error))
     if not 0 <= args.harmful_rate <= 1:
         parser.error('--harmful_rate must be between 0 and 1')
     if args.embed_batch_size < 1:
@@ -673,7 +690,7 @@ def main():
     )
     if tokenizer.chat_template is None:
         raise ValueError('Use an instruct model with a chat template, as required by align.py')
-    benign_count = args.num_train - int(args.num_train * args.harmful_rate + 0.5)
+    _, benign_count, _ = mixture_counts(args.num_train, args.harmful_rate)
     benign_pool = load_wildjailbreak_benign(args.benign_data_type) if benign_count else None
     embedders = {
         embedding_name(model_id): PosEmbedder(
@@ -682,29 +699,49 @@ def main():
         )
         for model_id in args.embedding_models
     }
+    grouping = 'tactic_' if args.group_by == 'tactic' else ''
     for dataset_name in args.datasets:
-        print(f'Loading {dataset_name} ({args.split})')
+        outputs = {
+            name: args.output_dir / name / 'csv' / (
+                f'{dataset_name}_{args.split}_{grouping}diversity_'
+                f'{args.num_train}_{args.harmful_rate}.csv')
+            for name in embedders
+        }
+        for output in outputs.values():
+            # Check before scoring: older CSVs hold means over seeds 42-51 only.
+            missing = [seed for seed in args.seeds
+                       if not seed_diversity_csv(output, seed).exists()]
+            if args.merge and output.exists() and missing:
+                raise SystemExit(f'{output} has no per-seed CSV for seed(s) {missing} '
+                                 f'(e.g. {seed_diversity_csv(output, missing[0])}), so it '
+                                 'cannot be merged; rerun without --merge')
+        print(f'Loading {dataset_name} ({args.split}); seeds {" ".join(map(str, args.seeds))}')
         results = compute_dataset_diversity(
             load_safety_dataset(dataset_name, args.split), dataset_name,
             tokenizer=tokenizer, num_train=args.num_train, harmful_rate=args.harmful_rate,
             benign_data_type=args.benign_data_type, max_length=args.max_length,
-            max_n=args.max_n, n_rounds=args.n_rounds, seed=args.seed, num_proc=args.num_proc,
+            max_n=args.max_n, seeds=args.seeds, num_proc=args.num_proc,
             split=args.split, abbrs=args.abbr, benign_pool=benign_pool,
             embedders=embedders, n_clusters=args.n_clusters, knn_ks=args.knn_ks,
             group_by=args.group_by, baselines=args.baselines,
         )
-        grouping = 'tactic_' if args.group_by == 'tactic' else ''
         for name, result in results.items():
-            print(f'{name}: ↑ higher = more diverse | ↓ lower = more diverse')
-            print(result.to_string(index=False))
-            output = (args.output_dir / name / 'csv' /
-                      f'{dataset_name}_{args.split}_{grouping}diversity_'
-                      f'{args.num_train}_{args.harmful_rate}.csv')
+            output = outputs[name]
+            per_seed = []
+            for seed, rows in result.groupby('seed', sort=False):
+                seed_output = seed_diversity_csv(output, seed)
+                seed_output.parent.mkdir(parents=True, exist_ok=True)
+                if args.merge and seed_output.exists():
+                    rows = merge_rows(pd.read_csv(seed_output), rows.reset_index(drop=True),
+                                      keep_overall=bool(args.abbr))
+                rows.to_csv(seed_output, index=False)
+                print(f'Saved: {seed_output}')
+                per_seed.append(rows)
+            means = seed_means(pd.concat(per_seed, ignore_index=True))
+            print(f'{name} (mean over seeds): ↑ higher = more diverse | ↓ lower = more diverse')
+            print(means.to_string(index=False))
             output.parent.mkdir(parents=True, exist_ok=True)
-            if args.merge and output.exists():
-                result = merge_rows(pd.read_csv(output), result,
-                                    keep_overall=bool(args.abbr))
-            result.to_csv(output, index=False)
+            means.to_csv(output, index=False)
             print(f'Saved: {output}')
 
 
