@@ -31,7 +31,7 @@ Their plotted scores and correlations are exported in average_diversity_safety_*
 CSVs with a test_dataset column. Correlations use negative Self-BLEU so larger always
 means more diverse.
 
-Seeds: each group is trained once per seed (align_run.sh: 42, 84, 126), and
+Seeds: each group is trained once per run seed (chili/run.sh --seed), and
 calculate_diversity.py scores the very sample each seed trained on, in
 diversity/seed<seed>/<embedder>/csv/ (the input CSV is their mean over seeds,
 whose seeds column lists them). Every run, read from
@@ -48,7 +48,7 @@ two seeds). Average correlations use the equally weighted model-mean harmful
 score of each group and seed that every model has; they are not averages of
 correlation coefficients. The pooled overall diversity
 reference is excluded from correlations. The random and evenly training-data
-baselines (rows written by calculate_diversity.py, trained by align_run.sh)
+baselines (rows written by calculate_diversity.py, trained in every run)
 are correlated with the subcategories by default and drawn as squares;
 --no-baselines leaves them out. The benign training subcategory is
 dropped from figures and CSVs (plot_bars_overall.EXCLUDED_ABBRS); --exclude

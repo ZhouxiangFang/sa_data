@@ -1,14 +1,18 @@
 """Lexical, semantic and structural diversity of alignment samples, per subcategory.
 
-Each sample is drawn by helper.sample_examples, the code align.py draws its
-training examples with, from the same pools and with the same seeds: run n of a
-training setting uses seed n * 42 (--runs, default 3: seeds 42, 84, 126, as in
-align_run.sh), so the sample scored for seed s holds exactly the harmful prompts
-the run with seed s was trained on. CLI samples total 600 examples by default,
+Each sample comes from helper.sample_examples, the code align.py gets its
+training examples from, with the same pools and seed (--seeds, default: 43, the
+default run seed; e.g. --seeds 42 84 126 for the earlier runs). Training samples
+are read from the run's sample file,
+data/train_samples/seed<seed>/<dataset>[_tactic]/<abbr>_<count>.jsonl (found from
+the seed; drawn and saved by whichever of training or this script needs it
+first), so the sample scored for seed s is the very file every model with seed s
+trained on. Each per-seed row records the file's SHA-256
+(harmful_sample_sha256), which align.py also prints in its training log. CLI samples total 600 examples by default,
 the harmful part of the default 1,800-example (1:1:1) mixture; use the run's
 harmful example count as --num_train (e.g. 300 for the 900-example tactic runs).
 Set --harmful_rate below 1 to also score WildJailbreak benign examples (drawn
-as in training, with seed + 1). A sample can depend on the tokenizer only when
+as in training). A sample can depend on the tokenizer only when
 a prompt reaches --max_length tokens; that is reported as a warning (no
 training prompt is near 4,096 tokens with any of the four models' tokenizers).
 
@@ -17,8 +21,9 @@ before sampling; tags are reused across groups and seeds. Every metric of a
 seed is computed on that seed's one sample. Per embedding model, each seed's
 scores go to diversity/seed<seed>/<model name>/csv/<name>.csv (one row per
 group; the values plot_bars_diversity.py pairs with the runs trained on that
-seed), and their mean over seeds to diversity/<model name>/csv/<name>.csv, whose
-seeds column lists the seeds averaged.
+seed), and their mean over every seed folder that has this CSV (so seeds can be
+scored one run at a time) to diversity/<model name>/csv/<name>.csv, whose seeds
+column lists the seeds averaged.
 
 Training splits also get rows for the random and evenly baselines (after the
 overall row) unless --no_baselines is given. As in align.py, both draw from the
@@ -78,7 +83,8 @@ examples are skipped. Results go to <dataset>_train_tactic_diversity_<N>_<rate>.
 its subcategory and abbr columns hold the tactic name and its snake_case form.
 
 Examples:
-    python calculate_diversity.py   # wildguardmix, aegis and gretel
+    python calculate_diversity.py   # wildguardmix, aegis and gretel, seed 43
+    python calculate_diversity.py --seeds 42 84 126
     python calculate_diversity.py --abbr random evenly --merge
     python calculate_diversity.py --datasets aegis --harmful_rate 0.5
     python calculate_diversity.py --datasets wildguardmix --abbr cyberattack
@@ -105,11 +111,11 @@ from tqdm.auto import tqdm
 from helper import (
     BASELINE_ABBRS,
     BENIGN_DATA_TYPES,
-    DEFAULT_RUNS,
     DEFAULT_SEED,
+    TRAIN_SAMPLES_DIR,
     load_wildjailbreak_benign,
     mixture_counts,
-    run_seeds,
+    sample_digest,
     sample_examples,
     seed_diversity_csv,
     select_harmful_subcategory,
@@ -124,7 +130,7 @@ SUPPORTED = {
     'test': tuple(safety_test_datasets),
 }
 EMBEDDING_MODEL_IDS = ('BAAI/bge-m3', 'Qwen/Qwen3-Embedding-0.6B')
-# Training datasets scored by default, as in align_run.sh.
+# Training datasets scored by default, as in a default run (chili/run.sh).
 DEFAULT_DATASETS = ('wildguardmix', 'aegis', 'gretel')
 # Display names of the training-data baselines (helper.BASELINE_ABBRS).
 BASELINE_NAMES = {'random': 'Random baseline', 'evenly': 'Evenly baseline'}
@@ -380,10 +386,13 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
                               max_length=4096, max_n=5, seeds=None,
                               num_proc=4, split='train', abbrs=None, benign_pool=None,
                               embedders=None, n_clusters=12, knn_ks=KNN_KS,
-                              group_by='subcategory', baselines=True):
+                              group_by='subcategory', baselines=True, samples_dir=None):
     """Score the training samples of each group and seed; skip groups with insufficient data.
 
-    `seeds` defaults to helper.run_seeds() (42, 84, 126). For each seed, a group's
+    With samples_dir (main passes TRAIN_SAMPLES_DIR for the train split), samples
+    are the run's sample files, read or saved by helper.sample_examples.
+
+    `seeds` defaults to [helper.DEFAULT_SEED]. For each seed, a group's
     sample is drawn by helper.sample_examples exactly as the align.py run with
     that seed draws its harmful (and benign) examples. The overall row samples
     the union of eligible dataset rows, preserving their original order and
@@ -396,7 +405,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
     abbrs selects tactic abbreviations. With baselines, training subcategory
     scores also get random and evenly rows that reproduce align.py's baselines.
     """
-    seeds = list(run_seeds() if seeds is None else seeds)
+    seeds = list([DEFAULT_SEED] if seeds is None else seeds)
     if num_train < 2 or not seeds or max_n < 1 or num_proc < 1:
         raise ValueError('num_train >= 2, at least one seed, and max_n, num_proc >= 1 required')
     if len(set(seeds)) != len(seeds):
@@ -473,7 +482,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
             source_prompts, tag_corpus(source_prompts, num_proc=num_proc)):
         tags[prompt], words[prompt] = prompt_tags, prompt_words
 
-    samples = {}
+    samples, digests = {}, {}
     for abbr, category, pool in groups:
         runs = []
         for seed in seeds:
@@ -484,6 +493,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
                     harmful_count=harmful_count, abbr=abbr, dataset_name=dataset_name,
                     group_by=group_by, benign_pool=benign_pool, benign_count=benign_count,
                     benign_data_type=benign_data_type,
+                    samples_dir=samples_dir if split == 'train' else None,
                 )
             except ValueError as exc:
                 if not str(exc).startswith('Requested '):
@@ -495,6 +505,8 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
                       f'prompt(s) of at least {max_length:,} tokens; a model whose '
                       'tokenizer skips different prompts was trained on a different sample')
             runs.append(pd.concat([parts['harmful'], parts['benign']])['prompt'].tolist())
+            harmful_file = info['files'].get('harmful')
+            digests[abbr, seed] = sample_digest(harmful_file) if harmful_file else ''
         else:
             samples[abbr] = (category, len(pool), runs)
     if not samples:
@@ -555,6 +567,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
                     'subcategory': category, 'abbr': abbr, 'seed': seed, 'count': count,
                     'scored_on': num_train, 'subcategory_count': harmful_count,
                     'benign_count': benign_count,
+                    'harmful_sample_sha256': digests[abbr, seed],
                     # Arrows mark whether higher (↑) or lower (↓) values mean more diversity.
                     **{metric + ('↓' if 'self_bleu' in metric else '↑'): round(float(value), 6)
                        for metric, value in score.items()},
@@ -573,7 +586,8 @@ def seed_means(by_seed):
     metrics = [column for column in by_seed if is_metric(column)]
     rows = []
     for _, group in by_seed.groupby('abbr', sort=False):
-        row = group.iloc[0].drop(['seed', *metrics]).to_dict()
+        row = group.iloc[0].drop(['seed', 'harmful_sample_sha256', *metrics],
+                                 errors='ignore').to_dict()
         row['seeds'] = ' '.join(str(int(seed)) for seed in sorted(group['seed']))
         row.update({metric: round(float(group[metric].mean()), 6) for metric in metrics})
         rows.append(row)
@@ -634,11 +648,11 @@ def parse_args():
                         default=list(KNN_KS),
                         help='Neighbor counts for structural KNN cosine distance, one column '
                              f'each (default: {" ".join(map(str, KNN_KS))})')
-    parser.add_argument('--runs', type=int, default=DEFAULT_RUNS,
-                        help='Training runs to score per group; run n uses seed n * --seed, '
-                             f'as in align_run.sh (default: {DEFAULT_RUNS})')
-    parser.add_argument('--seed', type=int, default=DEFAULT_SEED,
-                        help=f'Seed of run 1 (default: {DEFAULT_SEED})')
+    parser.add_argument('--seeds', type=int, nargs='+', default=[DEFAULT_SEED],
+                        help=f'Run seeds to score (default: {DEFAULT_SEED}), e.g. 42 84 126')
+    parser.add_argument('--samples_dir', type=Path, default=TRAIN_SAMPLES_DIR,
+                        help='Root of the per-seed sample files shared with align.py '
+                             '(default: data/train_samples)')
     parser.add_argument('--num_proc', type=int, default=4)
     parser.add_argument('--embedding_models', '--embedding_model', dest='embedding_models',
                         nargs='+', default=list(EMBEDDING_MODEL_IDS),
@@ -652,7 +666,8 @@ def parse_args():
                         help='Batch size for POS and prompt embeddings; lower it for large '
                              'models (default: 32)')
     parser.add_argument('--embed_device', default=None,
-                        help='Embedding device, e.g. cuda:0 or cpu (default: auto)')
+                        help='Embedding device, e.g. cuda:0 or cpu (default: auto; on chili, '
+                             'chili/gpu.sh picks a free GPU)')
     parser.add_argument('--output_dir', type=Path,
                         default=Path(__file__).resolve().parent.parent / 'diversity',
                         help='Diversity root, independent of the working directory '
@@ -662,12 +677,10 @@ def parse_args():
         parser.error(f'--split {args.split} supports {SUPPORTED[args.split]}')
     if args.group_by == 'tactic' and (args.split != 'train' or args.datasets != ['gretel']):
         parser.error('--group_by tactic supports only --datasets gretel --split train')
-    if args.num_train < 2 or min(args.max_length, args.max_n, args.runs, args.num_proc) < 1:
-        parser.error('--num_train must be >= 2; length, order, runs and processes must be positive')
-    try:
-        args.seeds = run_seeds(args.runs, args.seed)
-    except ValueError as error:
-        parser.error(str(error))
+    if args.num_train < 2 or min(args.max_length, args.max_n, args.num_proc) < 1:
+        parser.error('--num_train must be >= 2; length, order and processes must be positive')
+    if min(args.seeds) < 1 or len(set(args.seeds)) != len(args.seeds):
+        parser.error('--seeds must be distinct positive integers')
     if not 0 <= args.harmful_rate <= 1:
         parser.error('--harmful_rate must be between 0 and 1')
     if args.embed_batch_size < 1:
@@ -723,11 +736,10 @@ def main():
             max_n=args.max_n, seeds=args.seeds, num_proc=args.num_proc,
             split=args.split, abbrs=args.abbr, benign_pool=benign_pool,
             embedders=embedders, n_clusters=args.n_clusters, knn_ks=args.knn_ks,
-            group_by=args.group_by, baselines=args.baselines,
+            group_by=args.group_by, baselines=args.baselines, samples_dir=args.samples_dir,
         )
         for name, result in results.items():
             output = outputs[name]
-            per_seed = []
             for seed, rows in result.groupby('seed', sort=False):
                 seed_output = seed_diversity_csv(output, seed)
                 seed_output.parent.mkdir(parents=True, exist_ok=True)
@@ -736,8 +748,14 @@ def main():
                                       keep_overall=bool(args.abbr))
                 rows.to_csv(seed_output, index=False)
                 print(f'Saved: {seed_output}')
-                per_seed.append(rows)
-            means = seed_means(pd.concat(per_seed, ignore_index=True))
+            # The mean covers every seed scored so far, not only this call's seeds.
+            seeds = sorted(int(path.name[len('seed'):])
+                           for path in args.output_dir.glob('seed*')
+                           if path.name[len('seed'):].isdigit()
+                           and seed_diversity_csv(output, int(path.name[len('seed'):])).exists())
+            means = seed_means(pd.concat(
+                [pd.read_csv(seed_diversity_csv(output, seed)).assign(seed=seed)
+                 for seed in seeds], ignore_index=True))
             print(f'{name} (mean over seeds): ↑ higher = more diverse | ↓ lower = more diverse')
             print(means.to_string(index=False))
             output.parent.mkdir(parents=True, exist_ok=True)

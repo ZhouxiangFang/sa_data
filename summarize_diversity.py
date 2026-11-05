@@ -10,17 +10,13 @@ lowest (most negative: more diversity, less harm) value of every model column is
 marked **bold** (Markdown). POS Self-BLEU-1 is left out, as in the figures.
 
 Example:
-    python sa_data/script/summarize_diversity.py --datasets wildguardmix aegis gretel
+    python sa_data/summarize_diversity.py --datasets wildguardmix aegis gretel
 """
 
 import argparse
-import sys
 from pathlib import Path
 
 import pandas as pd
-
-# sa_data/ holds the shared modules this script imports.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from plot_bars_diversity import FIGURE_METRICS, PLOT_METHODS
 from plot_bars_overall import DIVERSITY_DIR

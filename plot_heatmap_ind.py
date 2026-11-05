@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm, Normalize
 from matplotlib.patches import Rectangle
 from matplotlib.transforms import ScaledTranslation
+from helper import DEFAULT_SEED
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS_DIR = os.path.join(ROOT, "results")
@@ -295,9 +296,9 @@ def main():
                         help="Number of training examples (default: suffix size, or 400).")
     parser.add_argument("--suffix",
                         help="Grouped result folder suffix (default: 1800_<dataset>).")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help="Training seed: runs from results/seed<seed>, figures to "
-                             "figs/seed<seed>/heatmap (default: 42).")
+                             "figs/seed<seed>/heatmap (default: %(default)s).")
     parser.add_argument("--abs", action=argparse.BooleanOptionalAction, default=True,
                         help="Plot the absolute heatmap alongside the difference (default: enabled).")
     args = parser.parse_args()

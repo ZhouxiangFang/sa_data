@@ -5,6 +5,7 @@ logging.getLogger("Gloo").setLevel(logging.WARNING)
 import json
 import os
 import re
+from collections import Counter
 from pathlib import Path
 
 import pandas as pd
@@ -23,25 +24,30 @@ BASELINE_ABBRS = ("random", "evenly")
 # How training prompts are grouped: by safety subcategory, or (Gretel only) by
 # jailbreak tactic, for both training (align.py) and diversity scoring.
 GROUP_BYS = ("subcategory", "tactic")
-# Run n (1, 2, 3, ...) of a training setting uses seed n * DEFAULT_SEED (42, 84,
-# 126, ...); align_run.sh trains DEFAULT_RUNS runs per group by default and
-# calculate_diversity.py scores the same seeds. Seeds decide every sampled example
-# (sample_examples) and the training order. Each seed's outputs live in its own
-# seed<seed> folder: results/seed42/, results/seed42/if_eval/, diversity/seed42/...
-DEFAULT_SEED = 42
-DEFAULT_RUNS = 3
-
-
-def run_seeds(runs=DEFAULT_RUNS, base=DEFAULT_SEED):
-    """Seeds of runs 1..runs: base, 2 * base, ..., runs * base."""
-    if runs < 1 or base < 1:
-        raise ValueError("runs and the base seed must be positive")
-    return [base * n for n in range(1, runs + 1)]
+# A run is one seed, shared by every stage: the sampled examples (sample_examples),
+# the training order, the checkpoint name (_seed<seed>), the result folders and
+# the diversity scores. Each seed's outputs live in its own seed<seed> folder:
+# results/seed43/, results/seed43/if_eval/, diversity/seed43/...
+# Seeds 42, 84 and 126 were trained before; checkpoints named without a seed are 42.
+DEFAULT_SEED = 43
+LEGACY_SEED = 42
 
 
 def seed_suffix(seed):
-    """Checkpoint-name suffix of a run seed, e.g. _seed42 (align.py, align_run.sh)."""
+    """Checkpoint-name suffix of a run seed, e.g. _seed43 (align.py, train_jobs.py)."""
     return f"_seed{int(seed)}"
+
+
+def filename_component(value):
+    """A readable, filesystem-safe checkpoint-name component."""
+    component = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value)).strip("-._")
+    return component or "run"
+
+
+def checkpoint_name(model, num_train, dataset_name, abbr, seed):
+    """align.py's checkpoint folder name: <model>_<num_train>_<dataset>_<abbr>_seed<seed>."""
+    return (f"{filename_component(Path(model).name)}_{num_train}_{dataset_name}_"
+            f"{filename_component(abbr)}{seed_suffix(seed)}")
 
 
 def seed_dir(seed):
@@ -88,8 +94,14 @@ model_mapping = {
     "olmo2-ins": "allenai/OLMo-2-1124-7B-Instruct",
     "olmo3-ins": "allenai/Olmo-3-7B-Instruct",
     "mistral-ins": "mistralai/Mistral-7B-Instruct-v0.3",
+    # Base models SFT'd on git_data_20k (git_train.py): the starting points of alignment.
+    "llama3.1_git20k": "FocusV857/llama3.1_git20k",
+    "mistral_git20k": "FocusV857/mistral_git20k",
+    "olmo2_git20k": "FocusV857/olmo2_git20k",
+    "qwen2.5_git20k": "FocusV857/qwen2.5_git20k",
     "wildguard": "allenai/wildguard"
 }
+GIT20K_MODELS = ("llama3.1_git20k", "mistral_git20k", "olmo2_git20k", "qwen2.5_git20k")
 
 
 def filter_safe_responses(df: pd.DataFrame) -> pd.DataFrame:
@@ -111,16 +123,27 @@ def to_abbr(dataset_name, sub):
         abbrs.append(abbr_map.get(k, k))
     return abbrs
 
-def baseline_abbrs(dataset_name, harmful_count):
-    """Non-benign subcategories that align_run.sh trains on their own.
-
-    As in align_run.sh, these have at least harmful_count safe responses in
-    the training split of subcategory_stats.json.
-    """
+def group_sizes(dataset_name, group_by="subcategory"):
+    """{abbr: training examples available} of every subcategory (safe responses in the
+    training split of subcategory_stats.json) or, with group_by tactic, every tactic."""
+    if group_by == "tactic":
+        _, pools = tactic_pools(load_safety_dataset(dataset_name, "train"), dataset_name)
+        return {abbr: len(pool) for abbr, pool in pools.items()}
     with open(os.path.join(DATA_DIR, 'subcategory_stats.json')) as f:
         categories = json.load(f)[dataset_name]
-    return [c['abbr'] for c in categories.values()
-            if c['abbr'] != 'benign' and c['train']['safe_response'] >= harmful_count]
+    return {c['abbr']: c['train']['safe_response'] for c in categories.values()}
+
+
+def training_groups(dataset_name, harmful_count, group_by="subcategory"):
+    """Groups a run trains on their own: every non-benign subcategory (or tactic) with at
+    least harmful_count examples. The random and evenly baselines pool these."""
+    return [abbr for abbr, size in group_sizes(dataset_name, group_by).items()
+            if abbr != 'benign' and size >= harmful_count]
+
+
+def baseline_abbrs(dataset_name, harmful_count):
+    """Subcategories pooled by the random and evenly baselines (training_groups)."""
+    return training_groups(dataset_name, harmful_count)
 
 safety_test_datasets = ["wildguardmix", "aegis", "wildjailbreak", "ailuminate", "gretel"]
 overrefusal_test_datasets = ["xstest", "or-bench-hard"]
@@ -445,7 +468,7 @@ def select_tactic(df, dataset_name, abbr, harmful_count=None):
     """Training rows for one tactic, or the pooled tactics for a baseline abbr.
 
     The random and evenly baselines pool the tactics with at least
-    harmful_count eligible rows, the tactics align_run.sh trains on their own.
+    harmful_count eligible rows, the tactics trained on their own (training_groups).
     """
     _, pools = tactic_pools(df, dataset_name)
     if abbr in BASELINE_ABBRS:
@@ -623,6 +646,81 @@ def mixture_counts(total, harmful_rate, general_rate=0.0):
     return harmful, total - harmful - general, general
 
 
+# Every run's sampled examples are saved under TRAIN_SAMPLES_DIR/seed<seed>/ the
+# first time they are drawn (sample_examples), and align.py and
+# calculate_diversity.py read them from there afterwards.
+TRAIN_SAMPLES_DIR = Path(DATA_DIR) / "train_samples"
+DEFAULT_MAX_LENGTH = 4096
+
+
+def sample_paths(samples_dir, seed, *, dataset_name, abbr, harmful_count,
+                 group_by="subcategory", benign_data_type="vanilla_benign", benign_count=0,
+                 general_dataset=None, general_count=0, max_length=DEFAULT_MAX_LENGTH):
+    """Files holding the parts of one run's sample, found from the seed and the run settings.
+
+    <samples_dir>/seed<seed>/<dataset>[_tactic]/<abbr>_<count>.jsonl     harmful
+    <samples_dir>/seed<seed>/wildjailbreak/<benign_data_type>_<count>.jsonl
+    <samples_dir>/seed<seed>/general/<general dataset stem>_<count>.jsonl
+    A --max_length other than 4096 adds _len<max_length>. Parts with no
+    examples have no file (None).
+    """
+    base = Path(samples_dir) / seed_dir(seed)
+    length = "" if max_length == DEFAULT_MAX_LENGTH else f"_len{max_length}"
+    folder = f"{dataset_name}_tactic" if group_by == "tactic" else dataset_name
+    return {
+        "harmful": base / folder / f"{abbr}_{harmful_count}{length}.jsonl" if harmful_count else None,
+        "benign": (base / "wildjailbreak" / f"{benign_data_type}_{benign_count}{length}.jsonl"
+                   if benign_count else None),
+        "general": (base / "general" / f"{Path(general_dataset).stem}_{general_count}{length}.jsonl"
+                    if general_count else None),
+    }
+
+
+def read_sample(path):
+    """Examples saved by write_sample, in their sampled order."""
+    with open(path, encoding="utf-8") as handle:
+        rows = [json.loads(line) for line in handle if line.strip()]
+    return pd.DataFrame(rows, columns=list(rows[0]) if rows else ["prompt", "response"])
+
+
+def write_sample(path, sample):
+    """Save examples as JSON lines (exact strings); the rename makes concurrent writers safe."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        for row in sample.to_dict("records"):
+            handle.write(json.dumps(row) + "\n")
+    os.replace(temporary, path)
+
+
+def sample_digest(path):
+    """Short SHA-256 of a sample file, printed in training logs and diversity CSVs."""
+    import hashlib
+
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]
+
+
+def _sample_part(path, draw, pool, count, tokenizer, max_length, source):
+    """Read a saved part, or draw it and save it; returns (examples, overlong count)."""
+    if path is None or not path.exists():
+        sample, overlong = draw()
+        if path is not None:
+            write_sample(path, sample)
+        return sample, overlong
+    sample = read_sample(path)
+    if len(sample) != count or not {"prompt", "response"} <= set(sample):
+        raise ValueError(f"{path}: expected {count:,} prompt/response examples for {source}")
+    available = set(zip(pool["prompt"], pool["response"]))
+    if not all(pair in available for pair in zip(sample["prompt"], sample["response"])):
+        raise ValueError(f"{path} holds examples that are not in the current {source} pool; "
+                         "delete the file to draw the sample again")
+    if max(formatted_prompt_lengths(sample["prompt"], tokenizer)) >= max_length:
+        raise ValueError(f"{path} holds a prompt of at least {max_length:,} tokens with this "
+                         "tokenizer, so this model cannot train on the shared sample")
+    return sample, 0
+
+
 def sample_examples(
     seed: int,
     tokenizer,
@@ -638,33 +736,53 @@ def sample_examples(
     benign_data_type: str = "vanilla_benign",
     general_pool: pd.DataFrame | None = None,
     general_count: int = 0,
+    general_dataset=None,
+    samples_dir=None,
 ) -> tuple[dict[str, pd.DataFrame], dict]:
-    """Draw the examples of one run; given the pools and counts, only the seed decides.
+    """Get the examples of one run; given the pools and counts, only the seed decides.
 
     This is the only code that picks training examples. align.py calls it
-    through build_training_data and calculate_diversity.py calls it directly,
-    so a diversity sample drawn with seed s holds exactly the harmful (and
-    benign) examples of the training run with seed s. Each part has its own
-    seed offset (harmful: seed, benign: seed + 1, general: seed + 2), so a
-    part depends only on its pool, its count and the run seed.
+    through build_training_data and calculate_diversity.py calls it directly.
+    With samples_dir (both pass TRAIN_SAMPLES_DIR), each part is read from its
+    file (sample_paths: found from the seed and the run settings) when it
+    exists, and is otherwise drawn and saved there, so every model trained
+    with seed s and the diversity scored for seed s use the very same file. A
+    file is only used if all its examples are in the current pool and every
+    prompt fits max_length with this tokenizer. Without samples_dir, the parts
+    are drawn and nothing is saved.
+
+    Every part is drawn with the run seed itself, so a part depends only on its
+    pool, its count and the run seed.
 
     Returns ({"harmful", "benign", "general": prompt/response frames}, info),
-    where info has the overlong count skipped while sampling and, for the
-    random and evenly baselines, the pooled groups ("baseline_groups") and,
-    for evenly, the examples per group ("harmful_subcategory_counts").
+    where info has the overlong count skipped while drawing, the sample files
+    ("files": {part: path}) and, for the random and evenly baselines, the pooled
+    groups ("baseline_groups") and, for evenly, the examples per group
+    ("harmful_subcategory_counts").
     """
     empty = pd.DataFrame(columns=["prompt", "response"])
-    info = {"overlong": 0, "baseline_groups": None, "harmful_subcategory_counts": None}
+    info = {"overlong": 0, "baseline_groups": None, "harmful_subcategory_counts": None,
+            "files": {}}
+    paths = (sample_paths(samples_dir, seed, dataset_name=dataset_name, abbr=abbr,
+                          harmful_count=harmful_count, group_by=group_by,
+                          benign_data_type=benign_data_type, benign_count=benign_count,
+                          general_dataset=general_dataset, general_count=general_count,
+                          max_length=max_length)
+             if samples_dir is not None else {"harmful": None, "benign": None, "general": None})
     harmful_source = f"{group_by} {abbr!r} in {dataset_name}"
     if abbr in BASELINE_ABBRS and harmful_count:
-        # Groups pooled by a baseline: tactics in the pool, or align_run.sh's subcategories.
+        # Groups pooled by a baseline: tactics in the pool, or baseline_abbrs' subcategories.
         info["baseline_groups"] = (
             sorted({group for groups in harmful_pool["tactic_abbrs"] for group in groups})
             if group_by == "tactic"
             else baseline_abbrs(dataset_name, harmful_count)
         )
-    if abbr == "evenly":
-        harmful, overlong, info["harmful_subcategory_counts"] = sample_evenly(
+
+    def draw_harmful():
+        if abbr != "evenly":
+            return sample_pairs(harmful_pool, harmful_count, harmful_source, seed, tokenizer,
+                                max_length)
+        sample, overlong, counts = sample_evenly(
             harmful_pool,
             harmful_count,
             info["baseline_groups"],
@@ -674,15 +792,14 @@ def sample_examples(
             max_length,
             column="tactic_abbrs" if group_by == "tactic" else "sub_abbrs",
         )
-    else:
-        harmful, overlong = sample_pairs(
-            harmful_pool, harmful_count, harmful_source, seed, tokenizer, max_length
-        )
-    info["overlong"] += overlong
+        # sample_evenly draws group by group, in the order of counts.
+        return sample.assign(group=[group for group, count in counts.items()
+                                    for _ in range(count)]), overlong
 
-    if not benign_count:
-        benign = empty
-    elif benign_data_type == "mix":
+    def draw_benign():
+        if benign_data_type != "mix":
+            return sample_pairs(benign_pool, benign_count, f"WildJailbreak {benign_data_type!r}",
+                                seed, tokenizer, max_length)
         # Equal halves of vanilla and adversarial benign examples (vanilla gets
         # the extra one when benign_count is odd).
         parts = [
@@ -690,7 +807,7 @@ def sample_examples(
                 benign_pool[benign_pool["data_type"] == data_type],
                 share,
                 f"WildJailbreak {data_type!r}",
-                seed + 1,
+                seed,
                 tokenizer,
                 max_length,
             )
@@ -699,33 +816,42 @@ def sample_examples(
                 ("adversarial_benign", benign_count // 2),
             )
         ]
-        benign = pd.concat([part for part, _ in parts], ignore_index=True)
-        info["overlong"] += sum(overlong for _, overlong in parts)
-    else:
-        benign, overlong = sample_pairs(
-            benign_pool,
-            benign_count,
-            f"WildJailbreak {benign_data_type!r}",
-            seed + 1,
-            tokenizer,
-            max_length,
-        )
-        info["overlong"] += overlong
+        return (pd.concat([part for part, _ in parts], ignore_index=True),
+                sum(overlong for _, overlong in parts))
 
-    general, overlong = (
-        sample_pairs(general_pool, general_count, "general instruction data",
-                     seed + 2, tokenizer, max_length)
-        if general_count else (empty, 0)
-    )
-    info["overlong"] += overlong
-    return {"harmful": harmful, "benign": benign, "general": general}, info
+    def draw_general():
+        return sample_pairs(general_pool, general_count, "general instruction data",
+                            seed, tokenizer, max_length)
+
+    parts = {}
+    for part, draw, pool, count, source in (
+        ("harmful", draw_harmful, harmful_pool, harmful_count, harmful_source),
+        ("benign", draw_benign, benign_pool, benign_count, f"WildJailbreak {benign_data_type}"),
+        ("general", draw_general, general_pool, general_count, "general instruction"),
+    ):
+        if not count:
+            parts[part] = empty
+            continue
+        sample, overlong = _sample_part(paths[part], draw, pool, count, tokenizer,
+                                        max_length, source)
+        info["overlong"] += overlong
+        if paths[part] is not None:
+            info["files"][part] = paths[part]
+        if "group" in sample:
+            info["harmful_subcategory_counts"] = dict(Counter(sample["group"]))
+        parts[part] = sample[["prompt", "response"]].reset_index(drop=True)
+    return parts, info
 
 
 def build_training_data(
     args: argparse.Namespace, tokenizer, *, harmful_pool=None, benign_pool=None,
-    general_pool=None,
+    general_pool=None, samples_dir=None,
 ) -> tuple[pd.DataFrame, int, int, int]:
-    """Build the shuffled alignment mixture of one run (sample_examples, seed args.seed)."""
+    """Build the shuffled alignment mixture of one run (sample_examples, seed args.seed).
+
+    align.py passes samples_dir=TRAIN_SAMPLES_DIR, so the examples come from (or
+    are saved to) the run's sample files; their paths are in attrs["sample_files"].
+    """
     # Callers without general_rate (e.g. older scripts) keep a two-source mixture.
     harmful_count, benign_count, general_count = mixture_counts(
         args.num_train, args.harmful_rate, getattr(args, "general_rate", 0.0)
@@ -755,10 +881,12 @@ def build_training_data(
         benign_pool=benign_pool, benign_count=benign_count,
         benign_data_type=args.benign_data_type,
         general_pool=general_pool, general_count=general_count,
+        general_dataset=getattr(args, "general_dataset", None), samples_dir=samples_dir,
     )
     train_df = pd.concat(list(parts.values()), ignore_index=True)
     train_df = train_df.sample(frac=1, random_state=args.seed).reset_index(drop=True)
     train_df.attrs["general_available"] = len(general_pool)
+    train_df.attrs["sample_files"] = info["files"]
     for key in ("harmful_subcategory_counts", "baseline_groups"):
         if info[key] is not None:
             train_df.attrs[key] = info[key]

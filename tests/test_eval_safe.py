@@ -10,6 +10,8 @@ from unittest.mock import Mock, patch
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import eval as evaluation
+import eval_if
 import eval_safe
 import helper
 
@@ -160,43 +162,77 @@ class OverrefusalTests(unittest.TestCase):
                                  ["harmful", "harmful", "benign", "unknown"])
                 self.assertEqual(saved["is_unsafe"].tolist(), [1, 0, 0, 1])
 
-    def test_cli_defaults_include_both_benchmarks(self):
-        with patch.object(sys, "argv", ["eval_safe.py"]):
-            args = eval_safe.parse_args()
-        self.assertEqual(args.datasets, helper.safety_test_datasets + helper.overrefusal_test_datasets)
 
-    def test_overrefusal_only_run_reuses_models_and_supports_permit(self):
+class EvalMainTests(unittest.TestCase):
+    """eval.py: one model load serves IF and safety, then the guard judges."""
+
+    def run_main(self, directory, *argv, judge_text="Response refusal: yes\nHarmful response: no"):
+        model = Mock()
+        model.generate.side_effect = lambda prompts, params, use_tqdm=False: [
+            guard_output("if reply") for _ in prompts]
         guard = Mock()
-        guard.generate.return_value = [guard_output(
-            "Harmful request: no\nResponse refusal: yes\nHarmful response: no"
-        )]
-        llm = Mock(side_effect=[Mock(), guard])
+        guard.generate.side_effect = lambda prompts, params, use_tqdm=False: [
+            guard_output(judge_text) for _ in prompts]
+        llm = Mock(side_effect=[model, guard])
         modules = {
             "torch": Mock(),
             "transformers": Mock(),
             "vllm": SimpleNamespace(LLM=llm, SamplingParams=Mock()),
         }
-        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
-            with (
-                patch.dict(sys.modules, modules),
-                patch.object(sys, "argv", [
-                    "eval_safe.py", "--model", "qwen2.5-ins", "--permit",
-                    "--datasets", "xstest", "or-bench-hard", "xstest",
-                    "--output_dir", directory,
-                ]),
-                patch.object(eval_safe, "load_safety_dataset", side_effect=lambda *args: responses([0])) as load,
-                patch.object(eval_safe, "generate_responses", return_value=["answer"]) as generate,
-            ):
-                eval_safe.main()
-            self.assertEqual(load.call_count, 2)
-            self.assertEqual(llm.call_count, 2)
+        example = {"prompt": "write two lines", "instruction_id_list": [], "kwargs": []}
+        with (
+            patch.dict(sys.modules, modules),
+            patch.object(eval_if, "load_benchmarks",
+                         return_value={"IFBench": [example], "IFEval": [example, example]}),
+            patch.object(eval_if, "check_response", return_value=[True]),
+            patch.object(eval_safe, "load_safety_dataset",
+                         side_effect=lambda name, split: responses([0, 0])),
+            patch.object(eval_safe, "generate_responses",
+                         side_effect=lambda llm, tok, queries, **kw: ["answer"] * len(queries)
+                         ) as generate,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            evaluation.main(["--output_dir", directory, *argv])
+        return llm, model, guard, generate
+
+    def test_cli_defaults_include_every_test_set(self):
+        args = evaluation.parse_args(["--model", "qwen2.5-ins"])
+        self.assertEqual(args.datasets, helper.safety_test_datasets + helper.overrefusal_test_datasets)
+        self.assertFalse(args.skip_if or args.skip_safety)
+
+    def test_one_model_load_serves_if_and_safety(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "ckpts" / "olmo2_git20k_1800_aegis_hate_seed43"
+            checkpoint.mkdir(parents=True)
+            llm, model, guard, generate = self.run_main(
+                directory, "--model", str(checkpoint), "--datasets", "ailuminate", "xstest")
+            self.assertEqual(llm.call_count, 2)  # the model, then the guard
+            self.assertEqual(model.generate.call_count, 2)  # IFBench, IFEval
+            model.reset_prefix_cache.assert_called_once()
+            self.assertEqual(generate.call_count, 2)  # one call per test set
             self.assertEqual(guard.generate.call_count, 2)
+            for path in evaluation.result_files(directory, "olmo2_git20k_1800_aegis_hate_seed43"):
+                self.assertTrue(Path(path).exists(), path)
+            summary = pd.read_csv(Path(directory) / "seed43/if_eval/olmo2_git20k_1800_aegis"
+                                  / "aegis_hate_if_summary.csv")
+            self.assertEqual(summary["benchmark"].tolist(), ["IFBench", "IFEval", "Average"])
+            self.assertEqual(summary["num_prompts"].tolist(), [1, 2, 3])
+
+    def test_overrefusal_only_permit_run_skips_if(self):
+        with tempfile.TemporaryDirectory() as directory:
+            llm, model, guard, generate = self.run_main(
+                directory, "--model", "qwen2.5-ins", "--permit",
+                "--datasets", "xstest", "or-bench-hard", "xstest")
+            self.assertEqual(llm.call_count, 2)
+            model.generate.assert_not_called()  # IF is skipped with --permit
             self.assertEqual(generate.call_count, 2)
-            self.assertEqual(generate.call_args.args[2], [eval_safe.PERMIT_PROMPT + "prompt 0"])
+            self.assertEqual(generate.call_args.args[2],
+                             [eval_safe.PERMIT_PROMPT + "prompt 0", eval_safe.PERMIT_PROMPT + "prompt 1"])
             root = Path(directory) / "qwen2.5-ins_permit"
             saved = pd.read_csv(root / "qwen2.5-ins_permit_overrefusal.csv")
             self.assertEqual(saved["overrefusal_score_pct"].tolist(), [100, 100, 100])
             self.assertFalse(list(root.glob("*_overall.csv")))
+            self.assertFalse((Path(directory) / "if_eval").exists())
 
 
 if __name__ == "__main__":

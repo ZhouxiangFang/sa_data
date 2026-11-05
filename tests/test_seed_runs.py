@@ -12,8 +12,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import calculate_diversity as cd
-import eval_if
-import eval_safe
+import eval as evaluation
 import helper
 import plot_bars_diversity as pbd
 
@@ -52,36 +51,45 @@ def gretel_rows():
     return pd.DataFrame(rows)
 
 
+SEEDS = (42, 84, 126)
+
+
 def pairs(prefix, count):
     return pd.DataFrame({"prompt": [f"{prefix} {i}" for i in range(count)],
                          "response": ["ok"] * count})
 
 
 class SeedTests(unittest.TestCase):
-    def test_run_seeds_are_multiples_of_42(self):
-        self.assertEqual(helper.run_seeds(), [42, 84, 126])
-        self.assertEqual(helper.run_seeds(4), [42, 84, 126, 168])
+    def test_one_seed_names_every_output(self):
+        self.assertEqual(helper.DEFAULT_SEED, 43)
         self.assertEqual(helper.seed_suffix(84), "_seed84")
+        self.assertEqual(helper.checkpoint_name("FocusV857/llama3.1_git20k", 1800, "aegis",
+                                                "needs caution", 43),
+                         "llama3.1_git20k_1800_aegis_needs-caution_seed43")
         self.assertEqual(helper.insert_seed_dir("results/if_eval/", 84),
                          Path("results/seed84/if_eval"))
         self.assertEqual(helper.seed_diversity_csv("diversity/bge-m3/csv/a.csv", 42),
                          Path("diversity/seed42/bge-m3/csv/a.csv"))
-        with self.assertRaises(ValueError):
-            helper.run_seeds(0)
 
     def test_seeded_checkpoints_get_seed_result_folders(self):
-        safe = eval_safe.result_location("R", "olmo2_git20k_1800_aegis_hate_seed84")
-        self.assertEqual(safe, ("R/seed84/olmo2_git20k_1800_aegis/aegis_hate", "aegis_hate"))
+        self.assertEqual(
+            evaluation.result_dirs("R", "olmo2_git20k_1800_aegis_hate_seed84"),
+            ("R/seed84/olmo2_git20k_1800_aegis/aegis_hate",
+             "R/seed84/if_eval/olmo2_git20k_1800_aegis", "aegis_hate"))
+        self.assertEqual(
+            evaluation.result_files("R", "olmo2_git20k_1800_gretel_phishing_seed43"),
+            ("R/seed43/olmo2_git20k_1800_gretel/gretel_phishing/gretel_phishing_overall.csv",
+             "R/seed43/if_eval/olmo2_git20k_1800_gretel/gretel_phishing_if_summary.csv"))
         # Checkpoints named before seeds were added are seed 42.
-        legacy = eval_safe.result_location("R", "olmo2_git20k_1800_aegis_hate")
+        legacy = evaluation.result_dirs("R", "olmo2_git20k_1800_aegis_hate")
         self.assertEqual(legacy[0], "R/seed42/olmo2_git20k_1800_aegis/aegis_hate")
-        ifeval = eval_if.result_location("R/if_eval", "olmo2_git20k_1800_aegis_hate_seed84")
-        self.assertEqual(ifeval, ("R/seed84/if_eval/olmo2_git20k_1800_aegis", "aegis_hate"))
-        # Instruct baselines are not seeded runs.
-        self.assertEqual(eval_safe.result_location("R", "olmo2-ins")[0], "R/olmo2-ins")
-        self.assertEqual(eval_if.result_location("R/if_eval", "olmo2-ins")[0], "R/if_eval")
+        # Instruct and git20k baselines are not seeded runs.
+        self.assertEqual(evaluation.result_dirs("R", "olmo2-ins"),
+                         ("R/olmo2-ins", "R/if_eval", "olmo2-ins"))
+        self.assertEqual(evaluation.resolve_model("llama3.1_git20k"),
+                         ("FocusV857/llama3.1_git20k", "llama3.1_git20k"))
 
-    def test_diversity_scores_exactly_the_harmful_examples_of_each_training_run(self):
+    def test_diversity_and_training_use_the_same_sample_files(self):
         df = gretel_rows()
         benign, general = pairs("benign", 20), pairs("general", 20)
         harmful_count = 4
@@ -90,36 +98,76 @@ class SeedTests(unittest.TestCase):
 
         def record(seed, *args, **kwargs):
             parts, info = real(seed, *args, **kwargs)
-            drawn[kwargs["abbr"], seed] = sorted(parts["harmful"]["prompt"])
+            drawn[kwargs["abbr"], seed] = list(parts["harmful"]["prompt"])
             return parts, info
 
         tags = lambda texts, num_proc: [(text.split(), text.lower().split()) for text in texts]
-        with mock.patch.object(cd, "sample_examples", record), \
-                mock.patch.object(cd, "tag_corpus", tags):
-            by_seed = cd.compute_dataset_diversity(
-                df, "gretel", tokenizer=FakeTokenizer(), num_train=harmful_count,
-                group_by="tactic", n_clusters=2, knn_ks=(1,), num_proc=1,
-                embedders={"fake": FakeEmbedder()},
-            )["fake"]
-        self.assertEqual(sorted(set(by_seed["seed"])), [42, 84, 126])
-        self.assertEqual(sorted(set(by_seed["abbr"])),
-                         ["evenly", "overall", "phishing", "quid_pro_quo", "random"])
+        with tempfile.TemporaryDirectory() as directory:
+            samples_dir = Path(directory)
+            with mock.patch.object(cd, "sample_examples", record), \
+                    mock.patch.object(cd, "tag_corpus", tags):
+                by_seed = cd.compute_dataset_diversity(
+                    df, "gretel", tokenizer=FakeTokenizer(), num_train=harmful_count,
+                    group_by="tactic", n_clusters=2, knn_ks=(1,), num_proc=1,
+                    embedders={"fake": FakeEmbedder()}, samples_dir=samples_dir, seeds=SEEDS,
+                )["fake"]
+            self.assertEqual(sorted(set(by_seed["seed"])), [42, 84, 126])
+            self.assertEqual(sorted(set(by_seed["abbr"])),
+                             ["evenly", "overall", "phishing", "quid_pro_quo", "random"])
 
-        for abbr in ("quid_pro_quo", "phishing", "random", "evenly"):
-            pool = helper.select_tactic(df, "gretel", abbr, harmful_count)
-            for seed in helper.run_seeds():
-                # align.py's 1:1:1 mixture with the same harmful count and seed.
-                args = argparse.Namespace(
-                    num_train=3 * harmful_count, harmful_rate=1 / 3, general_rate=1 / 3,
-                    alignment_dataset="gretel", abbr=abbr, group_by="tactic",
-                    benign_data_type="vanilla_benign", seed=seed, max_length=1000)
-                train_df, _, _, _ = helper.build_training_data(
-                    args, FakeTokenizer(), harmful_pool=pool, benign_pool=benign,
-                    general_pool=general)
-                trained = sorted(set(train_df["prompt"]) & set(pool["prompt"]))
-                self.assertEqual(drawn[abbr, seed], trained, (abbr, seed))
+            for abbr in ("quid_pro_quo", "phishing", "random", "evenly"):
+                pool = helper.select_tactic(df, "gretel", abbr, harmful_count)
+                for seed in SEEDS:
+                    # The file is found from the seed and the run settings.
+                    path = samples_dir / f"seed{seed}" / "gretel_tactic" / f"{abbr}_4.jsonl"
+                    self.assertEqual(list(helper.read_sample(path)["prompt"]), drawn[abbr, seed])
+                    row = by_seed.query("abbr == @abbr and seed == @seed").iloc[0]
+                    self.assertEqual(row["harmful_sample_sha256"], helper.sample_digest(path))
+                    # align.py's 1:1:1 mixture, given the pool rows in another order:
+                    # it still trains on the file's examples.
+                    args = argparse.Namespace(
+                        num_train=3 * harmful_count, harmful_rate=1 / 3, general_rate=1 / 3,
+                        alignment_dataset="gretel", abbr=abbr, group_by="tactic",
+                        benign_data_type="vanilla_benign", seed=seed, max_length=4096,
+                        general_dataset="git_data_20k.csv")
+                    train_df, _, _, _ = helper.build_training_data(
+                        args, FakeTokenizer(), harmful_pool=pool.iloc[::-1],
+                        benign_pool=benign, general_pool=general, samples_dir=samples_dir)
+                    trained = sorted(set(train_df["prompt"]) & set(pool["prompt"]))
+                    self.assertEqual(trained, sorted(drawn[abbr, seed]), (abbr, seed))
+                    self.assertEqual(train_df.attrs["sample_files"]["harmful"], path)
+                    # Without files, the same seed draws the same examples.
+                    fresh, _, _, _ = helper.build_training_data(
+                        args, FakeTokenizer(), harmful_pool=pool, benign_pool=benign,
+                        general_pool=general)
+                    self.assertTrue(fresh.equals(train_df))
+            self.assertTrue((samples_dir / "seed84" / "general" / "git_data_20k_4.jsonl").exists())
         # Different seeds train on different samples.
         self.assertNotEqual(drawn["quid_pro_quo", 42], drawn["quid_pro_quo", 84])
+
+    def test_a_sample_file_must_match_the_pool_and_tokenizer(self):
+        pool = pairs("harmful", 10)
+        kwargs = dict(harmful_count=3, abbr="x", dataset_name="aegis")
+        with tempfile.TemporaryDirectory() as directory:
+            samples_dir = Path(directory)
+            parts, info = helper.sample_examples(42, FakeTokenizer(), 4096, harmful_pool=pool,
+                                                 samples_dir=samples_dir, **kwargs)
+            path = info["files"]["harmful"]
+            self.assertEqual(path, samples_dir / "seed42" / "aegis" / "x_3.jsonl")
+            again, _ = helper.sample_examples(42, FakeTokenizer(), 4096, harmful_pool=pool,
+                                              samples_dir=samples_dir, **kwargs)
+            self.assertTrue(again["harmful"].equals(parts["harmful"]))
+            with self.assertRaisesRegex(ValueError, "not in the current"):
+                helper.sample_examples(42, FakeTokenizer(), 4096, harmful_pool=pool.iloc[5:],
+                                       samples_dir=samples_dir, **kwargs)
+
+            class LongTokenizer(FakeTokenizer):
+                def __call__(self, texts, **kwargs):
+                    return {"length": [5000] * len(texts)}
+
+            with self.assertRaisesRegex(ValueError, "tokens with this tokenizer"):
+                helper.sample_examples(42, LongTokenizer(), 4096, harmful_pool=pool,
+                                       samples_dir=samples_dir, **kwargs)
 
 
 class CorrelationTests(unittest.TestCase):

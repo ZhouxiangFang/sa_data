@@ -2,7 +2,7 @@
 
 Run from any directory: python sa_data/plot_bars_overall.py
 Select a result configuration with --suffix 800_wildguardmix and a training
-seed with --seed (default: 42): trained runs are read from
+seed with --seed (default: 43): trained runs are read from
 <results>/seed<seed>/ (IF: <results>/seed<seed>/if_eval/), while the official and
 self-trained instruct baselines, always included, stay in <results>/ and
 <results>/if_eval/. --models selects the models (default: llama3.1 mistral olmo2

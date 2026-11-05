@@ -10,20 +10,23 @@ Defaults are sized for full fine-tuning a 7B/8B model on four 48 GB A6000s::
 
 The default 1,800 examples mix the three sources 1:1:1 (600 each). General
 instructions default to data/git_data_20k.csv. Safety targets use only
-safe/unharmful responses. --seed decides every sampled example (through
-helper.sample_examples, the same code calculate_diversity.py samples with), the
-shuffle and the training order. Run n of a setting uses seed n * 42
-(align_run.sh trains runs 1-3 by default). The checkpoint name ends in
-_seed<seed>, and eval_run.sh writes its results to <results>/seed<seed>/
-(IF results to <results>/seed<seed>/if_eval/). With four
-GPUs, the default micro-batch of 1 and eight accumulation steps give an
-effective batch size of 32 examples.
+safe/unharmful responses. --seed (default 43) decides every sampled example
+(through helper.sample_examples, the same code calculate_diversity.py samples
+with), the shuffle and the training order. The examples are read from the run's
+sample files under data/train_samples/seed<seed>/ (found from the seed and the
+run settings; drawn and saved there by the first run or diversity score that
+needs them), so every model trained with a seed, and its diversity score, use
+the same examples; the log prints each file with its SHA-256. The checkpoint
+name ends in _seed<seed>, and eval.py writes its results to <results>/seed<seed>/
+(IF results to <results>/seed<seed>/if_eval/). With four GPUs, the default
+micro-batch of 1 and eight accumulation steps give an effective batch size of
+32 examples. train_jobs.py lists the jobs of a whole run.
 
 Use --alignment_dataset gretel --abbr information_hazards for Gretel's
 risk categories. Gretel safe_response supplies the response training target.
 
 Use --abbr random or --abbr evenly for baselines over the non-benign
-subcategories that align_run.sh trains on their own: random samples their
+subcategories with enough examples to train on their own: random samples their
 pooled prompts uniformly, so larger subcategories contribute more; evenly gives
 each subcategory the same share.
 
@@ -37,7 +40,6 @@ import argparse
 import logging
 import math
 import os
-import re
 from pathlib import Path
 
 import torch
@@ -47,8 +49,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
 from helper import (
-    BENIGN_DATA_TYPES, DEFAULT_SEED, GROUP_BYS, build_training_data,
-    mixture_counts, model_mapping, print_config, seed_suffix,
+    BENIGN_DATA_TYPES, DEFAULT_SEED, GROUP_BYS, TRAIN_SAMPLES_DIR, build_training_data,
+    checkpoint_name, filename_component, mixture_counts, model_mapping, print_config,
+    sample_digest,
 )
 
 
@@ -85,8 +88,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Subcategory abbreviation from data/subcategory_stats.json. "
             "For Gretel, use its configured abbreviation (e.g. 'information_hazards'). "
-            "Baselines over the non-benign subcategories that align_run.sh trains "
-            "on their own: 'random' samples them in proportion to their size; "
+            "Baselines over the non-benign subcategories with enough examples to "
+            "train on their own: 'random' samples them in proportion to their size; "
             "'evenly' samples each equally."
         ),
     )
@@ -153,8 +156,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--seed", type=int, default=DEFAULT_SEED,
-        help=("Run seed; run n of a setting uses n * 42 (default: 42). The checkpoint "
-              "name ends in _seed<seed>."),
+        help=(f"Run seed (default: {DEFAULT_SEED}); decides the sampled examples and the "
+              "training order. The checkpoint name ends in _seed<seed>."),
+    )
+    parser.add_argument(
+        "--samples_dir", type=Path, default=TRAIN_SAMPLES_DIR,
+        help="Root of the per-seed sample files (default: data/train_samples).",
     )
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument(
@@ -219,12 +226,6 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def filename_component(value: str) -> str:
-    """Return a readable, filesystem-safe checkpoint-name component."""
-    component = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
-    return component or "run"
-
-
 def main() -> None:
     args = parse_args()
     is_main_process = args.local_rank in (-1, 0)
@@ -251,7 +252,7 @@ def main() -> None:
         args.num_train, args.harmful_rate, args.general_rate
     )
     train_df, harmful_available, benign_available, overlong_count = (
-        build_training_data(args, tokenizer)
+        build_training_data(args, tokenizer, samples_dir=args.samples_dir)
     )
     if is_main_process:
         prompt_kind = "benign" if args.abbr.lower() == "benign" else "harmful"
@@ -273,6 +274,8 @@ def main() -> None:
             for abbr, count in sorted(subcategory_counts.items()):
                 print(f"  {abbr}: {count:,}")
         print(f"Overlong candidates skipped while sampling: {overlong_count:,}")
+        for part, path in train_df.attrs["sample_files"].items():
+            print(f"Sample file ({part}): {path} sha256 {sample_digest(path)}")
 
     train_dataset = Dataset.from_dict(
         {
@@ -286,11 +289,10 @@ def main() -> None:
         }
     )
 
-    checkpoint_name = filename_component(args.run_name) if args.run_name else (
-        f"{filename_component(Path(args.model).name)}_{args.num_train}_"
-        f"{args.alignment_dataset}_{filename_component(args.abbr)}{seed_suffix(args.seed)}"
+    output_dir = args.output_dir / (
+        filename_component(args.run_name) if args.run_name else
+        checkpoint_name(args.model, args.num_train, args.alignment_dataset, args.abbr, args.seed)
     )
-    output_dir = args.output_dir / checkpoint_name
     if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite_output_dir:
         raise FileExistsError(
             f"Output directory is not empty: {output_dir}. Choose --run_name or pass "
