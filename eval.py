@@ -7,7 +7,7 @@ One vLLM engine generates the IFBench/IFEval responses (eval_if.py) and then,
 with its prefix cache cleared so they match a run of their own, the responses
 to the safety and overrefusal test sets (eval_safe.py), one greedy generate call
 per benchmark or test set. The model is then released and WildGuard judges the
-safety responses.
+safety responses. vLLM runs in batch-invariant mode, so a rerun reproduces the results.
 
 A trained checkpoint <model>_<n>_<dataset>_<abbr>_seed<seed> (align.py) writes to
   <output_dir>/seed<seed>/<model>_<n>_<dataset>/<dataset>_<abbr>/    safety
@@ -29,6 +29,13 @@ import eval_safe
 from helper import LEGACY_SEED, model_mapping, seed_dir
 
 logging.getLogger("vllm").setLevel(logging.WARNING)
+# Greedy decoding alone is not repeatable in vLLM (outputs depend on batching): two runs
+# shared only ~40% of responses. Batch-invariant kernels (FLASH_ATTN backend required)
+# made reruns give the same labels and scores at the same speed on an A6000 (2026-11-05).
+# VLLM_BATCH_INVARIANT=0 turns this off.
+os.environ.setdefault("VLLM_BATCH_INVARIANT", "1")
+if os.environ["VLLM_BATCH_INVARIANT"] == "1":
+    os.environ.setdefault("VLLM_ATTENTION_BACKEND", "FLASH_ATTN")
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 CHECKPOINT_NAME = re.compile(

@@ -22,7 +22,8 @@ if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
 fi
 # DeepSpeed compiles its CUDA ops against the pip-installed NVIDIA headers.
 for include_dir in "$CONDA_PREFIX"/lib/python*/site-packages/nvidia/*/include; do
-    [[ ":${CPATH:-}:" == *":$include_dir:"* ]] || export CPATH="$include_dir${CPATH:+:$CPATH}"
+    [[ -d $include_dir && ":${CPATH:-}:" != *":$include_dir:"* ]] &&
+        export CPATH="$include_dir${CPATH:+:$CPATH}"
 done
 # Driver 595.84 needs matching user-space libraries; a no-op with other drivers.
 if grep -q '595\.84' /proc/driver/nvidia/version 2>/dev/null; then
