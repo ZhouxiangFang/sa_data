@@ -68,7 +68,8 @@ if (( EFFECTIVE_BATCH % (TRAIN_NGPUS * MICRO_BATCH) )); then
     exit 2
 fi
 # Put first, so accumulation steps given after -- still win.
-align_args=(--per_device_train_batch_size "$MICRO_BATCH"
+[[ -f $DS_CONFIG ]] || { echo "DeepSpeed config not found: $DS_CONFIG" >&2; exit 2; }
+align_args=(--deepspeed "$(realpath "$DS_CONFIG")" --per_device_train_batch_size "$MICRO_BATCH"
             --gradient_accumulation_steps $((EFFECTIVE_BATCH / (TRAIN_NGPUS * MICRO_BATCH)))
             "${settings[@]}" "${align_args[@]}")
 

@@ -174,8 +174,10 @@ class EvalMainTests(unittest.TestCase):
         guard.generate.side_effect = lambda prompts, params, use_tqdm=False: [
             guard_output(judge_text) for _ in prompts]
         llm = Mock(side_effect=[model, guard])
+        torch = Mock()
+        torch.cuda.mem_get_info.return_value = (80, 80)  # the model's GPU memory is free again
         modules = {
-            "torch": Mock(),
+            "torch": torch,
             "transformers": Mock(),
             "vllm": SimpleNamespace(LLM=llm, SamplingParams=Mock()),
         }

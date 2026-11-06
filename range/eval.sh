@@ -14,7 +14,8 @@ Usage: range/eval.sh MODEL... [--delete] [-- eval.py options]
 
 eval.py options, e.g. --output_dir ../ablations/<setting> (default: results/), --limit 5.
 Logs: log/slurm/eval_<job>_<task>.log; the model list is log/slurm/models_<time>.txt.
-EVAL_GPU, EVAL_TIME, MAX_EVAL etc.: see range/common.sh.
+EVAL_GPU, EVAL_TIME, MAX_EVAL etc.: see range/common.sh. DEPENDENCY (e.g. afterok:<job>)
+holds the array until another job has finished.
 EOF
 }
 
@@ -36,6 +37,6 @@ n=${#models[@]}
 read -ra gpu <<< "$(gpu_opts 1)"
 id=$(submit --job-name=eval --array="0-$((n - 1))%$MAX_EVAL" "${gpu[@]}" \
     --cpus-per-task="$EVAL_CPUS" --mem="$EVAL_MEM" --time="$EVAL_TIME" \
-    --output="$LOG_DIR/eval_%A_%a.log" \
+    --output="$LOG_DIR/eval_%A_%a.log" ${DEPENDENCY:+--dependency="$DEPENDENCY" --kill-on-invalid-dep=yes} \
     "$RANGE_DIR/eval.sbatch" "$models_file" "$delete" "${eval_args[@]}") || exit
 echo "Evaluation: array $id, $n model(s) on 1 x $EVAL_GPU (list: $models_file)"

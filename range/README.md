@@ -6,7 +6,7 @@ overridden through the environment.
 
 | Script | What it does |
 | --- | --- |
-| `prefetch.sh` | Run once on the login node: caches the models and datasets in `~/.cache/huggingface` |
+| `prefetch.sh` | Run once on the login node: caches the models and datasets in `/scratch/zf28/huggingface` |
 | `run.sh` | A whole seed: train array → eval array (task i after training task i) + diversity → plot/correlate |
 | `train.sh` | Training array (`--eval` adds the eval array, `--eval_only` evaluates saved checkpoints) |
 | `eval.sh` | Eval array for any models |
@@ -29,7 +29,10 @@ H100, whichever frees first (`EVAL_GPU=hopper`; or `h100`, `h200`, `47gb`). At m
 
 Notes:
 - The first training job JIT-compiles DeepSpeed's FusedAdam into `~/.cache/torch_extensions`.
-  That build needs `nvcc` from `/opt/apps/software/CUDA/12.8.0` and the system GCC 11; GCC 14
-  produces a library the conda libstdc++ can't load. `common.sh` sets both.
-- `/scratch` is purged: the old `/scratch/zf28/huggingface` cache has lost its files. Keep
-  the HF cache on /home. Checkpoints on /scratch are deleted once they are evaluated.
+  It is built with GCC 14 from `/opt/apps` (compute nodes have no system g++) and `nvcc` from
+  `/opt/apps/software/CUDA/12.8.0`. The env's libstdc++ was upgraded so GCC 14 builds load. `common.sh` sets both.
+- /home has a 50 GB quota, so the whole HF cache (`HF_HOME`, including the token) is in
+  `/scratch/zf28/huggingface`, and `~/.cache/huggingface` is a symlink to it. /scratch purges
+  old files: an earlier cache there lost all of them. If models disappear, rerun
+  `prefetch.sh`. If the token disappears, run `hf auth login` again.
+  Checkpoints on /scratch are deleted once they are evaluated.
