@@ -8,6 +8,14 @@
 # checkpoint, status) with DeepSpeed on every GPU of the allocation.
 set -uo pipefail
 source "${RANGE_DIR:?submit with range/train.sh}/common.sh"
+# TRAIN_VENV: train in a venv layered on the nlp env with another DeepSpeed (e.g.
+# /scratch/zf28/envs/ds0196). Its deepspeed launcher, and so its python, comes first on PATH,
+# and its ops are JIT-built into a folder of their own.
+if [[ -n ${TRAIN_VENV:-} ]]; then
+    source "$TRAIN_VENV/bin/activate" || exit 1
+    export TORCH_EXTENSIONS_DIR=$TRAIN_VENV/torch_extensions
+fi
+python -c 'import deepspeed; print("DeepSpeed", deepspeed.__version__, "from", deepspeed.__file__)' 2>&1 | grep '^DeepSpeed'
 
 jobs_tsv=$1 output_dir=$2
 shift 2
@@ -37,5 +45,17 @@ kill "$sampler" 2>/dev/null
 awk -F', ' '$2 > peak[$1] { peak[$1] = $2; total[$1] = $3 }
             END { for (g in peak) printf "Peak memory on GPU %s: %d of %d MiB\n", g, peak[g], total[g] }' "$mem_log"
 rm -f -- "$mem_log"
+# With train.sh --eval, eval task i waits on this task (aftercorr), but on 2026-11-06 evals 19+
+# of array 383824 kept aftercorr:383741_*(unfulfilled) hours after their training succeeded
+# (Slurm had probably purged the finished tasks' records; MinJobAge is 300 s). So the training
+# task clears its eval's dependency itself, or cancels the eval if training failed.
+if [[ -s $jobs_tsv.eval_id ]]; then
+    eval_task=$(<"$jobs_tsv.eval_id")_$SLURM_ARRAY_TASK_ID
+    if (( status == 0 )); then
+        scontrol update JobId="$eval_task" Dependency= && echo "Released eval $eval_task"
+    else
+        scancel "$eval_task" && echo "Cancelled eval $eval_task"
+    fi
+fi
 echo "$(date '+%F %T') exit $status"
 exit "$status"

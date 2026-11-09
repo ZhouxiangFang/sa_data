@@ -22,10 +22,17 @@ range/run.sh --seed 43                  # submit; rerun later to resume or retry
 squeue --me; tail -f ../log/slurm/align_<job>_<task>.log
 ```
 
-Defaults: training uses 2 × H200 with ZeRO-3, micro-batch 1 × 16 accumulation steps, which
-gives chili's effective batch of 32 and the same examples in every update. Eval uses one H200 or
+Defaults: training uses 2 × H200 with ZeRO-2 (`range/ds_zero2.json`), micro-batch 4 × 4 accumulation
+steps (effective batch 32, as on chili) and learning rate 1e-5. Change them with `EFFECTIVE_BATCH`,
+`MICRO_BATCH`, `LEARNING_RATE` and `DS_CONFIG`. The lr comes from a Nov 2026 lr × batch ablation
+(`ablations/lrbs`): compared with 5e-6, it left harmful scores unchanged, cut over-refusal by 3.4 points
+and cost 2 IFEval points. At the same batch and lr, RANGE and chili agree to within training noise, so keep
+both clusters on one setting. Chili uses ZeRO-3 (`sa_data/ds_config.json`). ZeRO-2 needs DeepSpeed ≥ 0.19.6,
+which nlp has since Nov 9, 2026. With gradient accumulation, 0.17.6 to 0.19.5 compute wrong gradients:
+the seed 43/86/129 runs before Nov 9, on 0.18.0, came out bit-identical to the base models. `train.sh`
+refuses ZeRO-2 on those versions unless `ALLOW_ZERO2=1`. Eval uses one H200 or
 H100, whichever frees first (`EVAL_GPU=hopper`; or `h100`, `h200`, `47gb`). At most
-`MAX_TRAIN=4` training and `MAX_EVAL=4` eval jobs run at once. Logs are in `log/slurm/`.
+`MAX_TRAIN=8` training and `MAX_EVAL=16` eval jobs run at once. Logs are in `log/slurm/`.
 
 Notes:
 - The first training job JIT-compiles DeepSpeed's FusedAdam into `~/.cache/torch_extensions`.

@@ -28,9 +28,11 @@ Usage: range/train.sh [options] [-- align.py options]
 
 Jobs whose checkpoint is saved (or evaluated) are skipped, so rerunning resumes; rerun
 after failures. Each training job uses TRAIN_NGPUS (2) x TRAIN_GPU (h200) with
-EFFECTIVE_BATCH (32) examples per update; see range/common.sh for the other settings.
+EFFECTIVE_BATCH (32) examples per update, MICRO_BATCH (4) per GPU, LEARNING_RATE (1e-5) and
+ZeRO-2 (DS_CONFIG); see range/common.sh for the other settings.
 Logs: log/slurm/align_<job>_<task>.log and eval_<job>_<task>.log; the plan of a
 submission is log/slurm/jobs_<time>.tsv (line i+1 = task i).
+DEPENDENCY (e.g. afterany:<job>) delays the training array until that job ends.
 EOF
 }
 
@@ -69,9 +71,31 @@ if (( EFFECTIVE_BATCH % (TRAIN_NGPUS * MICRO_BATCH) )); then
 fi
 # Put first, so accumulation steps given after -- still win.
 [[ -f $DS_CONFIG ]] || { echo "DeepSpeed config not found: $DS_CONFIG" >&2; exit 2; }
+# ZeRO-2 with gradient accumulation computes wrong gradients on DeepSpeed 0.17.6 to 0.19.5
+# (issues #7718, #8224): on 0.18.0, 8B checkpoints came out bit-identical to the base; on 0.18.3,
+# gradients were 1/accumulation^2 of ZeRO-3's. 0.19.6 matches ZeRO-3. Check the DeepSpeed that
+# training will import (TRAIN_VENV's if set).
+if [[ ${ALLOW_ZERO2:-0} != 1 ]]; then
+    bad_zero2=$("${TRAIN_VENV:+$TRAIN_VENV/bin/}python" - "$DS_CONFIG" <<'EOF'
+import json, sys
+from importlib.metadata import version
+from packaging.version import Version
+stage = json.load(open(sys.argv[1])).get("zero_optimization", {}).get("stage")
+deepspeed = Version(version("deepspeed"))
+if stage == 2 and Version("0.17.6") <= deepspeed < Version("0.19.6"):
+    print(deepspeed)
+EOF
+    ) || exit 2
+    if [[ -n $bad_zero2 ]]; then
+        echo "$DS_CONFIG is ZeRO-2, and DeepSpeed $bad_zero2 computes wrong gradients for ZeRO-2 with" \
+             "gradient accumulation (0.17.6 to 0.19.5; issues #7718, #8224). Use DeepSpeed >= 0.19.6, the" \
+             "ZeRO-3 config sa_data/ds_config.json, or set ALLOW_ZERO2=1 to override." >&2
+        exit 2
+    fi
+fi
 align_args=(--deepspeed "$(realpath "$DS_CONFIG")" --per_device_train_batch_size "$MICRO_BATCH"
             --gradient_accumulation_steps $((EFFECTIVE_BATCH / (TRAIN_NGPUS * MICRO_BATCH)))
-            "${settings[@]}" "${align_args[@]}")
+            --learning_rate "$LEARNING_RATE" "${settings[@]}" "${align_args[@]}")
 
 plan=(--ckpt_dir "$output_dir" "${settings[@]}")
 (( ${#models[@]} )) && plan+=(--models "${models[@]}")
@@ -112,6 +136,7 @@ if (( ${#train_lines[@]} )); then
     printf '%s\n' "${train_lines[@]}" > "$train_tsv"
     n=${#train_lines[@]}
     train_id=$(sbatch_or_echo --job-name="align_s$seed" --array="0-$((n - 1))%$MAX_TRAIN" \
+        ${DEPENDENCY:+--dependency="$DEPENDENCY" --kill-on-invalid-dep=yes} \
         --gres="gpu:$TRAIN_GPU:$TRAIN_NGPUS" --cpus-per-task="$TRAIN_CPUS" \
         --mem="$TRAIN_MEM" --time="$TRAIN_TIME" --output="$LOG_DIR/align_%A_%a.log" \
         "$RANGE_DIR/train.sbatch" "$train_tsv" "$output_dir" "${align_args[@]}") || exit
@@ -122,6 +147,8 @@ if (( ${#train_lines[@]} )); then
             --dependency="aftercorr:$train_id" "${eval_opts[@]}" \
             --output="$LOG_DIR/eval_%A_%a.log" \
             "$RANGE_DIR/eval.sbatch" "$train_tsv" 1 --output_dir "$results_dir") || exit
+        # Training task i releases (or, if it fails, cancels) eval task i itself; see train.sbatch.
+        (( dry_run )) || echo "$eval_id" > "$train_tsv.eval_id"
         echo "Evaluation: array $eval_id on 1 x $EVAL_GPU, each after its training job"
     fi
 fi

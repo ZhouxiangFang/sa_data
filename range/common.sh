@@ -1,18 +1,26 @@
 # Shared by the range (Rice RANGE cluster, Slurm) launchers and batch scripts; source it.
 # Sets up the nlp environment and holds the Slurm defaults, which the environment overrides:
 #
-#   TRAIN_GPU=h200 TRAIN_NGPUS=2   GPUs per training job (ZeRO-3 full fine-tuning)
+#   TRAIN_GPU=h200 TRAIN_NGPUS=2   GPUs per training job (full fine-tuning)
 #   EVAL_GPU=hopper                GPU of an eval/diversity job: hopper (an H200 or an H100,
 #                                  whichever frees first), or one type: h100, h200, 47gb
-#   MAX_TRAIN=4 MAX_EVAL=4         Jobs of one array that may run at once
+#   MAX_TRAIN=8 MAX_EVAL=16        Jobs of one array that may run at once (8 training
+#                                  jobs use 16 of the 64 H200s)
 #   TRAIN_TIME/EVAL_TIME=04:00:00  Wall time per job (partition maximum: 1 day)
-#   EFFECTIVE_BATCH=32             Examples per optimizer update, as on chili (4 GPUs x 1 x 8)
-#   MICRO_BATCH=4                  Per-GPU micro-batch; accumulation steps are derived (4)
-#   DS_CONFIG=range/ds_zero2.json  DeepSpeed config. ZeRO-2 keeps the parameters on every GPU
-#                                  (about 72 GB of an H200's 141 GB), so unlike ZeRO-3 it gathers no
-#                                  weights in each forward and backward pass; sa_data/ds_config.json is
-#                                  chili's ZeRO-3 one. Each update still has the same 32 examples.
+#   EFFECTIVE_BATCH=32             Examples per optimizer update, as on chili (4 GPUs x 1 x 8). Keep
+#                                  RANGE and chili on the same batch and lr: at equal settings their
+#                                  results agree to within training noise, so seeds can be pooled.
+#   MICRO_BATCH=4                  Per-GPU micro-batch; accumulation steps are derived (4 on 2 GPUs).
+#                                  Same updates as micro-batch 1, about 3x faster.
+#   LEARNING_RATE=1e-5             Peak learning rate (align.py: cosine schedule, 10% warmup). In the
+#                                  Nov 2026 lr x batch ablation (ablations/lrbs), 1e-5 vs 5e-6 left
+#                                  harmful unchanged, cut over-refusal 3.4 points, cost 2 IFEval points.
+#   DS_CONFIG=range/ds_zero2.json  ZeRO-2. Needs DeepSpeed >= 0.19.6 (in nlp since Nov 9, 2026): 0.17.6
+#                                  to 0.19.5 compute wrong gradients with accumulation, and train.sh
+#                                  refuses those unless ALLOW_ZERO2=1. sa_data/ds_config.json (chili's
+#                                  ZeRO-3) gives the same updates.
 #   PARTITION=commons ACCOUNT=     Slurm partition / account (account: the default one)
+#   TRAIN_VENV=                    Train in this venv over the nlp env (another DeepSpeed version)
 
 RANGE_DIR=${RANGE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
 SA_DIR=$(dirname -- "$RANGE_DIR")
@@ -27,8 +35,8 @@ TRAIN_GPU=${TRAIN_GPU:-h200} TRAIN_NGPUS=${TRAIN_NGPUS:-2}
 TRAIN_CPUS=${TRAIN_CPUS:-16} TRAIN_MEM=${TRAIN_MEM:-128G} TRAIN_TIME=${TRAIN_TIME:-04:00:00}
 EVAL_GPU=${EVAL_GPU:-hopper}
 EVAL_CPUS=${EVAL_CPUS:-8} EVAL_MEM=${EVAL_MEM:-64G} EVAL_TIME=${EVAL_TIME:-04:00:00}
-MAX_TRAIN=${MAX_TRAIN:-4} MAX_EVAL=${MAX_EVAL:-4}
-EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32} MICRO_BATCH=${MICRO_BATCH:-4}
+MAX_TRAIN=${MAX_TRAIN:-8} MAX_EVAL=${MAX_EVAL:-16}
+EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32} MICRO_BATCH=${MICRO_BATCH:-4} LEARNING_RATE=${LEARNING_RATE:-1e-5}
 DS_CONFIG=${DS_CONFIG:-$RANGE_DIR/ds_zero2.json}
 STAMP=$(date +%Y%m%d_%H%M%S)
 
