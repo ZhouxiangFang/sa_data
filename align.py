@@ -18,9 +18,10 @@ run settings; drawn and saved there by the first run or diversity score that
 needs them), so every model trained with a seed, and its diversity score, use
 the same examples; the log prints each file with its SHA-256. The checkpoint
 name ends in _seed<seed>, and eval.py writes its results to <results>/seed<seed>/
-(IF results to <results>/seed<seed>/if_eval/). With four GPUs, the default
-micro-batch of 1 and eight accumulation steps give an effective batch size of
-32 examples. train_jobs.py lists the jobs of a whole run.
+(IF results to <results>/seed<seed>/if_eval/). Each optimizer update uses
+--effective_batch_size examples (default 32) at learning rate 1e-5; with four
+GPUs and the default micro-batch of 1 that is eight accumulation steps.
+train_jobs.py lists the jobs of a whole run.
 
 Use --alignment_dataset gretel --abbr information_hazards for Gretel's
 risk categories. Gretel safe_response supplies the response training target.
@@ -133,7 +134,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument(
-        "--learning_rate", "--lr", dest="learning_rate", type=float, default=5e-6
+        "--learning_rate", "--lr", dest="learning_rate", type=float, default=1e-5
     )
     parser.add_argument(
         "--per_device_train_batch_size",
@@ -141,7 +142,15 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Micro-batch per GPU (default: 1, conservative for 4096-token inputs).",
     )
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    parser.add_argument(
+        "--effective_batch_size",
+        type=int,
+        default=32,
+        help=(
+            "Examples per optimizer update over all GPUs (default: 32). Gradient "
+            "accumulation is this / (GPUs x micro-batch), e.g. 8 steps on four GPUs."
+        ),
+    )
     parser.add_argument("--lr_scheduler_type", default="cosine")
     parser.add_argument("--warmup_ratio", type=float, default=0.1)
     parser.add_argument("--weight_decay", type=float, default=0.01)
@@ -207,8 +216,14 @@ def parse_args() -> argparse.Namespace:
         parser.error("--learning_rate must be positive")
     if args.per_device_train_batch_size <= 0:
         parser.error("--per_device_train_batch_size must be positive")
-    if args.gradient_accumulation_steps <= 0:
-        parser.error("--gradient_accumulation_steps must be positive")
+    # The DeepSpeed launcher sets WORLD_SIZE before this script starts.
+    per_step = int(os.environ.get("WORLD_SIZE", "1")) * args.per_device_train_batch_size
+    if args.effective_batch_size <= 0 or args.effective_batch_size % per_step:
+        parser.error(
+            f"--effective_batch_size must be a positive multiple of GPUs x micro-batch "
+            f"({per_step}), got {args.effective_batch_size}"
+        )
+    args.gradient_accumulation_steps = args.effective_batch_size // per_step
     if not 0.0 <= args.warmup_ratio <= 1.0:
         parser.error("--warmup_ratio must be between 0 and 1")
     if args.weight_decay < 0:

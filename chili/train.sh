@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+lre#!/usr/bin/env bash
 # Train one run's alignment jobs (align.py, DeepSpeed) on chili's 4-GPU groups.
 set -uo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
@@ -23,6 +23,9 @@ Usage: chili/train.sh [options] [-- align.py options]
 Jobs whose checkpoint is saved (or evaluated) are skipped, so rerunning resumes.
 Each job's log is log/align_<checkpoint>_<time>.log. GPU_GROUPS (default
 "0,1,2,3 4,5,6,7") lists the GPU groups; a group takes the next job when it is free.
+EFFECTIVE_BATCH (default 32, examples per optimizer update over a group's GPUs) and
+LEARNING_RATE (default 1e-5) set align.py's training; the checkpoint name does not
+record them, so give other values their own --output_dir and --results_dir.
 EOF
 }
 
@@ -47,6 +50,8 @@ while (( $# )); do
     esac
 done
 output_dir=${output_dir:-/scratch/zf28/ckpts/seed$seed}
+EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32}
+LEARNING_RATE=${LEARNING_RATE:-1e-5}
 settings=(--group_by "$group_by" --num_train "$num_train" --harmful_rate "$harmful_rate"
           --general_rate "$general_rate" --seed "$seed")
 
@@ -66,6 +71,7 @@ while IFS=$'\t' read -r model dataset abbr checkpoint status; do
 done <<< "$jobs_tsv"
 echo "Seed $seed, $group_by groups, $num_train examples: ${count[train]} to train," \
      "${count[saved]} saved, ${count[done]} evaluated. Checkpoints: $output_dir"
+echo "Effective batch $EFFECTIVE_BATCH, learning rate $LEARNING_RATE"
 (( ${#job_model[@]} )) || exit 0
 
 job_label() { printf '%s' "$(basename "${job_ckpt[$1]}")"; }
@@ -77,7 +83,8 @@ run_job() {
     env -u CUDA_VISIBLE_DEVICES deepspeed --include="localhost:$2" --master_port="$3" \
         "$SA_DIR/align.py" --model "${job_model[i]}" --alignment_dataset "${job_dataset[i]}" \
         --abbr "${job_abbr[i]}" --output_dir "$output_dir" --overwrite_output_dir \
-        "${settings[@]}" "${align_args[@]}" >> "$log" 2>&1
+        "${settings[@]}" --effective_batch_size "$EFFECTIVE_BATCH" \
+        --learning_rate "$LEARNING_RATE" "${align_args[@]}" >> "$log" 2>&1
 }
 
 read -ra groups <<< "${GPU_GROUPS:-0,1,2,3 4,5,6,7}"
