@@ -72,6 +72,30 @@ def result_files(output_dir, name):
             os.path.join(if_dir, f"{prefix}_if_summary.csv"))
 
 
+def release(llm, timeout=120):
+    """Stop vLLM's engine and wait until the GPU memory it held is free again.
+
+    vLLM 0.11 runs the engine in a child process that is still exiting when `del llm`
+    returns, so WildGuard's engine then found 7 of 93 GiB free on an H100 and refused to
+    start (range, 2026-11-05). Waits for vLLM's default 90% to be free.
+    """
+    import time
+
+    import torch
+
+    engine_core = getattr(llm.llm_engine, "engine_core", None)
+    if engine_core is not None:
+        engine_core.shutdown()
+    gc.collect()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        free, total = torch.cuda.mem_get_info()
+        if free >= 0.9 * total:
+            break
+        time.sleep(2)
+    torch.cuda.empty_cache()
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -133,9 +157,8 @@ def main(argv=None):
     datasets = eval_safe.load_test_sets(args.datasets, args.limit)
     eval_safe.generate(llm, tokenizer, datasets, permit=args.permit)
     print("\nReleasing the model for the guard...")
+    release(llm)
     del llm
-    gc.collect()
-    torch.cuda.empty_cache()
 
     guard = LLM(model=guard_id)
     eval_safe.judge(guard_id, guard, datasets)
