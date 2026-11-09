@@ -1,4 +1,4 @@
-lre#!/usr/bin/env bash
+#!/usr/bin/env bash
 # Train one run's alignment jobs (align.py, DeepSpeed) on chili's 4-GPU groups.
 set -uo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"

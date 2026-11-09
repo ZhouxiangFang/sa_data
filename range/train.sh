@@ -69,7 +69,7 @@ if (( EFFECTIVE_BATCH % (TRAIN_NGPUS * MICRO_BATCH) )); then
          "TRAIN_NGPUS x MICRO_BATCH = $((TRAIN_NGPUS * MICRO_BATCH))" >&2
     exit 2
 fi
-# Put first, so accumulation steps given after -- still win.
+# Put first, so settings given after -- (e.g. --effective_batch_size) still win.
 [[ -f $DS_CONFIG ]] || { echo "DeepSpeed config not found: $DS_CONFIG" >&2; exit 2; }
 # ZeRO-2 with gradient accumulation computes wrong gradients on DeepSpeed 0.17.6 to 0.19.5
 # (issues #7718, #8224): on 0.18.0, 8B checkpoints came out bit-identical to the base; on 0.18.3,
@@ -93,9 +93,10 @@ EOF
         exit 2
     fi
 fi
+# align.py derives the accumulation steps: effective batch / (GPUs x micro-batch).
 align_args=(--deepspeed "$(realpath "$DS_CONFIG")" --per_device_train_batch_size "$MICRO_BATCH"
-            --gradient_accumulation_steps $((EFFECTIVE_BATCH / (TRAIN_NGPUS * MICRO_BATCH)))
-            --learning_rate "$LEARNING_RATE" "${settings[@]}" "${align_args[@]}")
+            --effective_batch_size "$EFFECTIVE_BATCH" --learning_rate "$LEARNING_RATE"
+            "${settings[@]}" "${align_args[@]}")
 
 plan=(--ckpt_dir "$output_dir" "${settings[@]}")
 (( ${#models[@]} )) && plan+=(--models "${models[@]}")
