@@ -13,6 +13,8 @@ Usage: chili/train.sh [options] [-- align.py options]
   --abbrs ABBR...        Only these groups (default: every non-benign subcategory with
                          enough examples, plus the random and evenly baselines)
   --group_by tactic      Group Gretel's harmful prompts by jailbreak tactic
+  --group_by selection   Train on the subsets select_data.py saved for the seed (--abbrs
+                         then names subsets, e.g. semantic_vendi_bge-m3; default: all)
   --num_train N          Examples per job (default: 1800)
   --harmful_rate R       Harmful fraction (default: 1/3)
   --general_rate R       General-instruction fraction (default: 1/3); benign gets the rest

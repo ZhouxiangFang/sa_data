@@ -22,8 +22,9 @@ BENIGN_DATA_TYPES = ("vanilla_benign", "adversarial_benign", "mix")
 # contribute more), while "evenly" gives each subcategory the same share.
 BASELINE_ABBRS = ("random", "evenly")
 # How training prompts are grouped: by safety subcategory, or (Gretel only) by
-# jailbreak tactic, for both training (align.py) and diversity scoring.
-GROUP_BYS = ("subcategory", "tactic")
+# jailbreak tactic, for both training (align.py) and diversity scoring; or, for
+# training only, "selection": a subset chosen by select_data.py (load_selection).
+GROUP_BYS = ("subcategory", "tactic", "selection")
 # A run is one seed, shared by every stage: the sampled examples (sample_examples),
 # the training order, the checkpoint name (_seed<seed>), the result folders and
 # the diversity scores. Each seed's outputs live in its own seed<seed> folder:
@@ -484,8 +485,47 @@ def select_tactic(df, dataset_name, abbr, harmful_count=None):
     return pools[abbr]
 
 
-def load_harmful_group(dataset_name, abbr, harmful_count=None, group_by="subcategory"):
-    """Training rows for one subcategory or tactic (or a baseline over them)."""
+def selection_csv(seed, dataset_name, name, count):
+    """select_data.py's subset file: data/seed<seed>/<dataset>/<name>_<count>.csv."""
+    return Path(DATA_DIR) / seed_dir(seed) / dataset_name / f"{name}_{count}.csv"
+
+
+def selection_names(seed, dataset_name, count):
+    """Names of the subsets of `count` examples selected for a seed and dataset."""
+    suffix = f"_{count}.csv"
+    folder = selection_csv(seed, dataset_name, "", count).parent
+    return sorted(path.name[:-len(suffix)] for path in folder.glob(f"*{suffix}"))
+
+
+def load_selection(seed, dataset_name, name, count):
+    """The prompt/response rows of a selected subset, checked against its pool.
+
+    The subset must hold exactly `count` distinct prompts, each with its response
+    from the pool select_data.py selects from (the random baseline's pool).
+    """
+    path = selection_csv(seed, dataset_name, name, count)
+    if not path.is_file():
+        raise ValueError(f"No selected subset {path}; run select_data.py (chili/select.sh) first")
+    # Keep prompts such as "None" or "N/A" as text.
+    rows = pd.read_csv(path, keep_default_na=False, dtype=str)
+    if not {"prompt", "response"} <= set(rows) or len(rows) != count:
+        raise ValueError(f"{path}: expected {count:,} prompt/response rows, found {len(rows):,}")
+    if rows["prompt"].duplicated().any():
+        raise ValueError(f"{path} repeats a prompt")
+    pool = load_harmful_subcategory(dataset_name, "random", count)
+    available = set(zip(pool["prompt"], pool["response"]))
+    if not all(pair in available for pair in zip(rows["prompt"], rows["response"])):
+        raise ValueError(f"{path} holds examples that are not in the {dataset_name} pool; "
+                         "select the subset again")
+    return rows[["prompt", "response"]]
+
+
+def load_harmful_group(dataset_name, abbr, harmful_count=None, group_by="subcategory",
+                       seed=None):
+    """Training rows for one subcategory or tactic (or a baseline over them), or, with
+    group_by selection, the subset `abbr` selected for `seed`."""
+    if group_by == "selection":
+        return load_selection(seed, dataset_name, abbr, harmful_count)
     if group_by == "tactic":
         return select_tactic(load_safety_dataset(dataset_name, "train"), dataset_name,
                              abbr, harmful_count)
@@ -658,7 +698,7 @@ def sample_paths(samples_dir, seed, *, dataset_name, abbr, harmful_count,
                  general_dataset=None, general_count=0, max_length=DEFAULT_MAX_LENGTH):
     """Files holding the parts of one run's sample, found from the seed and the run settings.
 
-    <samples_dir>/seed<seed>/<dataset>[_tactic]/<abbr>_<count>.jsonl     harmful
+    <samples_dir>/seed<seed>/<dataset>[_tactic|_selection]/<abbr>_<count>.jsonl     harmful
     <samples_dir>/seed<seed>/wildjailbreak/<benign_data_type>_<count>.jsonl
     <samples_dir>/seed<seed>/general/<general dataset stem>_<count>.jsonl
     A --max_length other than 4096 adds _len<max_length>. Parts with no
@@ -666,7 +706,7 @@ def sample_paths(samples_dir, seed, *, dataset_name, abbr, harmful_count,
     """
     base = Path(samples_dir) / seed_dir(seed)
     length = "" if max_length == DEFAULT_MAX_LENGTH else f"_len{max_length}"
-    folder = f"{dataset_name}_tactic" if group_by == "tactic" else dataset_name
+    folder = dataset_name if group_by == "subcategory" else f"{dataset_name}_{group_by}"
     return {
         "harmful": base / folder / f"{abbr}_{harmful_count}{length}.jsonl" if harmful_count else None,
         "benign": (base / "wildjailbreak" / f"{benign_data_type}_{benign_count}{length}.jsonl"
@@ -859,7 +899,8 @@ def build_training_data(
 
     group_by = getattr(args, "group_by", "subcategory")
     harmful_pool = harmful_pool if harmful_pool is not None else (
-        load_harmful_group(args.alignment_dataset, args.abbr, harmful_count, group_by)
+        load_harmful_group(args.alignment_dataset, args.abbr, harmful_count, group_by,
+                           seed=args.seed)
         if harmful_count
         else pd.DataFrame(columns=["prompt", "response"])
     )

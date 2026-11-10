@@ -35,6 +35,13 @@ Use --group_by tactic (Gretel only) to train on one jailbreak tactic instead,
 e.g. --alignment_dataset gretel --group_by tactic --abbr phishing. Tactic rows
 pass the same filters as the subcategories (helper.tactic_pools); random and
 evenly then pool the tactics with enough rows for harmful_count.
+
+Use --group_by selection to train on a subset chosen by select_data.py: --abbr is
+then the subset's name, e.g. --abbr semantic_vendi_bge-m3 or --abbr lexical_hdd,
+read from data/seed<seed>/<dataset>/<abbr>_<harmful count>.csv. The harmful part is
+that whole subset (it must hold exactly the harmful count), and the benign and
+general parts are the seed's usual samples. Train these runs into their own
+--output_dir and evaluate them into ablations/selected (chili/run.sh --selected).
 """
 
 import argparse
@@ -98,8 +105,9 @@ def parse_args() -> argparse.Namespace:
         "--group_by",
         choices=GROUP_BYS,
         default="subcategory",
-        help=("Select harmful prompts by subcategory, or by jailbreak tactic "
-              "(gretel only; --abbr is then a tactic abbreviation)."),
+        help=("Select harmful prompts by subcategory, by jailbreak tactic (gretel only; "
+              "--abbr is then a tactic abbreviation), or take a subset chosen by "
+              "select_data.py (selection; --abbr is then the subset's name)."),
     )
     parser.add_argument(
         "--num_train",
