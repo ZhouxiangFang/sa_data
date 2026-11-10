@@ -29,6 +29,11 @@ done
 if grep -q '595\.84' /proc/driver/nvidia/version 2>/dev/null; then
     export LD_LIBRARY_PATH="/home/zf28/align/.nvidia-595.84/compute-lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
+# Compile caches go to the local /scratch, not the NFS home: DeepSpeed warns that Triton's
+# cache there (~/.triton) can hang when a job exits, and vLLM's torch.compile cache
+# (~/.cache/vllm) grows by about 50 MB per evaluated model. range/common.sh does the same.
+export TRITON_CACHE_DIR=${TRITON_CACHE_DIR:-/scratch/zf28/triton_cache}
+export VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT:-/scratch/zf28/vllm_cache}
 export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=${OMP_NUM_THREADS:-4}
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 
