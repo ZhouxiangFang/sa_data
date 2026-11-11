@@ -11,6 +11,8 @@ figs/. Every output file name starts with the dataset.
 
 The metrics are the lexical_*, semantic_* and structural_* columns written by
 calculate_diversity.py, whose ↑/↓ suffix gives the direction of more diversity.
+Correlations are computed for every metric; figures show only the 12 in
+FIGURE_METRICS.
 By default three figures, <dataset>_average_<group>_diversity_vs_harmful.png for
 the lexical, semantic and structural groups (one scatter panel per metric in the
 group against the equally weighted model-mean harmful score), and
@@ -21,8 +23,7 @@ the plotted scores (<dataset>_diversity_safety_scores.csv and per-test CSVs).
 Bar charts display bounded ratios (HD-D, Distinct, Self-BLEU) as percentages and
 other metrics in their original units. CSV exports keep the original units.
 Figures show, average and rank Pearson and Spearman coefficients only; Kendall
-(largely redundant with Spearman) is kept in the correlation CSVs. Figures also
-omit POS Self-BLEU-1, which saturates near 0.999; the CSVs keep it.
+(largely redundant with Spearman) is kept in the correlation CSVs.
 Safety uses the precomputed Avg harmful_score_pct (lower is safer), matching
 plot_bars_overall.py, for the --models models (default: llama3.1 mistral olmo2
 qwen2.5). The per-test plots use each test dataset's harmful score,
@@ -109,8 +110,17 @@ METRICS = {
     column: (label, -1 if column.endswith("↓") else 1, GROUPS[column.split("_", 1)[0]][1])
     for column, label in LABELS.items()
 }
-# Self-BLEU-1 saturates near 0.999 on POS tags; CSVs keep it, figures leave it out.
-FIGURE_METRICS = [metric for metric in METRICS if metric != "structural_self_bleu_1↓"]
+# The metrics figures show; CSVs keep every metric. Left out (Spearman across
+# subcategory samples, seeds 43/86/129, both embedders): Distinct-4 (0.97-0.99
+# with Distinct-3), radius (0.99-1.00 with DistSum), Self-BLEU-1 (saturates near
+# 0.999), Self-BLEU-2/3 (one high order is shown), KNN-5/10 (0.91-0.99 with KNN-3
+# except KNN-10 on Aegis) and POS n-gram Vendi.
+FIGURE_METRICS = [
+    "lexical_hdd↑", "lexical_distinct_2↑", "lexical_distinct_3↑",
+    "semantic_vendi↑", "semantic_distsum_cosine↑", "semantic_cluster_inertia↑",
+    "structural_self_bleu_4↓", "structural_self_bleu_5↓", "structural_distinct_1_4↑",
+    "structural_pos_vendi↑", "structural_knn_cosine_1↑", "structural_knn_cosine_3↑",
+]
 # Bounded ratios that bar charts display as percentages.
 PERCENT_METRICS = {"lexical_hdd↑", "structural_distinct_1_4↑",
                    *(f"lexical_distinct_{n}↑" for n in (2, 3, 4)),

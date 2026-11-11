@@ -7,7 +7,8 @@ diversity/<model>/csv/<dataset>_diversity_safety_correlations.csv
 bge-m3 and qwen3-embedding-0.6b, the calculate_diversity.py defaults). Rows are grouped structural, lexical, then
 semantic, and sorted alphabetically within each group. In each group, the
 lowest (most negative: more diversity, less harm) value of every model column is
-marked **bold** (Markdown). POS Self-BLEU-1 is left out, as in the figures.
+marked **bold** (Markdown). Every metric is listed except POS Self-BLEU-1, which
+saturates near 0.999, including those the figures leave out.
 
 Example:
     python sa_data/summarize_diversity.py --datasets wildguardmix aegis gretel
@@ -18,10 +19,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from plot_bars_diversity import FIGURE_METRICS, PLOT_METHODS
+from plot_bars_diversity import METRICS, PLOT_METHODS
 from plot_bars_overall import DIVERSITY_DIR
 
 GROUP_ORDER = ('structural', 'lexical', 'semantic')
+SUMMARY_METRICS = [metric for metric in METRICS if metric != 'structural_self_bleu_1↓']
 # Folders of calculate_diversity.EMBEDDING_MODEL_IDS, the default embedding models.
 DEFAULT_EMBEDDERS = ('bge-m3', 'qwen3-embedding-0.6b')
 
@@ -40,7 +42,7 @@ def correlation_table(diversity_dir, dataset, embedders=DEFAULT_EMBEDDERS):
             columns[model_dir.name] = table.groupby('metric')['coefficient'].mean()
     if not columns:
         raise FileNotFoundError(f'No {dataset} correlation CSVs under {diversity_dir}')
-    return pd.DataFrame(columns).reindex(FIGURE_METRICS)
+    return pd.DataFrame(columns).reindex(SUMMARY_METRICS)
 
 
 def ranked(table):
