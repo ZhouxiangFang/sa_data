@@ -21,7 +21,7 @@ part from one jailbreak tactic; results in ablations/gretel_tactic/seed<seed>/.
 --selected runs the selected-data setting instead: the default mixture, with the harmful
 part a 600-example subset chosen by select_data.py (one run per diversity metric and
 baseline strategy; data/seed<seed>/<dataset>/); results in ablations/selected/seed<seed>/.
---abbrs trains only the named groups, e.g. --selected --abbrs semantic_vendi_bge-m3 lexical_hdd.
+--abbrs trains only the named groups, e.g. --selected --abbrs semantic_vendi_qwen3-embedding-0.6b lexical_hdd.
 
 Stages: select (--selected only), train, eval, diversity, plot (default setting only),
 correlate (not with --selected: its subsets have no diversity CSV); --skip leaves

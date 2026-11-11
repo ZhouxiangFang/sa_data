@@ -77,13 +77,44 @@ class GreedyTests(unittest.TestCase):
             ties = np.flatnonzero(np.isclose(values, best, rtol=1e-9, atol=1e-12))
             self.assertIn(row, ties)
 
-    def test_every_default_metric_matches_brute_force(self):
-        for metric in sd.DEFAULT_METRICS:
+    def test_every_metric_matches_brute_force(self):
+        for metric in sd.ALL_METRICS:
             if metric == 'semantic_cluster_inertia':
                 continue  # not a closed-form metric; see ClusterInertiaTests
             for seed in (0, 1):
                 with self.subTest(metric=metric, seed=seed):
                     self.check_metric(metric, seed)
+
+    def test_strata_limit_the_candidates(self):
+        count, size = 60, 30
+        labels = np.array([0] * 40 + [1] * 20)
+        strata = sd.Strata(labels, ['vanilla', 'adversarial'])
+        initial = strata.initial(9, 3)
+        self.assertEqual(strata.counts(initial), {'vanilla': 6, 'adversarial': 3})
+        for metric in ('semantic_vendi', 'lexical_distinct_2', 'structural_self_bleu_4',
+                       'structural_knn_cosine_3'):
+            with self.subTest(metric=metric):
+                features, embedder = random_features(5, count), FakeEmbedder(count, 5)
+                objective, reference = sd.build_objective(metric, features, embedder, size, 'cpu')
+                minimize = sd.minimized(metric)
+                selected, scores = sd.greedy_select(objective, initial, size, minimize=minimize,
+                                                    strata=strata)
+                self.assertEqual(strata.counts(selected), {'vanilla': 20, 'adversarial': 10})
+                for step, score in enumerate(scores):
+                    before = selected[:len(initial) + step]
+                    values, _ = brute_force_step(reference, before, count, minimize)
+                    # Only rows of strata below their quota compete.
+                    values[strata.room(before, size)[labels] <= 0] = np.nan
+                    best = np.nanmin(values) if minimize else np.nanmax(values)
+                    row = selected[len(before)]
+                    self.assertTrue(math.isclose(values[row], best, rel_tol=1e-9, abs_tol=1e-12))
+                    self.assertTrue(math.isclose(score, values[row], rel_tol=1e-9, abs_tol=1e-12))
+
+    def test_default_metrics_are_the_figure_metrics(self):
+        from plot_bars_diversity import FIGURE_METRICS
+
+        self.assertEqual(list(sd.DEFAULT_METRICS), [m.rstrip('↑↓') for m in FIGURE_METRICS])
+        self.assertTrue(set(sd.DEFAULT_METRICS) <= set(sd.ALL_METRICS))
 
     def test_exact_ties_go_to_the_lowest_row(self):
         class Constant:
@@ -225,6 +256,163 @@ class BaselineTests(unittest.TestCase):
             self.assertGreaterEqual(held[cluster], min(12, sizes[cluster]))
             if start[cluster] <= 12 and sizes.min() >= 12:
                 self.assertEqual(held[cluster], 12)
+
+
+class StratifiedBaselineTests(unittest.TestCase):
+    """Every baseline fills each stratum to its quota, starting from the initial rows."""
+
+    def setUp(self):
+        self.x = FakeEmbedder(120, 6).semantic
+        unit = self.x.astype(np.float64)
+        self.similarity = (unit / np.linalg.norm(unit, axis=1, keepdims=True)) @ (
+            unit / np.linalg.norm(unit, axis=1, keepdims=True)).T
+        rng = np.random.default_rng(1)
+        self.labels = (rng.random(120) < 0.4).astype(np.int64)
+        self.strata = sd.Strata(self.labels, ['vanilla', 'adversarial'])
+        names = ['a', 'b', 'c', 'd']
+        # Group d is small, so evenly runs it dry.
+        self.groups = [(names[i % 3],) for i in range(120)]
+        for row in (5, 17, 40, 77):
+            self.groups[row] = ('d',)
+        self.initial = self.strata.initial(10, 2)
+        self.size = 40
+
+    def select(self, name, **options):
+        selected, scores = sd.build_baseline(
+            name, None if name in sd.POOL_BASELINES else self.x, self.size, 'cpu',
+            strata=self.strata, groups=self.groups, **options)(self.initial)
+        self.assertEqual(selected[:len(self.initial)], self.initial)
+        self.assertEqual(len(set(selected)), self.size)
+        self.assertEqual(len(scores), self.size - len(self.initial))
+        quotas = self.strata.quotas(self.size)
+        self.assertEqual(self.strata.counts(selected),
+                         dict(zip(self.strata.names, quotas.tolist())))
+        return selected, scores
+
+    def test_quotas_follow_the_pool_shares(self):
+        strata = sd.Strata([0] * 6062 + [1] * 4589, ['vanilla', 'adversarial'])
+        self.assertEqual(strata.quotas(600).tolist(), [341, 259])
+        self.assertEqual(strata.quotas(50).tolist(), [28, 22])
+        self.assertEqual(sd.Strata.single(30).quotas(7).tolist(), [7])
+        one, again = strata.initial(50, 43), strata.initial(50, 43)
+        self.assertEqual(one, again)
+        self.assertEqual(strata.counts(one), {'vanilla': 28, 'adversarial': 22})
+        small = sd.Strata([0] * 10 + [1], ['a', 'b'])
+        with self.assertRaises(ValueError):
+            small.quotas(12)  # 11 rows of a for a pool of 10
+        with self.assertRaises(ValueError):
+            small.room([10, 0], 2)  # b's quota for 2 rows is 0
+
+    def test_every_baseline_keeps_the_quotas(self):
+        for name in sd.BASELINES:
+            with self.subTest(name=name):
+                options = {'seed': 3}
+                if name == 'kmeans':
+                    options['n_clusters'] = 3
+                self.select(name, **options)
+
+    def test_greedy_baselines_pick_within_open_strata(self):
+        selected, scores = self.select('kcenter_greedy')
+        for step, score in enumerate(scores):
+            before = selected[:len(self.initial) + step]
+            nearest = (1 - self.similarity[:, before]).min(axis=1)
+            nearest[before] = -1
+            nearest[self.strata.room(before, self.size)[self.labels] <= 0] = -1
+            self.assertAlmostEqual(score, nearest.max(), places=12)
+
+    def test_farthest_ranks_within_strata(self):
+        selected, scores = self.select('farthest')
+        total = (1 - self.similarity).sum(axis=1)
+        picked = selected[len(self.initial):]
+        for stratum in (0, 1):
+            rest = [int(r) for r in np.argsort(-total, kind='stable')
+                    if self.labels[r] == stratum and r not in self.initial]
+            mine = [r for r in picked if self.labels[r] == stratum]
+            self.assertEqual(sorted(mine), sorted(rest[:len(mine)]))
+
+    def test_repr_filter_compares_within_a_stratum(self):
+        selected, scores = self.select('repr_filter', seed=5)
+        for position in range(len(self.initial), self.size):
+            row = selected[position]
+            same = [r for r in selected[:position] if self.labels[r] == self.labels[row]]
+            self.assertAlmostEqual(scores[position - len(self.initial)],
+                                   self.similarity[row, same].max(), places=6)
+        # The picks come in the order the pool was visited.
+        order = np.random.default_rng((5, 1)).permutation(120)
+        position = {int(row): i for i, row in enumerate(order)}
+        picked = selected[len(self.initial):]
+        self.assertEqual(picked, sorted(picked, key=position.get))
+
+    def test_random_depends_on_the_seed(self):
+        one, _ = self.select('random', seed=3)
+        again, _ = self.select('random', seed=3)
+        other, _ = self.select('random', seed=4)
+        self.assertEqual(one, again)
+        self.assertNotEqual(one, other)
+
+    def test_evenly_balances_subcategories_per_stratum(self):
+        selected, _ = self.select('evenly', seed=3)
+        for stratum in (0, 1):
+            pool = [self.groups[r][0] for r in self.strata.rows(stratum)]
+            chosen = [self.groups[r][0] for r in selected if self.labels[r] == stratum]
+            counts = {g: chosen.count(g) for g in set(pool)}
+            open_counts = [c for g, c in counts.items() if c < pool.count(g)]
+            self.assertTrue(open_counts)
+            # Groups that did not run dry differ by at most one row, and the ones that
+            # did hold no more than those.
+            self.assertLessEqual(max(open_counts) - min(open_counts), 1)
+            for g, c in counts.items():
+                self.assertLessEqual(c, max(open_counts))
+        again, _ = self.select('evenly', seed=3)
+        self.assertEqual(selected, again)
+
+
+class PoolTests(unittest.TestCase):
+    def test_strata_from_the_adversarial_flag(self):
+        import pandas as pd
+
+        for values in ([True, False, True], ['True', 'False', 'True'], ['true', 'false', 'true']):
+            strata = sd.pool_strata(pd.DataFrame({'adversarial': values}), 'adversarial')
+            self.assertEqual(strata.names, ['vanilla', 'adversarial'])
+            self.assertEqual(strata.labels.tolist(), [1, 0, 1])
+        self.assertEqual(sd.pool_strata(pd.DataFrame({'adversarial': [True, False]}),
+                                        'none').names, ['all'])
+        self.assertEqual(sd.pool_strata(pd.DataFrame({'prompt': ['a']}), 'adversarial').names,
+                         ['all'])
+        groups = sd.row_groups(pd.DataFrame({'sub_abbrs': [['a', 'b'], [], np.array(['c'])]}))
+        self.assertEqual(groups, [('a', 'b'), ('',), ('c',)])
+
+    def test_stale_csvs(self):
+        import tempfile
+        import pandas as pd
+
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            pd.DataFrame({'prompt': ['a'], 'order': [0]}).to_csv(folder / 'old_1.csv', index=False)
+            pd.DataFrame({'prompt': ['a'], 'stratum': ['vanilla']}).to_csv(
+                folder / 'new_1.csv', index=False)
+            pd.DataFrame({'prompt': ['a'], 'stratum': ['all']}).to_csv(
+                folder / 'flat_1.csv', index=False)
+            self.assertEqual([p.name for p in sd.stale_csvs(folder, 1)], ['old_1.csv'])
+            self.assertEqual([p.name for p in sd.stale_csvs(folder, 1, ['vanilla', 'adversarial'])],
+                             ['flat_1.csv', 'old_1.csv'])
+            self.assertEqual(sd.stale_csvs(folder, 2), [])
+
+    def test_default_jobs(self):
+        from unittest import mock
+
+        with mock.patch.object(sys, 'argv', ['select_data.py']):
+            args = sd.parse_args()
+        self.assertEqual(args.embedding_models, ['Qwen/Qwen3-Embedding-0.6B'])
+        self.assertEqual(args.metrics, list(sd.DEFAULT_METRICS))
+        self.assertEqual(args.baselines, [f'semantic_{name}' for name in sd.EMBEDDING_BASELINES]
+                         + ['random', 'evenly'])
+        self.assertEqual(args.stratify, 'adversarial')
+        with mock.patch.object(sys, 'argv', ['select_data.py', '--baselines', 'qdit',
+                                             'structural_pos_qdit', 'evenly']):
+            args = sd.parse_args()
+        self.assertEqual(args.baselines, ['semantic_qdit', 'structural_pos_qdit', 'evenly'])
+        self.assertEqual([sd.needs_embedding(job) for job in args.baselines], [True, True, False])
 
 
 class BorderedVendiTests(unittest.TestCase):

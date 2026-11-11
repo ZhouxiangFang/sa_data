@@ -383,6 +383,20 @@ def clean_pairs(df: pd.DataFrame) -> pd.DataFrame:
     return df[(df["prompt"] != "") & (df["response"] != "")]
 
 
+def harmful_pairs(df: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
+    """Harmful prompts with a safe response, from every subcategory (the filters of
+    select_harmful_subcategory without the subcategory one)."""
+    column = "prompt_harm_label" if dataset_name in ("wildguardmix", "gretel") else "prompt_label"
+    harmful = normalize_label(df[column]).isin(HARMFUL_LABELS)
+    safe = normalize_label(df["response_harm_label"]).isin(SAFE_LABELS)
+    return clean_pairs(df[harmful & safe])
+
+
+def selection_pool(dataset_name: str) -> pd.DataFrame:
+    """Rows select_data.py selects from (before it drops repeated and overlong prompts)."""
+    return harmful_pairs(load_safety_dataset(dataset_name, "train"), dataset_name)
+
+
 def load_harmful_subcategory(
     dataset_name: str, abbr: str, harmful_count: int | None = None
 ) -> pd.DataFrame:
@@ -501,7 +515,7 @@ def load_selection(seed, dataset_name, name, count):
     """The prompt/response rows of a selected subset, checked against its pool.
 
     The subset must hold exactly `count` distinct prompts, each with its response
-    from the pool select_data.py selects from (the random baseline's pool).
+    from the pool select_data.py selects from (selection_pool: every subcategory).
     """
     path = selection_csv(seed, dataset_name, name, count)
     if not path.is_file():
@@ -512,7 +526,7 @@ def load_selection(seed, dataset_name, name, count):
         raise ValueError(f"{path}: expected {count:,} prompt/response rows, found {len(rows):,}")
     if rows["prompt"].duplicated().any():
         raise ValueError(f"{path} repeats a prompt")
-    pool = load_harmful_subcategory(dataset_name, "random", count)
+    pool = selection_pool(dataset_name)
     available = set(zip(pool["prompt"], pool["response"]))
     if not all(pair in available for pair in zip(rows["prompt"], rows["response"])):
         raise ValueError(f"{path} holds examples that are not in the {dataset_name} pool; "
@@ -810,7 +824,9 @@ def sample_examples(
                           max_length=max_length)
              if samples_dir is not None else {"harmful": None, "benign": None, "general": None})
     harmful_source = f"{group_by} {abbr!r} in {dataset_name}"
-    if abbr in BASELINE_ABBRS and harmful_count:
+    # Selected subsets named random or evenly (select_data.py) are drawn whole, like any subset.
+    baseline = abbr in BASELINE_ABBRS and group_by != "selection"
+    if baseline and harmful_count:
         # Groups pooled by a baseline: tactics in the pool, or baseline_abbrs' subcategories.
         info["baseline_groups"] = (
             sorted({group for groups in harmful_pool["tactic_abbrs"] for group in groups})
@@ -819,7 +835,7 @@ def sample_examples(
         )
 
     def draw_harmful():
-        if abbr != "evenly":
+        if not (baseline and abbr == "evenly"):
             return sample_pairs(harmful_pool, harmful_count, harmful_source, seed, tokenizer,
                                 max_length)
         sample, overlong, counts = sample_evenly(

@@ -1,25 +1,36 @@
 """Selection of a diverse training subset: exact greedy selection under each diversity
 metric, and the selection strategies NovelSum (Yang et al., 2025) compares, as baselines.
 
-For each dataset the candidate pool is the pool of the random and evenly
-baselines (helper.select_harmful_subcategory(..., 'random', size): harmful prompts
-with a safe response, from the subcategories that can supply `size` examples),
-with repeated prompts dropped (the first row is kept) and the prompts align.py
-would skip (at least --max_length tokens) removed.
+For each dataset the candidate pool is every harmful prompt with a safe response,
+from every subcategory (helper.selection_pool), with repeated prompts dropped (the
+first row is kept) and the prompts align.py would skip (at least --max_length
+tokens) removed.
 
-Selection starts from --init_size examples (default 50) drawn uniformly from the
-pool with --seed (default 43); every metric and embedding model starts from the
-same examples. Each step then adds the candidate whose addition gives the best
+Strata (--stratify adversarial, the default): where the pool has an adversarial
+flag (wildguardmix), vanilla and adversarial prompts keep their pool shares in
+every subset: both the initial examples and the final subset take
+round(n * stratum share) rows from each stratum (largest remainders). A selection
+step only considers candidates from strata that are not yet full, so a metric is
+still computed on the whole subset. Pools without the flag form one stratum.
+
+Selection starts from --init_size examples (default 50) drawn uniformly within each
+stratum with --seed (default 43); every metric, embedding model and baseline starts
+from the same examples. Each step then adds the candidate whose addition gives the best
 value of the metric on the whole subset (the largest value, or for Self-BLEU the
 smallest), until the subset has --size examples (default 600). Every candidate
 is scored exactly at every step, with the metric as calculate_diversity.py
 defines it; ties go to the earliest pool row.
 
-Metrics are named as the columns of the diversity CSVs, without the arrow:
-  lexical_hdd  lexical_distinct_2..4
-  semantic_vendi  semantic_distsum_cosine  semantic_cluster_inertia  semantic_radius
-  structural_self_bleu_1..5  structural_distinct_1_4  structural_ngram_vendi
-  structural_pos_vendi  structural_knn_cosine_<k>
+Metrics are named as the columns of the diversity CSVs, without the arrow. The
+default is the 12 the diversity figures show (plot_bars_diversity.FIGURE_METRICS):
+  lexical_hdd  lexical_distinct_2  lexical_distinct_3
+  semantic_vendi  semantic_distsum_cosine  semantic_cluster_inertia
+  structural_self_bleu_4  structural_self_bleu_5  structural_distinct_1_4
+  structural_pos_vendi  structural_knn_cosine_1  structural_knn_cosine_3
+--metrics also takes lexical_distinct_<n>, semantic_radius, structural_self_bleu_<n>,
+structural_ngram_vendi and structural_knn_cosine_<k>. The embedding metrics use
+--embedding_models (default qwen3-embedding-0.6b), on the prompts (semantic_*) or
+on the POS strings (structural_pos_vendi, structural_knn_cosine_*).
 semantic_cluster_inertia is the result of a k-means fit (--n_clusters, default 12,
 as calculate_diversity.py), so it has no closed form. Each step keeps the best
 k-means solution found for the current subset; a candidate's score is the inertia
@@ -32,9 +43,10 @@ be slightly below the value calculate_diversity.py reports for the same subset,
 which keeps only the fresh fit.
 
 Baselines (--baselines, default all) select with a strategy of their own instead
-of a metric. Each runs on the prompt embeddings (semantic_<name>) and on the POS
-string embeddings (structural_pos_<name>) of every embedding model, from the same
-pool and the same initial examples, to the same size. Distances are cosine.
+of a metric, from the same pool and initial examples, to the same size and stratum
+quotas. The NovelSum strategies run on the prompt embeddings (semantic_<name>) of
+every embedding model; distances are cosine. (structural_pos_<name> runs one on
+the POS string embeddings instead, only when named in full.)
   kcenter_greedy  adds the row farthest from its nearest selected row (Sener &
                   Savarese, 2018). score: that distance.
   qdit            adds the row that most raises Facility Location, the sum over the
@@ -48,24 +60,35 @@ pool and the same initial examples, to the same size. Distances are cosine.
   farthest        ranks the pool once by total distance to all other rows and takes
                   the most distant rows. score: that total.
   repr_filter     visits the pool in random order and keeps a row if its similarity
-                  to every kept row is below a threshold (Liu et al., 2023). The
-                  threshold is the lowest one that still yields `size` rows (found by
-                  bisection), since a fixed value does not transfer between embedding
-                  models. score: the row's largest similarity when kept.
-  kmeans          clusters the pool with k-means (--n_clusters) and draws the same
-                  number of rows from each cluster at random; the initial examples
-                  count toward their clusters. score: the row's cluster.
+                  to every kept row of its stratum is below a threshold (Liu et al.,
+                  2023). Each stratum's threshold is the lowest one that still fills
+                  its quota (found by bisection), since a fixed value does not transfer
+                  between embedding models. score: the row's largest similarity when kept.
+  kmeans          clusters each stratum with k-means (--n_clusters) and draws the
+                  same number of rows from each cluster at random; the initial
+                  examples count toward their clusters. score: the row's cluster.
+and two that need no embedding (named random and evenly, as the training baselines,
+but drawn from this pool and these initial examples):
+  random          draws the rest of each stratum's quota uniformly. score: empty.
+  evenly          fills each stratum's quota across its subcategories as evenly as
+                  possible: each step draws a random row from the subcategory with the
+                  fewest rows so far (the smaller subcategory on ties), so subcategories
+                  that run out pass their share on. An initial example counts toward
+                  the least-filled of its subcategories. score: empty.
 kcenter_greedy, qdit and novelselect are deterministic given the initial examples;
-repr_filter and kmeans also draw from --seed.
+repr_filter, kmeans, random and evenly also draw from --seed.
 
 Results go to data/seed<seed>/<dataset>/<metric>_<size>.csv, or
 <metric>_<embedding model>_<size>.csv for the metrics and baselines that use an
 embedding model (semantic_*, structural_pos_*, structural_knn_cosine_*). A CSV
 holds the pool rows of the subset in selection order, with pool_index (the row's
-index in the loaded dataset), order (0 for the initial examples, then 1, 2, ...)
-and score (for a metric, its value on the subset once that row was added; for a
-baseline, see above, empty for the initial examples). Existing CSVs are kept
-unless --overwrite is given, so an interrupted run resumes.
+index in the loaded dataset), stratum (vanilla / adversarial, or all), order (0
+for the initial examples, then 1, 2, ...) and score (for a metric, its value on
+the subset once that row was added; for a baseline, see above, empty for the
+initial examples). Existing CSVs are kept unless --overwrite is given, so an
+interrupted run resumes. A CSV without the stratum column of this run (made before
+stratified selection, or with another --stratify) stops the run until it is
+moved away, since training lists every CSV in the folder.
 
 How each step stays exact and fast (all candidates are scored at once):
   distsum, radius   running sums of the embeddings
@@ -81,10 +104,10 @@ How each step stays exact and fast (all candidates are scored at once):
                     of a secular equation, found for all candidates in parallel
 
 Examples:
-    python select_data.py                       # three datasets, every metric, seed 43
+    python select_data.py                       # three datasets, 12 metrics + 8 baselines
     python select_data.py --datasets aegis --metrics semantic_vendi lexical_hdd
     python select_data.py --embedding_models bge-m3 --size 300 --seed 44
-    python select_data.py --metrics --baselines qdit kmeans     # only two baselines
+    python select_data.py --metrics --baselines qdit random     # only two baselines
 """
 
 import argparse
@@ -108,12 +131,14 @@ from helper import (
     DEFAULT_MAX_LENGTH,
     DEFAULT_SEED,
     formatted_prompt_lengths,
-    select_harmful_subcategory,
+    selection_pool,
 )
 
 DATASETS = cd.SUPPORTED['train']
 EMBEDDING_MODELS = {cd.embedding_name(model_id): model_id for model_id in cd.EMBEDDING_MODEL_IDS}
-DEFAULT_METRICS = (
+DEFAULT_EMBEDDING_MODELS = ('qwen3-embedding-0.6b',)
+# Every metric calculate_diversity.py reports (with its default orders and k).
+ALL_METRICS = (
     'lexical_hdd',
     *(f'lexical_distinct_{n}' for n in cd.LEXICAL_DISTINCT_ORDERS),
     'semantic_vendi', 'semantic_distsum_cosine', 'semantic_cluster_inertia', 'semantic_radius',
@@ -121,7 +146,19 @@ DEFAULT_METRICS = (
     'structural_distinct_1_4', 'structural_ngram_vendi', 'structural_pos_vendi',
     *(f'structural_knn_cosine_{k}' for k in cd.KNN_KS),
 )
-BASELINES = ('novelselect', 'kcenter_greedy', 'repr_filter', 'qdit', 'kmeans', 'farthest')
+# The metrics the diversity figures show (plot_bars_diversity.FIGURE_METRICS; a test
+# keeps the two lists equal without importing the plotting code here).
+DEFAULT_METRICS = (
+    'lexical_hdd', 'lexical_distinct_2', 'lexical_distinct_3',
+    'semantic_vendi', 'semantic_distsum_cosine', 'semantic_cluster_inertia',
+    'structural_self_bleu_4', 'structural_self_bleu_5', 'structural_distinct_1_4',
+    'structural_pos_vendi', 'structural_knn_cosine_1', 'structural_knn_cosine_3',
+)
+# NovelSum's strategies, run on embeddings, and the two pool baselines, which need none.
+EMBEDDING_BASELINES = ('novelselect', 'kcenter_greedy', 'repr_filter', 'qdit', 'kmeans',
+                       'farthest')
+POOL_BASELINES = ('random', 'evenly')
+BASELINES = EMBEDDING_BASELINES + POOL_BASELINES
 BASELINE_KINDS = {'semantic_': 'semantic', 'structural_pos_': 'structural'}
 METRIC_PATTERN = re.compile(
     r'lexical_hdd|lexical_distinct_([1-9])|semantic_(?:vendi|distsum_cosine|cluster_inertia|radius)'
@@ -134,9 +171,12 @@ def needs_embedding(metric):
 
 
 def baseline_parts(job):
-    """('semantic' | 'structural', baseline name) of a baseline job, or None for a metric."""
+    """(kind, baseline name) of a baseline job, or None for a metric. The kind is
+    'semantic' or 'structural' (the embeddings it runs on), or 'pool' for random/evenly."""
+    if job in POOL_BASELINES:
+        return 'pool', job
     for prefix, kind in BASELINE_KINDS.items():
-        if job.startswith(prefix) and job[len(prefix):] in BASELINES:
+        if job.startswith(prefix) and job[len(prefix):] in EMBEDDING_BASELINES:
             return kind, job[len(prefix):]
     return None
 
@@ -153,6 +193,58 @@ def metric_number(metric):
 def output_path(output_dir, seed, dataset, metric, embedding, size):
     name = f'{metric}_{embedding}_{size}.csv' if embedding else f'{metric}_{size}.csv'
     return Path(output_dir) / f'seed{seed}' / dataset / name
+
+
+class Strata:
+    """Pool rows split into strata whose shares every subset keeps (vanilla and
+    adversarial prompts): a subset of n rows holds quotas(n) rows of each stratum."""
+
+    def __init__(self, labels, names):
+        self.labels = np.asarray(labels, dtype=np.int64)
+        self.names = list(names)
+        self.sizes = np.bincount(self.labels, minlength=len(self.names))
+
+    @classmethod
+    def single(cls, count, name='all'):
+        return cls(np.zeros(count, dtype=np.int64), [name])
+
+    def __len__(self):
+        return len(self.names)
+
+    def rows(self, stratum):
+        return np.flatnonzero(self.labels == stratum)
+
+    def quotas(self, total):
+        """Rows per stratum in a subset of `total`: the pool shares, rounded by largest
+        remainders (ties to the first stratum)."""
+        exact = self.sizes * total / self.sizes.sum()
+        quotas = np.floor(exact).astype(np.int64)
+        for stratum in np.argsort(-(exact - quotas), kind='stable')[:total - quotas.sum()]:
+            quotas[stratum] += 1
+        if (quotas > self.sizes).any():
+            raise ValueError(f'A subset of {total} needs {quotas.tolist()} rows from strata '
+                             f'{self.names} of sizes {self.sizes.tolist()}')
+        return quotas
+
+    def room(self, selected, total):
+        """Rows each stratum still needs for a subset of `total` holding `selected`."""
+        room = self.quotas(total) - np.bincount(self.labels[list(selected)],
+                                                minlength=len(self.names))
+        if (room < 0).any():
+            raise ValueError(f'The rows {list(selected)[:5]}... exceed the stratum quotas '
+                             f'{self.quotas(total).tolist()} of a subset of {total}')
+        return room
+
+    def initial(self, size, seed):
+        """`size` rows drawn uniformly within each stratum, in pool order."""
+        rng = np.random.default_rng(seed)
+        quotas = self.quotas(size)
+        return sorted(int(row) for stratum in range(len(self))
+                      for row in rng.choice(self.rows(stratum), quotas[stratum], replace=False))
+
+    def counts(self, rows):
+        return dict(zip(self.names, np.bincount(self.labels[list(rows)],
+                                                minlength=len(self.names)).tolist()))
 
 
 # ---------------------------------------------------------------- n-gram counts
@@ -645,14 +737,74 @@ class NovelSelect:
         return (ordered * self.rank_weights[:self.n]).mean(dim=1)
 
 
-def farthest_select(embeddings, initial, size, device):
+def take_in_order(rows, initial, size, strata):
+    """Rows of `rows`, in turn, that are not initial and whose stratum still has room."""
+    room, chosen, picked = strata.room(initial, size), set(initial), []
+    for row in rows:
+        row = int(row)
+        if row not in chosen and room[strata.labels[row]] > 0:
+            picked.append(row)
+            room[strata.labels[row]] -= 1
+            if not room.any():
+                break
+    if room.any():
+        raise ValueError(f'The strata ran out of rows; still needed {room.tolist()}')
+    return picked
+
+
+def farthest_select(embeddings, initial, size, device, strata):
     """The initial rows, then the rows with the largest total cosine distance to the pool."""
     x = unit_tensor(embeddings, device)
     total = (len(x) - x @ x.sum(dim=0)).cpu().numpy()
-    chosen = set(initial)
-    ranked = [int(row) for row in np.argsort(-total, kind='stable') if row not in chosen]
-    picked = ranked[:size - len(initial)]
+    picked = take_in_order(np.argsort(-total, kind='stable'), initial, size, strata)
     return list(initial) + picked, [float(total[row]) for row in picked]
+
+
+def random_select(initial, size, seed, strata):
+    """The initial rows, then rows drawn uniformly until every stratum is full."""
+    order = np.random.default_rng((seed, 3)).permutation(len(strata.labels))
+    picked = take_in_order(order, initial, size, strata)
+    return list(initial) + picked, [math.nan] * len(picked)
+
+
+def evenly_select(groups, initial, size, seed, strata):
+    """Each stratum's quota spread as evenly as possible over its subcategories.
+
+    `groups` holds each row's subcategories. Each step draws a random row of the
+    subcategory with the fewest rows so far that still has rows (on ties the
+    subcategory with fewer rows in the stratum, then the name), and the row counts
+    toward that subcategory. An initial row counts toward the least-filled of its own.
+    """
+    rng = np.random.default_rng((seed, 4))
+    room, taken, picked = strata.room(initial, size), set(initial), []
+    for stratum in range(len(strata)):
+        rows = strata.rows(stratum)
+        names = sorted({group for row in rows for group in groups[row]})
+        members = {name: [int(row) for row in
+                          rng.permutation([row for row in rows if name in groups[row]])]
+                   for name in names}
+        available = {name: len(found) for name, found in members.items()}
+        filled = dict.fromkeys(names, 0)
+
+        def order(name):
+            return filled[name], available[name], name
+
+        for row in initial:
+            if strata.labels[row] == stratum:
+                filled[min(groups[row], key=order)] += 1
+        for _ in range(room[stratum]):
+            for name in names:
+                while members[name] and members[name][-1] in taken:
+                    members[name].pop()
+            open_names = [name for name in names if members[name]]
+            if not open_names:
+                raise ValueError(f'Stratum {strata.names[stratum]} ran out of rows')
+            name = min(open_names, key=order)
+            row = members[name].pop()
+            taken.add(row)
+            picked.append(row)
+            filled[name] += 1
+    return list(initial) + picked, [math.nan] * len(picked)
 
 
 @njit(cache=True)
@@ -676,19 +828,13 @@ def filter_rows(similarity, order, initial, threshold, limit):
     return kept[len(initial):count], closest[:count - len(initial)]
 
 
-def repr_filter_select(embeddings, initial, size, seed, device):
-    """Repr Filter in a random order, at the lowest threshold that yields `size` rows."""
-    x = unit_tensor(embeddings, device)
-    similarity = (x @ x.T).float().cpu().numpy()
-    initial = np.asarray(initial, dtype=np.int64)
-    order = np.random.default_rng((seed, 1)).permutation(len(x))
-    order = order[~np.isin(order, initial)]
-    limit = size - len(initial)
+def repr_filter_threshold(similarity, order, initial, limit):
+    """filter_rows at the lowest threshold that keeps `limit` rows (bisection)."""
     low, high = -1.0, 1.0 + 1e-6  # nothing passes at -1; everything but exact repeats above 1
     best = filter_rows(similarity, order, initial, high, limit)
     threshold = high
     if len(best[0]) < limit:
-        raise ValueError('Repr Filter: fewer than `size` rows have distinct embeddings')
+        raise ValueError('Repr Filter: too few rows have distinct embeddings')
     for _ in range(40):
         middle = (low + high) / 2
         result = filter_rows(similarity, order, initial, middle, limit)
@@ -696,48 +842,96 @@ def repr_filter_select(embeddings, initial, size, seed, device):
             best, threshold, high = result, middle, middle
         else:
             low = middle
-    print(f'    Repr Filter threshold: cosine similarity below {threshold:.4f}')
-    return initial.tolist() + best[0].tolist(), best[1].tolist()
+    return best, threshold
 
 
-def kmeans_select(embeddings, initial, size, n_clusters, seed):
-    """The same number of rows from each k-means cluster of the pool, drawn at random."""
-    labels = KMeans(n_clusters=n_clusters, n_init=10, random_state=seed).fit_predict(
-        np.asarray(embeddings, dtype=np.float64))
+def repr_filter_select(embeddings, initial, size, seed, device, strata):
+    """Repr Filter in a random order: each stratum at the lowest threshold that fills it.
+
+    A row is compared with the kept rows of its own stratum. The rows of all strata
+    are returned in the order the pool was visited."""
+    x = unit_tensor(embeddings, device)
+    similarity = (x @ x.T).float().cpu().numpy()
+    initial = np.asarray(initial, dtype=np.int64)
+    order = np.random.default_rng((seed, 1)).permutation(len(x))
+    order = order[~np.isin(order, initial)]
+    room = strata.room(initial, size)
+    picked, closest = [], []
+    for stratum in range(len(strata)):
+        if room[stratum] == 0:
+            continue
+        inside = strata.labels == stratum
+        (kept, nearest), threshold = repr_filter_threshold(
+            similarity, order[inside[order]], initial[inside[initial]], int(room[stratum]))
+        label = '' if len(strata) == 1 else f' ({strata.names[stratum]})'
+        print(f'    Repr Filter threshold{label}: cosine similarity below {threshold:.4f}')
+        picked += kept.tolist()
+        closest += nearest.tolist()
+    position = np.empty(len(x), dtype=np.int64)
+    position[order] = np.arange(len(order))
+    ranking = np.argsort(position[picked], kind='stable')
+    return initial.tolist() + [picked[i] for i in ranking], [closest[i] for i in ranking]
+
+
+def kmeans_select(embeddings, initial, size, n_clusters, seed, strata):
+    """In each stratum, the same number of rows from each of its k-means clusters, drawn
+    at random. score: the row's cluster within its stratum."""
+    x = np.asarray(embeddings, dtype=np.float64)
     rng = np.random.default_rng((seed, 2))
-    chosen = set(initial)
-    waiting = [[int(row) for row in rng.permutation(np.flatnonzero(labels == cluster))
-                if row not in chosen] for cluster in range(n_clusters)]
-    held = np.bincount(labels[list(initial)], minlength=n_clusters)
-    quota = [size // n_clusters + (cluster < size % n_clusters) for cluster in range(n_clusters)]
-    picked = []
-    # Fill every cluster to its share, then spread what small clusters could not supply.
-    for limit in (quota, [size] * n_clusters):
-        progress = True
-        while len(initial) + len(picked) < size and progress:
-            progress = False
-            for cluster in range(n_clusters):
-                if (waiting[cluster] and held[cluster] < limit[cluster]
-                        and len(initial) + len(picked) < size):
-                    picked.append(waiting[cluster].pop())
-                    held[cluster] += 1
-                    progress = True
-    return list(initial) + picked, [float(labels[row]) for row in picked]
+    quotas, chosen = strata.quotas(size), set(initial)
+    picked, scores = [], []
+    for stratum in range(len(strata)):
+        rows = strata.rows(stratum)
+        clusters = min(n_clusters, len(rows))
+        labels = np.full(len(x), -1)
+        labels[rows] = KMeans(n_clusters=clusters, n_init=10, random_state=seed).fit_predict(x[rows])
+        waiting = [[int(row) for row in rng.permutation(rows[labels[rows] == cluster])
+                    if row not in chosen] for cluster in range(clusters)]
+        own = [row for row in initial if strata.labels[row] == stratum]
+        held = np.bincount(labels[own], minlength=clusters)
+        target, count = quotas[stratum], len(own)
+        share = [target // clusters + (cluster < target % clusters) for cluster in range(clusters)]
+        # Fill every cluster to its share, then spread what small clusters could not supply.
+        for limit in (share, [target] * clusters):
+            progress = True
+            while count < target and progress:
+                progress = False
+                for cluster in range(clusters):
+                    if waiting[cluster] and held[cluster] < limit[cluster] and count < target:
+                        picked.append(waiting[cluster].pop())
+                        scores.append(float(cluster))
+                        held[cluster] += 1
+                        count += 1
+                        progress = True
+    return list(initial) + picked, scores
 
 
-def build_baseline(name, embeddings, size, device, seed=DEFAULT_SEED, n_clusters=12):
-    """select(initial, label) -> (rows in selection order, score per added row)."""
+def build_baseline(name, embeddings, size, device, seed=DEFAULT_SEED, n_clusters=12,
+                   strata=None, groups=None):
+    """select(initial, label) -> (rows in selection order, score per added row).
+
+    `embeddings` (None for random and evenly) and `groups` (each row's subcategories,
+    for evenly) describe the pool; `strata` (default: one) fixes each stratum's rows."""
+    if strata is None:
+        strata = Strata.single(len(embeddings if embeddings is not None else groups))
     greedy = {'kcenter_greedy': lambda: KCenterGreedy(embeddings, device),
               'qdit': lambda: FacilityLocation(embeddings, device),
               'novelselect': lambda: NovelSelect(embeddings, size, device)}
     if name in greedy:
-        return lambda initial, label='': greedy_select(greedy[name](), initial, size, label=label)
+        return lambda initial, label='': greedy_select(greedy[name](), initial, size,
+                                                       label=label, strata=strata)
     if name == 'farthest':
-        return lambda initial, label='': farthest_select(embeddings, initial, size, device)
+        return lambda initial, label='': farthest_select(embeddings, initial, size, device, strata)
     if name == 'repr_filter':
-        return lambda initial, label='': repr_filter_select(embeddings, initial, size, seed, device)
+        return lambda initial, label='': repr_filter_select(embeddings, initial, size, seed,
+                                                            device, strata)
     if name == 'kmeans':
-        return lambda initial, label='': kmeans_select(embeddings, initial, size, n_clusters, seed)
+        return lambda initial, label='': kmeans_select(embeddings, initial, size, n_clusters,
+                                                       seed, strata)
+    if name == 'random':
+        return lambda initial, label='': random_select(initial, size, seed, strata)
+    if name == 'evenly':
+        return lambda initial, label='': evenly_select(groups, initial, size, seed, strata)
     raise ValueError(f'Unknown baseline: {name!r}')
 
 
@@ -966,12 +1160,13 @@ def build_objective(metric, features, embedder, size, device, seed=DEFAULT_SEED,
             lambda rows: cd.knn_cosine_distance(embeddings[rows], k))
 
 
-def greedy_select(objective, initial, size, minimize=False, label=''):
+def greedy_select(objective, initial, size, minimize=False, label='', strata=None):
     """Grow `initial` to `size` rows, adding the best-scoring row each step.
 
-    Returns the rows in selection order and the metric after each addition (one
-    value per added row): the picked row's score, or objective.value() where the
-    objective has one. Ties go to the lowest row index.
+    With `strata`, only rows of strata below their quota for `size` rows are
+    candidates. Returns the rows in selection order and the metric after each
+    addition (one value per added row): the picked row's score, or
+    objective.value() where the objective has one. Ties go to the lowest row index.
     """
     selected = list(initial)
     for row in selected:
@@ -982,15 +1177,23 @@ def greedy_select(objective, initial, size, minimize=False, label=''):
         if taken is None:
             taken = torch.zeros(len(values), dtype=torch.bool, device=values.device)
             taken[selected] = True
+            if strata is not None:
+                stratum = torch.as_tensor(strata.labels, device=values.device)
+                room = torch.as_tensor(strata.room(selected, size), device=values.device)
         if minimize:
             values = -values
-        values = values.masked_fill(taken | values.isnan(), -math.inf)
+        blocked = taken | values.isnan()
+        if strata is not None:
+            blocked |= (room <= 0)[stratum]
+        values = values.masked_fill(blocked, -math.inf)
         best = values.max()
         if best == -math.inf:
             raise ValueError(f'{label}: no candidate has a defined score at size {len(selected)}')
         row = int(torch.nonzero(values == best)[0])
         objective.add(row)
         taken[row] = True
+        if strata is not None:
+            room[stratum[row]] -= 1
         selected.append(row)
         if hasattr(objective, 'value'):
             scores.append(objective.value())
@@ -1002,18 +1205,47 @@ def greedy_select(objective, initial, size, minimize=False, label=''):
     return selected, scores
 
 
-def load_pool(dataset, size, tokenizer, max_length=DEFAULT_MAX_LENGTH):
-    """The random-baseline pool with unique prompts short enough to train on."""
-    from helper import load_safety_dataset
-
-    pool = select_harmful_subcategory(load_safety_dataset(dataset, 'train'), dataset,
-                                      'random', size)
+def load_pool(dataset, tokenizer, max_length=DEFAULT_MAX_LENGTH):
+    """Harmful prompts with a safe response from every subcategory (helper.selection_pool),
+    one row per prompt, short enough to train on."""
+    pool = selection_pool(dataset)
     rows = len(pool)
     pool = pool.drop_duplicates('prompt')
     lengths = np.asarray(formatted_prompt_lengths(pool['prompt'].tolist(), tokenizer))
     pool = pool[lengths < max_length]
     print(f'  Pool: {rows:,} rows, {len(pool):,} unique prompts under {max_length:,} tokens')
     return pool.rename_axis('pool_index').reset_index()
+
+
+def pool_strata(pool, stratify):
+    """Vanilla/adversarial strata where the pool has the adversarial flag, else one stratum."""
+    if stratify == 'adversarial' and 'adversarial' in pool:
+        flags = pool['adversarial'].astype(str).str.strip().str.lower().map({'false': 0, 'true': 1})
+        if flags.isna().any():
+            raise ValueError(f'Unexpected adversarial values: {sorted(set(pool["adversarial"]))}')
+        return Strata(flags.to_numpy(), ['vanilla', 'adversarial'])
+    return Strata.single(len(pool))
+
+
+def row_groups(pool):
+    """Each row's subcategories (sub_abbrs), as tuples; '' for a row without one."""
+    return [tuple(groups) if isinstance(groups, (list, tuple, np.ndarray)) and len(groups)
+            else ('',) for groups in pool['sub_abbrs']]
+
+
+def stale_csvs(folder, size, names=None):
+    """CSVs of `size` rows in `folder` without a stratum column (selected before
+    stratification) or, given `names`, holding a stratum outside them (another --stratify)."""
+    stale = []
+    for path in sorted(Path(folder).glob(f'*_{size}.csv')):
+        try:
+            strata = pd.read_csv(path, usecols=['stratum'], keep_default_na=False)['stratum']
+        except ValueError:  # no stratum column
+            stale.append(path)
+            continue
+        if names is not None and not set(strata) <= set(names):
+            stale.append(path)
+    return stale
 
 
 def parse_args():
@@ -1023,17 +1255,23 @@ def parse_args():
                         default=list(cd.DEFAULT_DATASETS),
                         help=f'Datasets to select from (default: {" ".join(cd.DEFAULT_DATASETS)})')
     parser.add_argument('--embedding_models', '--embedding_model', dest='embedding_models',
-                        nargs='+', default=list(EMBEDDING_MODELS),
+                        nargs='+', default=list(DEFAULT_EMBEDDING_MODELS),
                         help='Embedding models for the metrics that need one: '
                              f'{" ".join(EMBEDDING_MODELS)} or a sentence-transformers model ID '
-                             '(default: both)')
+                             f'(default: {" ".join(DEFAULT_EMBEDDING_MODELS)})')
     parser.add_argument('--metrics', nargs='*', default=list(DEFAULT_METRICS),
-                        help='Metrics to select with; give no value for none (default: all): '
-                             f'{" ".join(DEFAULT_METRICS)}')
+                        help='Metrics to select with; give no value for none (default: the 12 '
+                             f'the diversity figures show: {" ".join(DEFAULT_METRICS)}; also '
+                             f'{" ".join(m for m in ALL_METRICS if m not in DEFAULT_METRICS)})')
     parser.add_argument('--baselines', nargs='*', default=list(BASELINES),
-                        help='Baseline strategies, each run on the prompt (semantic_<name>) and '
-                             'POS (structural_pos_<name>) embeddings, or one of those full names; '
-                             f'give no value for none (default: all): {" ".join(BASELINES)}')
+                        help='Baseline strategies; NovelSum\'s run on the prompt embeddings '
+                             '(semantic_<name>), structural_pos_<name> runs one on POS '
+                             'embeddings; give no value for none (default: all): '
+                             f'{" ".join(BASELINES)}')
+    parser.add_argument('--stratify', choices=('adversarial', 'none'), default='adversarial',
+                        help='adversarial (default): keep the pool shares of vanilla and '
+                             'adversarial prompts in the initial examples and every subset, '
+                             'where the dataset flags them; none: one stratum')
     parser.add_argument('--size', type=int, default=600, help='Subset size (default: 600)')
     parser.add_argument('--init_size', type=int, default=50,
                         help='Random examples the selection starts from (default: 50)')
@@ -1066,8 +1304,8 @@ def parse_args():
         parser.error('--metrics must be distinct')
     jobs = []
     for baseline in args.baselines:
-        if baseline in BASELINES:
-            jobs += [prefix + baseline for prefix in BASELINE_KINDS]
+        if baseline in EMBEDDING_BASELINES:
+            jobs.append('semantic_' + baseline)
         elif baseline_parts(baseline):
             jobs.append(baseline)
         else:
@@ -1107,6 +1345,16 @@ def main():
                 for name in (embedders if needs_embedding(metric) else [None])]
         paths = {job: output_path(args.output_dir, args.seed, dataset, *job, args.size)
                  for job in jobs}
+        folder = output_path(args.output_dir, args.seed, dataset, 'any', None, args.size).parent
+        # Training lists every CSV in the folder, so earlier versions must not stay there.
+        stale = stale_csvs(folder, args.size)
+        others = [path for path in stale if path not in paths.values()]
+        if others or (stale and not args.overwrite):
+            raise SystemExit(
+                f'{dataset}: {len(stale)} CSVs in {folder} were selected before stratified '
+                f'selection (no stratum column), e.g. {stale[0].name}; training lists every CSV '
+                'there, so move them away first'
+                + ('.' if others else ' (or pass --overwrite to select them again).'))
         pending = [job for job in jobs if args.overwrite or not paths[job].exists()]
         print(f'{dataset}: {len(pending)} of {len(jobs)} selections to run '
               f'(size {args.size}, seed {args.seed})', flush=True)
@@ -1118,7 +1366,7 @@ def main():
 
             tokenizer = AutoTokenizer.from_pretrained(
                 model_mapping.get(args.model, args.model), trust_remote_code=True)
-        pool = load_pool(dataset, args.size, tokenizer, args.max_length)
+        pool = load_pool(dataset, tokenizer, args.max_length)
         print(f'  POS-tagging {len(pool):,} prompts...', flush=True)
         tagged = cd.tag_corpus(pool['prompt'].tolist(), num_proc=args.num_proc)
         # The metrics need at least one POS tag per prompt (as calculate_diversity.py).
@@ -1128,38 +1376,58 @@ def main():
         if len(pool) < args.size:
             raise SystemExit(f'{dataset}: the pool has {len(pool):,} prompts, fewer than '
                              f'--size {args.size}')
+        strata = pool_strata(pool, args.stratify)
+        mismatched = [path for path in stale_csvs(folder, args.size, strata.names)
+                      if path not in {paths[job] for job in pending}]
+        if mismatched:
+            raise SystemExit(
+                f'{dataset}: {len(mismatched)} CSVs in {folder} hold other strata than '
+                f'{", ".join(strata.names)} (another --stratify), e.g. {mismatched[0].name}; '
+                'move them away first.')
         features = Features(pool['prompt'].tolist(), [tags for tags, _ in tagged],
                             [words for _, words in tagged])
-        initial = sorted(np.random.default_rng(args.seed).choice(
-            len(pool), args.init_size, replace=False).tolist())
+        initial = strata.initial(args.init_size, args.seed)
+        print(f'  Strata (pool / initial / subset): ' + ', '.join(
+            f'{name} {size:,} / {start} / {final}' for name, size, start, final in zip(
+                strata.names, strata.sizes, strata.quotas(args.init_size),
+                strata.quotas(args.size))), flush=True)
         order = [0] * args.init_size + list(range(1, args.size - args.init_size + 1))
+
+        def save(selected, scores, path, label):
+            if len(selected) != args.size or len(set(selected)) != args.size:
+                raise SystemExit(f'{label}: selected {len(set(selected))} distinct rows')
+            if strata.counts(selected) != dict(zip(strata.names, strata.quotas(args.size).tolist())):
+                raise SystemExit(f'{label}: strata {strata.counts(selected)} differ from the '
+                                 f'quotas {strata.quotas(args.size).tolist()}')
+            temporary = path.with_name(path.name + '.tmp')
+            pool.iloc[selected].assign(
+                stratum=[strata.names[stratum] for stratum in strata.labels[selected]],
+                order=order, score=scores).to_csv(temporary, index=False)
+            temporary.replace(path)
+
         for metric, name in pending:
             label = f'{dataset} {metric}' + (f' ({name})' if name else '')
             start = time.time()
             path = paths[metric, name]
             path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_name(path.name + '.tmp')
             if baseline_parts(metric):
                 kind, baseline = baseline_parts(metric)
-                select = build_baseline(baseline, features.embeddings(embedders[name], kind),
-                                        args.size, device, seed=args.seed,
-                                        n_clusters=args.n_clusters)
+                embeddings = None if kind == 'pool' else features.embeddings(embedders[name], kind)
+                select = build_baseline(baseline, embeddings, args.size, device, seed=args.seed,
+                                        n_clusters=args.n_clusters, strata=strata,
+                                        groups=row_groups(pool))
                 selected, scores = select(initial, label)
-                if len(selected) != args.size or len(set(selected)) != args.size:
-                    raise SystemExit(f'{label}: selected {len(set(selected))} distinct rows')
                 if device.startswith('cuda'):
                     torch.cuda.empty_cache()
-                pool.iloc[selected].assign(
-                    order=order, score=[math.nan] * args.init_size + scores).to_csv(
-                        temporary, index=False)
-                temporary.replace(path)
+                save(selected, [math.nan] * args.init_size + scores, path, label)
                 print(f'  {label}: done in {time.time() - start:.0f}s; saved {path}', flush=True)
                 continue
             objective, reference = build_objective(
                 metric, features, embedders.get(name), args.size, device,
                 seed=args.seed, n_clusters=args.n_clusters)
             selected, scores = greedy_select(objective, initial, args.size,
-                                             minimize=minimized(metric), label=label)
+                                             minimize=minimized(metric), label=label,
+                                             strata=strata)
             # A k-means objective reports the best solution it found, which a fresh fit may miss.
             searched = hasattr(objective, 'value')
             del objective
@@ -1172,10 +1440,7 @@ def main():
             elif not math.isclose(scores[-1], last, rel_tol=1e-6, abs_tol=1e-9):
                 raise SystemExit(f'{label}: final score {scores[-1]!r} differs from the '
                                  f'metric on the selected subset, {last!r}')
-            result = pool.iloc[selected].assign(
-                order=order, score=[first] * args.init_size + scores)
-            result.to_csv(temporary, index=False)
-            temporary.replace(path)
+            save(selected, [first] * args.init_size + scores, path, label)
             print(f'  {label}: {first:.6f} -> {last:.6f} in {time.time() - start:.0f}s; '
                   f'saved {path}', flush=True)
 

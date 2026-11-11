@@ -35,8 +35,7 @@ class SelectionTests(unittest.TestCase):
         self.root = Path(folder.name)
         self.pool = pool_rows()
         for patch in (mock.patch.object(helper, "DATA_DIR", str(self.root)),
-                      mock.patch.object(helper, "load_harmful_subcategory",
-                                        lambda dataset, abbr, count=None: self.pool)):
+                      mock.patch.object(helper, "selection_pool", lambda dataset: self.pool)):
             patch.start()
             self.addCleanup(patch.stop)
 
@@ -86,6 +85,31 @@ class SelectionTests(unittest.TestCase):
         self.save("lexical_hdd", self.pool.iloc[[0, 1, 2, 3, 6, 10]])
         with self.assertRaises(ValueError):
             helper.build_training_data(args, FakeTokenizer(), samples_dir=samples)
+
+    def test_subsets_named_like_the_baselines_are_drawn_whole(self):
+        # select_data.py's random and evenly subsets are not the training baselines.
+        subset = self.pool.iloc[[0, 1, 2, 3, 6, 9]]
+        for name in ("random", "evenly"):
+            with self.subTest(name=name):
+                self.save(name, subset)
+                args = argparse.Namespace(num_train=6, harmful_rate=1.0, general_rate=0.0,
+                                          alignment_dataset="aegis", abbr=name,
+                                          group_by="selection", benign_data_type="vanilla_benign",
+                                          seed=7, max_length=100)
+                train_df, available, _, _ = helper.build_training_data(args, FakeTokenizer())
+                self.assertEqual(available, 6)
+                self.assertEqual(sorted(map(tuple, train_df[["prompt", "response"]].values)),
+                                 sorted(map(tuple, subset.values)))
+
+    def test_pool_keeps_every_subcategory(self):
+        df = pd.DataFrame({
+            "prompt": ["a", "b", "c", "d", " "],
+            "response": ["r", "r", "r", "r", "r"],
+            "prompt_harm_label": ["harmful", "harmful", "unharmful", "harmful", "harmful"],
+            "response_harm_label": ["unharmful", "unharmful", "unharmful", "harmful", "unharmful"],
+            "sub_abbrs": [["small"], ["large"], ["large"], ["large"], ["large"]],
+        })
+        self.assertEqual(helper.harmful_pairs(df, "wildguardmix")["prompt"].tolist(), ["a", "b"])
 
     def test_overlong_prompt_is_refused(self):
         self.pool.loc[5, "prompt"] = "x" * 200

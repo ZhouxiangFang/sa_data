@@ -7,16 +7,21 @@ usage() {
     cat <<'EOF'
 Usage: chili/select.sh [--seed SEED] [--datasets DATASET...] [-- select_data.py options]
 
-Selects 600-example subsets of aegis, wildguardmix and gretel (or --datasets): one per
-diversity metric (exact greedy selection) and one per baseline strategy (novelselect,
-kcenter_greedy, repr_filter, qdit, kmeans, farthest; on prompt and POS embeddings), with
-both embedding models, all starting from the same 50 random examples drawn with the seed
-(default 43). Results: data/seed<seed>/<dataset>/<metric>[_<embedder>]_600.csv.
+Selects 600-example subsets of aegis, wildguardmix and gretel (or --datasets) from every
+harmful prompt with a safe response: one per diversity metric the figures show (12, exact
+greedy selection), one per NovelSum baseline (novelselect, kcenter_greedy, repr_filter,
+qdit, kmeans, farthest; on prompt embeddings) and the random and evenly baselines, with
+qwen3-embedding-0.6b: 20 subsets per dataset. All start from the same 50 random examples
+drawn with the seed (default 43); on wildguardmix the start and every subset keep the
+pool's share of adversarial prompts (about 43%).
+Results: data/seed<seed>/<dataset>/<metric>[_<embedder>]_600.csv.
 
 select_data.py options go after --, e.g. --metrics semantic_vendi lexical_hdd,
---baselines qdit, --embedding_models bge-m3, --size 300, --overwrite. Existing CSVs are kept, so rerunning
-resumes. Each dataset's log is log/select_seed<seed>_<dataset>_<time>.log. GPUS (default:
-every GPU) lists the GPUs to use; THREADS (default 32) is the CPU threads per dataset.
+--baselines qdit, --embedding_models bge-m3, --stratify none, --size 300, --overwrite.
+Existing CSVs are kept, so rerunning resumes; CSVs from before stratified selection stop
+the run until they are moved away. Each dataset's log is
+log/select_seed<seed>_<dataset>_<time>.log. GPUS (default: every GPU) lists the GPUs to
+use; THREADS (default 32) is the CPU threads per dataset.
 EOF
 }
 
