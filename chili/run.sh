@@ -6,8 +6,8 @@ source "$CHILI/common.sh"
 
 usage() {
     cat <<'EOF'
-Usage: chili/run.sh [--seed SEED] [--tactic] [--models MODEL...] [--datasets DATASET...]
-                    [--skip STAGE...]
+Usage: chili/run.sh [--seed SEED] [--tactic | --selected] [--models MODEL...]
+                    [--datasets DATASET...] [--abbrs GROUP...] [--skip STAGE...]
 
 Default run (seed 43): the git20k models (FocusV857/<model>_git20k), each trained on
 1,800 examples, harmful : WildJailbreak benign : general instructions = 1:1:1, with the
@@ -18,20 +18,26 @@ subcategory with 600 examples, plus the random and evenly baselines).
   figures    figs/seed<seed>/git20k_1800_<dataset>/
 --tactic runs the Gretel tactic setting instead: 900 examples (300 each), the harmful
 part from one jailbreak tactic; results in ablations/gretel_tactic/seed<seed>/.
+--selected runs the selected-data setting instead: the default mixture, with the harmful
+part a 600-example subset chosen by select_data.py (one run per diversity metric and
+baseline strategy; data/seed<seed>/<dataset>/); results in ablations/selected/seed<seed>/.
+--abbrs trains only the named groups, e.g. --selected --abbrs semantic_vendi_bge-m3 lexical_hdd.
 
-Stages: train, eval, diversity, plot (default setting only), correlate; --skip leaves
+Stages: select (--selected only), train, eval, diversity, plot (default setting only),
+correlate (not with --selected: its subsets have no diversity CSV); --skip leaves
 some out. A failed stage is reported and the next one still runs. Rerunning resumes:
 training skips jobs whose checkpoint or results exist, and evaluation deletes each
-checkpoint (/scratch/zf28/ckpts/seed<seed>/{default,tactic}/) once it is evaluated.
+checkpoint (/scratch/zf28/ckpts/seed<seed>/{default,tactic,selected}/) once it is evaluated.
 EOF
 }
 
-seed=43 tactic=0 models=() datasets=() skip=()
+seed=43 tactic=0 selected=0 models=() datasets=() abbrs=() skip=()
 while (( $# )); do
     case $1 in
         --seed) (( $# >= 2 )) || { echo "--seed needs a value" >&2; exit 2; }; seed=$2; shift 2 ;;
         --tactic) tactic=1; shift ;;
-        --models|--datasets|--skip)
+        --selected) selected=1; shift ;;
+        --models|--datasets|--abbrs|--skip)
             list=${1#--}
             shift
             while (( $# )) && [[ $1 != --* ]]; do add_values "$list" "$1"; shift; done
@@ -41,8 +47,13 @@ while (( $# )); do
     esac
 done
 
+(( tactic && selected )) && { echo "--tactic and --selected are different settings" >&2; exit 2; }
 embedders=(bge-m3 qwen3-embedding-0.6b)
-if (( tactic )); then
+if (( selected )); then
+    setting=selected results=$ROOT/ablations/selected
+    (( ${#datasets[@]} )) || datasets=(aegis wildguardmix gretel)
+    run_opts=(--group_by selection) diversity_opts=()
+elif (( tactic )); then
     setting=tactic results=$ROOT/ablations/gretel_tactic datasets=(gretel)
     run_opts=(--group_by tactic --num_train 900)
     diversity_opts=(--group_by tactic --num_train 300 --n_clusters 6)
@@ -54,6 +65,11 @@ fi
 ckpt_dir=/scratch/zf28/ckpts/seed$seed/$setting
 run_opts+=(--seed "$seed" --datasets "${datasets[@]}")
 (( ${#models[@]} )) && run_opts+=(--models "${models[@]}")
+(( ${#abbrs[@]} )) && run_opts+=(--abbrs "${abbrs[@]}")
+
+select_data() {
+    "$CHILI/select.sh" --seed "$seed" --datasets "${datasets[@]}"
+}
 
 train() {
     "$CHILI/train.sh" "${run_opts[@]}" --output_dir "$ckpt_dir" --results_dir "$results"
@@ -110,7 +126,9 @@ failed=()
 stage() {
     local name=$1 status
     shift
-    if [[ " ${skip[*]} " == *" $name "* ]] || { [[ $name == plot ]] && (( tactic )); }; then
+    if [[ " ${skip[*]} " == *" $name "* ]] || { [[ $name == plot ]] && (( tactic )); } ||
+       { [[ $name == select ]] && (( ! selected )); } ||
+       { [[ $name == diversity || $name == plot || $name == correlate ]] && (( selected )); }; then
         echo "===== $(date '+%F %T') SKIPPED: $name"
         return
     fi
@@ -125,6 +143,7 @@ stage() {
     fi
 }
 
+stage select select_data
 stage train train
 stage eval evaluate
 stage diversity diversity

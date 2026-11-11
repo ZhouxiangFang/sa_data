@@ -13,6 +13,8 @@ Usage: chili/train.sh [options] [-- align.py options]
   --abbrs ABBR...        Only these groups (default: every non-benign subcategory with
                          enough examples, plus the random and evenly baselines)
   --group_by tactic      Group Gretel's harmful prompts by jailbreak tactic
+  --group_by selection   Train on the subsets select_data.py saved for the seed (--abbrs
+                         then names subsets, e.g. semantic_vendi_bge-m3; default: all)
   --num_train N          Examples per job (default: 1800)
   --harmful_rate R       Harmful fraction (default: 1/3)
   --general_rate R       General-instruction fraction (default: 1/3); benign gets the rest
@@ -24,8 +26,11 @@ Jobs whose checkpoint is saved (or evaluated) are skipped, so rerunning resumes.
 Each job's log is log/align_<checkpoint>_<time>.log. GPU_GROUPS (default
 "0,1,2,3 4,5,6,7") lists the GPU groups; a group takes the next job when it is free.
 EFFECTIVE_BATCH (default 32, examples per optimizer update over a group's GPUs) and
-LEARNING_RATE (default 1e-5) set align.py's training; the checkpoint name does not
-record them, so give other values their own --output_dir and --results_dir.
+LEARNING_RATE (default 1e-5) set align.py's training; align.py options after -- (e.g.
+--learning_rate) override them. The checkpoint name does not record them, so give other
+values their own --output_dir and --results_dir. Every group's GPU count x micro-batch
+(default 1) must divide the effective batch. Keep the micro-batch at 1 on the 48 GB A6000s:
+2 and 4 ran out of memory on 4096-token examples (llama3.1, qwen2.5).
 EOF
 }
 
@@ -52,6 +57,39 @@ done
 output_dir=${output_dir:-/scratch/zf28/ckpts/seed$seed}
 EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32}
 LEARNING_RATE=${LEARNING_RATE:-1e-5}
+micro_batch=1  # align.py's default
+# align.py keeps the last value given for an option, so options after -- win over these.
+# Read them back, so the summary and the batch check below show what training will use.
+for ((k = 0; k < ${#align_args[@]}; k++)); do
+    arg=${align_args[k]} next=${align_args[k + 1]:-}
+    case $arg in
+        --learning_rate|--lr) LEARNING_RATE=$next ;;
+        --learning_rate=*|--lr=*) LEARNING_RATE=${arg#*=} ;;
+        --effective_batch_size) EFFECTIVE_BATCH=$next ;;
+        --effective_batch_size=*) EFFECTIVE_BATCH=${arg#*=} ;;
+        --per_device_train_batch_size) micro_batch=$next ;;
+        --per_device_train_batch_size=*) micro_batch=${arg#*=} ;;
+    esac
+done
+read -ra groups <<< "${GPU_GROUPS:-0,1,2,3 4,5,6,7}"
+# align.py refuses an effective batch that its GPUs x micro-batch does not divide; check every
+# group now instead of letting each job fail at start-up.
+if ! [[ $EFFECTIVE_BATCH =~ ^[1-9][0-9]*$ && $micro_batch =~ ^[1-9][0-9]*$ ]]; then
+    echo "Effective batch ($EFFECTIVE_BATCH) and micro-batch ($micro_batch) must be positive" \
+         "integers" >&2
+    exit 2
+fi
+for group in "${groups[@]}"; do
+    IFS=, read -ra group_gpus <<< "$group"
+    if (( EFFECTIVE_BATCH % (${#group_gpus[@]} * micro_batch) )); then
+        echo "Effective batch $EFFECTIVE_BATCH is not a multiple of GPUs x micro-batch" \
+             "($((${#group_gpus[@]} * micro_batch))) for GPU group $group" >&2
+        exit 2
+    fi
+done
+(( micro_batch == 1 )) ||
+    echo "Warning: micro-batch $micro_batch; on the 48 GB A6000s, micro-batches of 2 and 4 ran" \
+         "out of memory on 4096-token examples (llama3.1, qwen2.5)." >&2
 settings=(--group_by "$group_by" --num_train "$num_train" --harmful_rate "$harmful_rate"
           --general_rate "$general_rate" --seed "$seed")
 
@@ -65,13 +103,14 @@ jobs_tsv=$(python "$SA_DIR/train_jobs.py" "${plan[@]}") || exit $?
 job_model=() job_dataset=() job_abbr=() job_ckpt=()
 declare -A count=([train]=0 [saved]=0 [done]=0)
 while IFS=$'\t' read -r model dataset abbr checkpoint status; do
+    [[ -n $status ]] || continue  # no jobs: an empty plan
     (( ++count[$status] ))
     [[ $status == train ]] || continue
     job_model+=("$model") job_dataset+=("$dataset") job_abbr+=("$abbr") job_ckpt+=("$checkpoint")
 done <<< "$jobs_tsv"
 echo "Seed $seed, $group_by groups, $num_train examples: ${count[train]} to train," \
      "${count[saved]} saved, ${count[done]} evaluated. Checkpoints: $output_dir"
-echo "Effective batch $EFFECTIVE_BATCH, learning rate $LEARNING_RATE"
+echo "Effective batch $EFFECTIVE_BATCH (micro-batch $micro_batch), learning rate $LEARNING_RATE"
 (( ${#job_model[@]} )) || exit 0
 
 job_label() { printf '%s' "$(basename "${job_ckpt[$1]}")"; }
@@ -87,5 +126,4 @@ run_job() {
         --learning_rate "$LEARNING_RATE" "${align_args[@]}" >> "$log" 2>&1
 }
 
-read -ra groups <<< "${GPU_GROUPS:-0,1,2,3 4,5,6,7}"
 run_queue "${#job_model[@]}" "${groups[@]}"
