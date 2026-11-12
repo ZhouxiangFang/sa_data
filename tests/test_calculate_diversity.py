@@ -21,7 +21,7 @@ def random_seqs(rng, count=40, vocabulary=('DT', 'NN', 'VB', 'JJ', 'IN', '.')):
 
 
 class MetricTests(unittest.TestCase):
-    def test_self_bleu_matches_nltk_for_each_order(self):
+    def test_pos_self_bleu_matches_nltk_for_each_order(self):
         seqs = random_seqs(random.Random(0))
         smoothing = SmoothingFunction().method1
         expected = [np.mean([
@@ -29,7 +29,7 @@ class MetricTests(unittest.TestCase):
                           smoothing_function=smoothing)
             for i, seq in enumerate(seqs)
         ]) for k in range(1, 6)]
-        np.testing.assert_allclose(cd.self_bleu(seqs, 5), expected, rtol=1e-12)
+        np.testing.assert_allclose(cd.pos_self_bleu(seqs, 5), expected, rtol=1e-12)
 
     def test_hdd_matches_hypergeometric_formula(self):
         seqs = [['a', 'b', 'a', 'c'] * 6, ['d', 'a', 'e'] * 9]

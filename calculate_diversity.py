@@ -58,7 +58,7 @@ Every metric column is prefixed with the aspect of diversity it measures:
     cluster_inertia   k-means (--n_clusters) sum of squared distances to centroids
     radius            geometric mean of per-dimension standard deviations
   structural_  spaCy fine-grained POS tag sequences (e.g. "DT NN VBZ")
-    self_bleu_1..N    Self-BLEU-n with uniform 1..n-gram weights (N = --max_n)
+    self_bleu_1..N    POS Self-BLEU-n with uniform 1..n-gram weights (N = --max_n)
     distinct_1_4      mean over n = 1..4 of pooled unique / total POS n-grams
     ngram_vendi       Vendi Score with the n-gram kernel (n = 1..4), as in
                       vendi_score.text_utils.ngram_vendi_score
@@ -66,7 +66,7 @@ Every metric column is prefixed with the aspect of diversity it measures:
     knn_cosine_1..10  mean cosine distance to the k nearest POS embeddings, one column
                       per k in --knn_ks (default: 1, 3, 5, 10)
 Each metric column ends in ↑ if higher values mean more diversity, or ↓ if lower
-values do (Self-BLEU only).
+values do (POS Self-BLEU only).
 DistSum, cluster inertia, radius and KNN distance follow NovelSum (Yang et al.,
 2025), with DistSum averaged rather than summed over pairs and KNN distance averaged
 over the k nearest neighbors (NovelSum's 1-NN distance at k = 1). The embedding models
@@ -323,8 +323,8 @@ def distinct_n(seqs, n):
     return len({gram for seq in seqs for gram in nltk.ngrams(seq, n)}) / total
 
 
-def self_bleu(seqs, max_n=5):
-    """Exact NLTK Self-BLEU-1..max_n with method1 smoothing, caching reference counts.
+def pos_self_bleu(seqs, max_n=5):
+    """Exact NLTK POS Self-BLEU-1..max_n with method1 smoothing, caching reference counts.
 
     Entry k - 1 is cumulative BLEU-k, i.e. sentence_bleu with weights (1 / k,) * k
     against all other sequences. For each n-gram, the two largest per-sentence
@@ -557,7 +557,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
                 **{f'lexical_distinct_{n}': distinct_n(sample_words, n)
                    for n in LEXICAL_DISTINCT_ORDERS},
                 **{f'structural_self_bleu_{n}': score
-                   for n, score in enumerate(self_bleu(seqs, max_n), start=1)},
+                   for n, score in enumerate(pos_self_bleu(seqs, max_n), start=1)},
                 'structural_distinct_1_4': float(np.mean(
                     [distinct_n(seqs, n) for n in POS_NGRAM_ORDERS])),
                 'structural_ngram_vendi': ngram_vendi_score(seqs),
@@ -665,7 +665,7 @@ def parse_args():
     parser.add_argument('--model', default='qwen2.5-ins', help='Tokenizer model, as in align.py')
     parser.add_argument('--max_length', type=int, default=4096)
     parser.add_argument('--max_n', type=int, default=5,
-                        help='Report structural Self-BLEU-1 through Self-BLEU-max_n (default: 5)')
+                        help='Report POS Self-BLEU-1 through POS Self-BLEU-max_n (default: 5)')
     parser.add_argument('--n_clusters', type=int,
                         help='k-means clusters for semantic cluster inertia (default: one per '
                              f'{EXAMPLES_PER_CLUSTER} examples, as NovelSum: 12 at 600)')

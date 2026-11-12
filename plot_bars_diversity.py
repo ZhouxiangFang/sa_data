@@ -20,7 +20,7 @@ group against the equally weighted model-mean harmful score), and
 per-metric bar charts, the same three figures per model, correlation bar charts,
 <dataset>_average_<group>_diversity_vs_harmful_<test>.png per test dataset, and
 the plotted scores (<dataset>_diversity_safety_scores.csv and per-test CSVs).
-Bar charts display bounded ratios (HD-D, Distinct, Self-BLEU) as percentages and
+Bar charts display bounded ratios (HD-D, Distinct, POS Self-BLEU) as percentages and
 other metrics in their original units. CSV exports keep the original units.
 Figures show, average and rank Pearson and Spearman coefficients only; Kendall
 (largely redundant with Spearman) is kept in the correlation CSVs.
@@ -29,7 +29,7 @@ plot_bars_overall.py, for the --models models (default: llama3.1 mistral olmo2
 qwen2.5). The per-test plots use each test dataset's harmful score,
 averaged equally across models.
 Their plotted scores and correlations are exported in average_diversity_safety_*
-CSVs with a test_dataset column. Correlations use negative Self-BLEU so larger always
+CSVs with a test_dataset column. Correlations use negative POS Self-BLEU so larger always
 means more diverse.
 
 Seeds: each group is trained once per run seed (chili/run.sh --seed), and
@@ -112,8 +112,8 @@ METRICS = {
 }
 # The metrics figures show; CSVs keep every metric. Left out (Spearman across
 # subcategory samples, seeds 43/86/129, both embedders): Distinct-4 (0.97-0.99
-# with Distinct-3), radius (0.99-1.00 with DistSum), Self-BLEU-1 (saturates near
-# 0.999), Self-BLEU-2/3 (one high order is shown), KNN-5/10 (0.91-0.99 with KNN-3
+# with Distinct-3), radius (0.99-1.00 with DistSum), POS Self-BLEU-1 (saturates near
+# 0.999), POS Self-BLEU-2/3 (one high order is shown), KNN-5/10 (0.91-0.99 with KNN-3
 # except KNN-10 on Aegis) and POS n-gram Vendi.
 FIGURE_METRICS = [
     "lexical_hdd↑", "lexical_distinct_2↑", "lexical_distinct_3↑",

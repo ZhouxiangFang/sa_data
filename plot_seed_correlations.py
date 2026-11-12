@@ -9,7 +9,7 @@ embedding model: the mean of those values over --seeds, with whiskers of +-1 SD
 across seeds (ddof=1, clipped to [-1, 1]) and the individual seeds as dots.
 All figures share one y-range. Lexical and most
 structural metrics do not use embeddings, so their bars match across embedders.
-Self-BLEU is negated in the CSVs, so for every metric a negative coefficient
+POS Self-BLEU is negated in the CSVs, so for every metric a negative coefficient
 means more diverse training data, less harmful model. Figures show the 12
 plot_bars_diversity.FIGURE_METRICS; the CSV has every metric.
 

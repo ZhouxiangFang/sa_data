@@ -22,7 +22,7 @@ still computed on the whole subset. Pools without the flag form one stratum.
 Selection starts from --init_size examples (default 50) drawn uniformly within each
 stratum with --seed (default 43); every metric, embedding model and baseline starts
 from the same examples. Each step then adds the candidate whose addition gives the best
-value of the metric on the whole subset (the largest value, or for Self-BLEU the
+value of the metric on the whole subset (the largest value, or for POS Self-BLEU the
 smallest), until the subset has --size examples (default 600). Every candidate
 is scored exactly at every step, with the metric as calculate_diversity.py
 defines it; ties go to the earliest pool row.
@@ -102,7 +102,7 @@ How each step stays exact and fast (all candidates are scored at once):
                     centroids that moved are recomputed in each Lloyd iteration
   KNN distance      each member's k nearest distances, updated by the candidate
   distinct-n, HD-D  sparse n-gram counts against the subset's counts
-  Self-BLEU         a candidate changes a member's clipped matches only for the
+  POS Self-BLEU     a candidate changes a member's clipped matches only for the
                     n-grams the member has more often than any other member; these
                     are summed for all (candidate, member) pairs by one sparse product
   Vendi Score       the subset's kernel is diagonalized once per step; a candidate
@@ -192,7 +192,7 @@ def baseline_parts(job):
 
 
 def minimized(metric):
-    """Self-BLEU is the only metric where lower values mean more diversity."""
+    """POS Self-BLEU is the only metric where lower values mean more diversity."""
     return 'self_bleu' in metric
 
 
@@ -549,8 +549,8 @@ class Hdd:
         return value.masked_fill(self.total + self.lengths < self.draws, math.nan)
 
 
-class SelfBleu:
-    """Self-BLEU-k (NLTK, method1 smoothing) of the subset with each candidate added."""
+class PosSelfBleu:
+    """POS Self-BLEU-k (NLTK, method1 smoothing) of the subset with each candidate added."""
 
     def __init__(self, count_matrices, lengths, size, device):
         self.k, self.size, self.device = len(count_matrices), size, device
@@ -1149,9 +1149,9 @@ def build_objective(metric, features, embedder, size, device, seed=DEFAULT_SEED,
                                             for n in cd.POS_NGRAM_ORDERS])))
     if metric.startswith('structural_self_bleu_'):
         k, subset = metric_number(metric), pick(tags)
-        return (SelfBleu([features.counts('tags', n) for n in range(1, k + 1)],
+        return (PosSelfBleu([features.counts('tags', n) for n in range(1, k + 1)],
                          [len(seq) for seq in tags], size, device),
-                lambda rows: cd.self_bleu(subset(rows), k)[k - 1])
+                lambda rows: cd.pos_self_bleu(subset(rows), k)[k - 1])
     if metric == 'structural_ngram_vendi':
         subset = pick(tags)
         return (ngram_vendi([features.counts('tags', n) for n in cd.POS_NGRAM_ORDERS], size),
