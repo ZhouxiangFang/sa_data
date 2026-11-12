@@ -15,7 +15,7 @@ metric the figures show and per baseline (20 per dataset), all from the same 50 
 examples of the seed (default 43). Results: data/seed<seed>/<dataset>/<name>_600.csv.
 
 select_data.py options go after --, e.g. --metrics semantic_vendi, --baselines qdit,
---overwrite, and the pool options --response_filter refusal (wildguardmix only, then the
+--overwrite, and the pool options --response_label_filter refusal (wildguardmix only, then the
 default dataset) and --dedup, whose subsets go to data/seed<seed>/<dataset>_<tag>/.
 Existing CSVs are kept, so resubmitting resumes. Each job gets THREADS CPUs (default 32),
 EVAL_MEM and SELECT_TIME (default 04:00:00); logs: log/slurm/select_s<seed>_<dataset>_<job>.log.
@@ -40,7 +40,7 @@ done
 if (( ! ${#datasets[@]} )); then
     datasets=("${TRAIN_DATASETS[@]}")
     # Only wildguardmix labels refusals.
-    [[ " ${select_args[*]} " =~ \ --response_filter[=\ ]refusal\  ]] && datasets=(wildguardmix)
+    [[ " ${select_args[*]} " =~ \ --response_label_filter[=\ ]refusal\  ]] && datasets=(wildguardmix)
 fi
 # The Vendi metrics run on CPU threads; OMP_NUM_THREADS (4, from common.sh) would cap them.
 threads=${THREADS:-32}

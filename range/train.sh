@@ -20,7 +20,7 @@ Usage: range/train.sh [options] [-- align.py options]
   --harmful_rate R       Harmful fraction (default: 1/3)
   --general_rate R       General-instruction fraction (default: 1/3); benign gets the rest
   --seed SEED            Run seed (default: 43)
-  --response_filter F    Harmful-example responses: safe (default) or refusal (wildguardmix
+  --response_label_filter F    Harmful-example responses: safe (default) or refusal (wildguardmix
                          only, then the default dataset); align.py's pool option, as is --dedup
   --dedup                Keep one row per prompt (default: every row)
   --output_dir DIR       Checkpoint folder (default: $CKPT_ROOT/seed<seed>, plus
@@ -43,7 +43,7 @@ DEPENDENCY (e.g. afterany:<job>) delays the training array until that job ends.
 EOF
 }
 
-models=() datasets=() abbrs=() align_args=() response_filter=safe dedup=0
+models=() datasets=() abbrs=() align_args=() response_label_filter=safe dedup=0
 group_by=subcategory num_train=1800 harmful_rate=0.3333333333333333
 general_rate=0.3333333333333333 seed=43 output_dir="" results_dir="" eval=0 eval_only=0 dry_run=0
 while (( $# )); do
@@ -54,7 +54,7 @@ while (( $# )); do
             while (( $# )) && [[ $1 != --* ]]; do add_values "$list" "$1"; shift; done
             ;;
         --dedup) dedup=1; shift ;;
-        --response_filter|--group_by|--num_train|--harmful_rate|--general_rate|--seed|--output_dir|--results_dir)
+        --response_label_filter|--group_by|--num_train|--harmful_rate|--general_rate|--seed|--output_dir|--results_dir)
             (( $# >= 2 )) || { echo "$1 needs a value" >&2; exit 2; }
             printf -v "${1#--}" '%s' "$2"
             shift 2
@@ -129,7 +129,7 @@ while IFS= read -r line; do
     [[ $status == train ]] && train_lines+=("$line")
     [[ $status == saved ]] && saved_lines+=("$line")
 done <<< "$jobs_tsv"
-pool_note="$response_filter responses"
+pool_note="$response_label_filter responses"
 (( dedup )) && pool_note+=", one row per prompt"
 echo "Seed $seed, $group_by groups, $num_train examples, $pool_note: ${count[train]} to train," \
      "${count[saved]} saved, ${count[done]} evaluated. Checkpoints: $output_dir"

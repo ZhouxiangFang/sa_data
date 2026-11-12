@@ -75,7 +75,7 @@ meaning, so all metrics use unit vectors. Squared-L2 DistSum would then equal 2 
 so it is not reported.
 Test splits remain available for prompt-only analysis, without training filters.
 
---response_filter refusal (wildguardmix only) and --dedup filter the training pools
+--response_label_filter refusal (wildguardmix only) and --dedup filter the training pools
 exactly as align.py's options of the same name (helper.eligible_rows); their scores
 go to their own root, diversity/<tag>/ (e.g. diversity/refusal/), with the same
 layout, and their samples to the tagged sample folders the runs train on.
@@ -462,7 +462,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
     if group_by == 'tactic':
         pools = {abbr: pools[abbr] for abbr in names}
     elif split == 'train':
-        if options.response_filter == 'refusal':
+        if options.response_label_filter == 'refusal':
             names.pop('benign', None)  # the refusal filter applies to harmful prompts only
         for abbr in names:
             pools[abbr] = select_harmful_subcategory(df, dataset_name, abbr, options=options)
@@ -643,7 +643,7 @@ def parse_args():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--datasets', nargs='+', type=str.lower,
                         help=f'Datasets to score (default: {" ".join(DEFAULT_DATASETS)}; '
-                             'wildguardmix with --response_filter refusal)')
+                             'wildguardmix with --response_label_filter refusal)')
     parser.add_argument('--split', choices=SUPPORTED, default='train')
     parser.add_argument('--abbr', nargs='+',
                         help='Only score these subcategory (or, with --group_by tactic, '
@@ -705,7 +705,7 @@ def parse_args():
     if any(dataset not in SUPPORTED[args.split] for dataset in args.datasets):
         parser.error(f'--split {args.split} supports {SUPPORTED[args.split]}')
     if args.options.tag and args.split != 'train':
-        parser.error('--response_filter and --dedup filter training data (--split train)')
+        parser.error('--response_label_filter and --dedup filter training data (--split train)')
     if args.group_by == 'tactic' and (args.split != 'train' or args.datasets != ['gretel']):
         parser.error('--group_by tactic supports only --datasets gretel --split train')
     if args.num_train < 2 or min(args.max_length, args.max_n, args.num_proc) < 1:

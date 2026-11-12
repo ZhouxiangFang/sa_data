@@ -7,10 +7,10 @@ skip (at least --max_length tokens). Every row is a candidate, so a prompt with
 several safe responses (WildGuardMix: a refusal and a harmless compliance; Aegis: the
 original model answer and NVIDIA's added refusals, often repeated verbatim) can be
 picked once per response. The pool options are
-align.py's: --response_filter refusal (wildguardmix only) keeps only refusals, and
+align.py's: --response_label_filter refusal (wildguardmix only) keeps only refusals, and
 --dedup keeps the first row of each prompt; with either, results go to
 data/seed<seed>/<dataset>_<tag>/ (e.g. wildguardmix_refusal) and training reads them
-with the same options (chili/run.sh --selected --response_filter refusal).
+with the same options (chili/run.sh --selected --response_label_filter refusal).
 
 Strata (--stratify adversarial, the default): where the pool has an adversarial
 flag (wildguardmix), vanilla and adversarial prompts keep their pool shares in
@@ -114,7 +114,7 @@ Examples:
     python select_data.py --datasets aegis --metrics semantic_vendi lexical_hdd
     python select_data.py --embedding_models bge-m3 --size 300 --seed 44
     python select_data.py --metrics --baselines qdit random     # only two baselines
-    python select_data.py --response_filter refusal              # wildguardmix refusals only
+    python select_data.py --response_label_filter refusal              # wildguardmix refusals only
 """
 
 import argparse
@@ -1225,7 +1225,7 @@ def load_pool(dataset, tokenizer, max_length=DEFAULT_MAX_LENGTH, options=DEFAULT
     rows = len(pool)
     lengths = np.asarray(formatted_prompt_lengths(pool['prompt'].tolist(), tokenizer))
     pool = pool[lengths < max_length]
-    print(f'  Pool ({options.response_filter} responses'
+    print(f'  Pool ({options.response_label_filter} responses'
           f'{", one row per prompt" if options.dedup else ""}): {rows:,} rows, {len(pool):,} '
           f'under {max_length:,} tokens ({pool["prompt"].nunique():,} distinct prompts)')
     return pool.rename_axis('pool_index').reset_index()
@@ -1267,7 +1267,7 @@ def parse_args():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--datasets', nargs='+', type=str.lower, choices=DATASETS,
                         help=f'Datasets to select from (default: {" ".join(cd.DEFAULT_DATASETS)}; '
-                             'wildguardmix with --response_filter refusal)')
+                             'wildguardmix with --response_label_filter refusal)')
     parser.add_argument('--embedding_models', '--embedding_model', dest='embedding_models',
                         nargs='+', default=list(DEFAULT_EMBEDDING_MODELS),
                         help='Embedding models for the metrics that need one: '

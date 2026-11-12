@@ -8,7 +8,7 @@ usage() {
     cat <<'EOF'
 Usage: chili/run.sh [--seed SEED] [--tactic | --selected] [--models MODEL...]
                     [--datasets DATASET...] [--abbrs GROUP...] [--skip STAGE...]
-                    [--response_filter safe|refusal] [--dedup] [--num_train N]
+                    [--response_label_filter safe|refusal] [--dedup] [--num_train N]
 
 Default run (seed 43): the git20k models (FocusV857/<model>_git20k), each trained on
 1,800 examples, harmful : WildJailbreak benign : general instructions = 1:1:1, with the
@@ -24,7 +24,7 @@ part a 600-example subset chosen by select_data.py (one run per diversity metric
 baseline strategy; data/seed<seed>/<dataset>/); results in ablations/selected/seed<seed>/.
 --abbrs trains only the named groups, e.g. --selected --abbrs semantic_vendi_qwen3-embedding-0.6b lexical_hdd.
 Pool options apply to every stage alike (training, diversity, selection):
---response_filter refusal keeps only harmful examples whose response is labeled a refusal
+--response_label_filter refusal keeps only harmful examples whose response is labeled a refusal
 (wildguardmix only, its default dataset then; default safe: any response labeled safe,
 which includes harmless compliances), and --dedup keeps one row per prompt (default: every
 row). They make their own setting, named with the tag refusal, dedup or refusal_dedup:
@@ -33,7 +33,7 @@ checkpoints in .../seed<seed>/<setting>/, diversity in diversity/<tag>/, selecte
 in data/seed<seed>/<dataset>_<tag>/; the plot stage is skipped.
 --num_train N sets the examples per run (default 1800, or 900 with --tactic; a third harmful,
 which is also the diversity and subset size). Another size makes its own setting, named with
-the harmful count: e.g. --response_filter refusal --num_train 1500 is refusal_500 (results in
+the harmful count: e.g. --response_label_filter refusal --num_train 1500 is refusal_500 (results in
 ablations/refusal_500/, diversity in diversity/refusal_500/), --num_train 1500 alone default_500.
 
 Stages: select (--selected only), train, eval, diversity, plot (default setting only),
@@ -44,14 +44,14 @@ checkpoint ($CKPT_ROOT/seed<seed>/<setting>/, CKPT_ROOT=/scratch/zf28/ckpts) onc
 EOF
 }
 
-seed=43 tactic=0 selected=0 models=() datasets=() abbrs=() skip=() response_filter=safe dedup=0
+seed=43 tactic=0 selected=0 models=() datasets=() abbrs=() skip=() response_label_filter=safe dedup=0
 num_train=""
 while (( $# )); do
     case $1 in
         --seed) (( $# >= 2 )) || { echo "--seed needs a value" >&2; exit 2; }; seed=$2; shift 2 ;;
         --tactic) tactic=1; shift ;;
         --selected) selected=1; shift ;;
-        --response_filter|--num_train)
+        --response_label_filter|--num_train)
             (( $# >= 2 )) || { echo "$1 needs a value" >&2; exit 2; }
             printf -v "${1#--}" '%s' "$2"; shift 2 ;;
         --dedup) dedup=1; shift ;;

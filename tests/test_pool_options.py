@@ -1,4 +1,4 @@
-"""Pool options (--response_filter, --dedup) filter every stage's pools the same way."""
+"""Pool options (--response_label_filter, --dedup) filter every stage's pools the same way."""
 import argparse
 import json
 import sys
@@ -89,7 +89,7 @@ class PoolOptionTests(unittest.TestCase):
         self.assertEqual(REFUSAL.folder("wildguardmix"), "wildguardmix_refusal")
         self.assertEqual(DEFAULT.folder("wildguardmix"), "wildguardmix")
         self.assertEqual(helper.pool_options(argparse.Namespace()), DEFAULT)
-        self.assertEqual(helper.pool_options(argparse.Namespace(response_filter="refusal",
+        self.assertEqual(helper.pool_options(argparse.Namespace(response_label_filter="refusal",
                                                                 dedup=True)), BOTH)
         with self.assertRaises(ValueError):
             helper.PoolOptions("compliance")
@@ -147,7 +147,7 @@ class PoolOptionTests(unittest.TestCase):
         self.assertEqual(train_jobs.dataset_groups("wildguardmix", 3, "subcategory"),
                          (["a", "b", "random", "evenly"], {}))
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
-            train_jobs.parse_args(["--ckpt_dir", "x", "--response_filter", "refusal",
+            train_jobs.parse_args(["--ckpt_dir", "x", "--response_label_filter", "refusal",
                                    "--datasets", "aegis"])
         args = train_jobs.parse_args(["--ckpt_dir", "x", "--dedup"])
         self.assertEqual(args.options, DEDUP)
@@ -160,7 +160,7 @@ class PoolOptionTests(unittest.TestCase):
                     num_train=3, harmful_rate=1.0, general_rate=0.0,
                     alignment_dataset="wildguardmix", abbr=abbr, group_by="subcategory",
                     benign_data_type="vanilla_benign", seed=7, max_length=100,
-                    response_filter=options.response_filter, dedup=options.dedup)
+                    response_label_filter=options.response_label_filter, dedup=options.dedup)
                 train_df, available, _, _ = helper.build_training_data(
                     args, FakeTokenizer(), samples_dir=samples)
                 expected = self.df.loc[self.pool(abbr, options, harmful_count=3)]
@@ -221,9 +221,9 @@ class PoolOptionTests(unittest.TestCase):
 
     def test_scripts_accept_the_options(self):
         cases = {
-            sd: [(["--response_filter", "refusal"], ["wildguardmix"]),
+            sd: [(["--response_label_filter", "refusal"], ["wildguardmix"]),
                  (["--dedup"], list(cd.DEFAULT_DATASETS))],
-            cd: [(["--response_filter", "refusal"], ["wildguardmix"]),
+            cd: [(["--response_label_filter", "refusal"], ["wildguardmix"]),
                  (["--dedup"], list(cd.DEFAULT_DATASETS))],
         }
         for module, runs in cases.items():
@@ -233,13 +233,13 @@ class PoolOptionTests(unittest.TestCase):
                     args = module.parse_args()
                     self.assertEqual(args.datasets, datasets)
             with self.subTest(module=module.__name__, argv="refusal on aegis"), \
-                    mock.patch.object(sys, "argv", ["prog", "--response_filter", "refusal",
+                    mock.patch.object(sys, "argv", ["prog", "--response_label_filter", "refusal",
                                                     "--datasets", "aegis"]), \
                     mock.patch("sys.stderr"), self.assertRaises(SystemExit):
                 module.parse_args()
         # Diversity scores of other options get their own root.
         for argv, root in (([], "diversity"), (["--dedup"], "diversity/dedup"),
-                           (["--response_filter", "refusal", "--dedup"],
+                           (["--response_label_filter", "refusal", "--dedup"],
                             "diversity/refusal_dedup")):
             with mock.patch.object(sys, "argv", ["prog", *argv]):
                 self.assertTrue(cd.parse_args().output_dir.as_posix().endswith(root))
@@ -267,7 +267,7 @@ class PoolOptionTests(unittest.TestCase):
             expected = {"a": self.pool("a", options), "b": self.pool("b", options),
                         "random": self.pool("random", options, harmful_count=3),
                         "evenly": self.pool("evenly", options, harmful_count=3)}
-            if options.response_filter == "safe":
+            if options.response_label_filter == "safe":
                 expected["benign"] = self.pool("benign", options)
             self.assertEqual({abbr: pool for abbr, (pool, _) in seen.items() if abbr != "overall"},
                              expected)

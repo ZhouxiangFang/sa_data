@@ -40,7 +40,7 @@ LEGACY_SEED = 42
 # same options the same way (eligible_rows): training on a subcategory or a baseline
 # (align.py), scoring its diversity (calculate_diversity.py) and selecting from the
 # whole dataset (select_data.py).
-RESPONSE_FILTERS = ("safe", "refusal")
+RESPONSE_LABEL_FILTERS = ("safe", "refusal")
 # Datasets that label whether a response is a refusal (response_refusal_label).
 REFUSAL_LABELED_DATASETS = ("wildguardmix",)
 
@@ -49,7 +49,7 @@ REFUSAL_LABELED_DATASETS = ("wildguardmix",)
 class PoolOptions:
     """Training-pool filters on top of the harmful (or benign) prompt label.
 
-    response_filter: "safe" (default) keeps responses labeled safe/unharmful, which in
+    response_label_filter: "safe" (default) keeps responses labeled safe/unharmful, which in
     WildGuardMix includes compliances judged harmless; "refusal" (WildGuardMix only)
     keeps only those also labeled a refusal (one per harmful prompt there).
     dedup: keep only the first eligible row of each prompt (default: every row, so a
@@ -58,18 +58,18 @@ class PoolOptions:
     named with `tag` (e.g. refusal, dedup, refusal_dedup).
     """
 
-    response_filter: str = "safe"
+    response_label_filter: str = "safe"
     dedup: bool = False
 
     def __post_init__(self):
-        if self.response_filter not in RESPONSE_FILTERS:
-            raise ValueError(f"Unknown response filter {self.response_filter!r}; "
-                             f"choose from {RESPONSE_FILTERS}")
+        if self.response_label_filter not in RESPONSE_LABEL_FILTERS:
+            raise ValueError(f"Unknown response filter {self.response_label_filter!r}; "
+                             f"choose from {RESPONSE_LABEL_FILTERS}")
 
     @property
     def tag(self):
         """'' for the default options, else their folder suffix, e.g. refusal_dedup."""
-        parts = [] if self.response_filter == "safe" else [self.response_filter]
+        parts = [] if self.response_label_filter == "safe" else [self.response_label_filter]
         return "_".join(parts + (["dedup"] if self.dedup else []))
 
     def folder(self, name):
@@ -77,8 +77,8 @@ class PoolOptions:
         return f"{name}_{self.tag}" if self.tag else name
 
     def check(self, dataset_name):
-        if self.response_filter == "refusal" and dataset_name not in REFUSAL_LABELED_DATASETS:
-            raise ValueError(f"--response_filter refusal needs refusal labels, which only "
+        if self.response_label_filter == "refusal" and dataset_name not in REFUSAL_LABELED_DATASETS:
+            raise ValueError(f"--response_label_filter refusal needs refusal labels, which only "
                              f"{', '.join(REFUSAL_LABELED_DATASETS)} has (not {dataset_name})")
 
 
@@ -86,9 +86,9 @@ DEFAULT_POOL = PoolOptions()
 
 
 def add_pool_arguments(parser):
-    """--response_filter and --dedup, shared by every script that builds a training pool."""
+    """--response_label_filter and --dedup, shared by every script that builds a training pool."""
     parser.add_argument(
-        "--response_filter", choices=RESPONSE_FILTERS, default="safe",
+        "--response_label_filter", choices=RESPONSE_LABEL_FILTERS, default="safe",
         help="Responses that can be training targets: safe (default; labeled safe/unharmful, "
              "which in WildGuardMix includes harmless compliances) or refusal (WildGuardMix "
              "only; also labeled a refusal)")
@@ -100,7 +100,7 @@ def add_pool_arguments(parser):
 
 def pool_options(args):
     """PoolOptions of parsed arguments (the default for callers without the options)."""
-    return PoolOptions(getattr(args, "response_filter", "safe"), bool(getattr(args, "dedup", False)))
+    return PoolOptions(getattr(args, "response_label_filter", "safe"), bool(getattr(args, "dedup", False)))
 
 
 def resolve_pool_options(parser, args, default_datasets):
@@ -110,10 +110,10 @@ def resolve_pool_options(parser, args, default_datasets):
     args.options = pool_options(args)
     if not args.datasets:
         args.datasets = [dataset for dataset in default_datasets
-                         if args.options.response_filter == "safe"
+                         if args.options.response_label_filter == "safe"
                          or dataset in REFUSAL_LABELED_DATASETS]
         if not args.datasets:
-            parser.error(f"--response_filter refusal needs {' or '.join(REFUSAL_LABELED_DATASETS)}")
+            parser.error(f"--response_label_filter refusal needs {' or '.join(REFUSAL_LABELED_DATASETS)}")
     for dataset in args.datasets:
         try:
             args.options.check(dataset)
@@ -250,7 +250,7 @@ def group_sizes(dataset_name, group_by="subcategory", options=DEFAULT_POOL, df=N
         abbrs = [c['abbr'] for c in subcategory_stats(dataset_name).values()]
         _SUBCATEGORY_SIZES[key] = {
             abbr: len(select_harmful_subcategory(df, dataset_name, abbr, options=options))
-            for abbr in abbrs if not (abbr == 'benign' and options.response_filter == 'refusal')}
+            for abbr in abbrs if not (abbr == 'benign' and options.response_label_filter == 'refusal')}
     return dict(_SUBCATEGORY_SIZES[key])
 
 
@@ -502,21 +502,21 @@ def clean_pairs(df: pd.DataFrame) -> pd.DataFrame:
 def eligible_rows(df: pd.DataFrame, dataset_name: str, prompt_labels=HARMFUL_LABELS,
                   options: PoolOptions = DEFAULT_POOL) -> pd.DataFrame:
     """Rows that can be training examples, in dataset order: the prompt label is in
-    prompt_labels, the response is labeled safe/unharmful (and, with response_filter
+    prompt_labels, the response is labeled safe/unharmful (and, with response_label_filter
     refusal, a refusal) and the pair is non-empty (clean_pairs); with dedup, only the
     first such row of each prompt. Subcategory pools are taken from these rows, so a
     deduplicated prompt keeps the same row in every pool."""
     options.check(dataset_name)
     column = "prompt_harm_label" if dataset_name in ("wildguardmix", "gretel") else "prompt_label"
     required = {"prompt", "response", "response_harm_label", column}
-    if options.response_filter == "refusal":
+    if options.response_label_filter == "refusal":
         required.add("response_refusal_label")
     missing = sorted(required.difference(df.columns))
     if missing:
         raise ValueError(f"{dataset_name} is missing required columns: {missing}")
     keep = (normalize_label(df[column]).isin(prompt_labels)
             & normalize_label(df["response_harm_label"]).isin(SAFE_LABELS))
-    if options.response_filter == "refusal":
+    if options.response_label_filter == "refusal":
         keep &= normalize_label(df["response_refusal_label"]).isin({"refusal"})
     rows = clean_pairs(df[keep])
     if options.dedup:
@@ -554,8 +554,8 @@ def select_harmful_subcategory(
     if "sub_abbrs" not in df.columns:
         raise ValueError(f"{dataset_name} is missing required columns: ['sub_abbrs']")
     benign = abbr.lower() == "benign"
-    if benign and options.response_filter == "refusal":
-        raise ValueError("--response_filter refusal applies to harmful prompts only")
+    if benign and options.response_label_filter == "refusal":
+        raise ValueError("--response_label_filter refusal applies to harmful prompts only")
 
     if abbr in BASELINE_ABBRS:
         if harmful_count is None:

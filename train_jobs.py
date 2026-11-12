@@ -12,7 +12,7 @@ Groups default to every non-benign subcategory with enough examples for the
 harmful part (or, with --group_by tactic, every such Gretel tactic), then the random
 and evenly baselines. With --group_by selection the groups are the subsets
 select_data.py saved for the seed (data/seed<seed>/<dataset>/<name>_<harmful count>.csv).
---response_filter and --dedup are align.py's pool options: group sizes count the rows
+--response_label_filter and --dedup are align.py's pool options: group sizes count the rows
 that pass them, and selected subsets come from data/seed<seed>/<dataset>_<tag>/.
 Launchers (chili/train.sh, a Slurm array) train the "train" jobs with align.py and the
 same settings.

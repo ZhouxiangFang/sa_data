@@ -9,7 +9,7 @@ usage() {
     cat <<'EOF'
 Usage: range/run.sh [--seed SEED] [--tactic | --selected] [--models MODEL...]
                     [--datasets DATASET...] [--abbrs GROUP...] [--skip STAGE...]
-                    [--response_filter safe|refusal] [--dedup] [--num_train N] [--dry_run]
+                    [--response_label_filter safe|refusal] [--dedup] [--num_train N] [--dry_run]
 
 The run of chili/run.sh (seed 43 by default; --tactic for the Gretel tactic setting,
 --selected for the selected-data setting), submitted as Slurm jobs:
@@ -26,7 +26,7 @@ The run of chili/run.sh (seed 43 by default; --tactic for the Gretel tactic sett
              one CPU job (range/post.sh) once all the jobs above have ended; not with
              --selected, and plot not with --tactic or pool options
 --abbrs trains only the named groups, e.g. --selected --abbrs lexical_hdd random.
-Pool options, as in chili/run.sh: --response_filter refusal keeps only harmful examples whose
+Pool options, as in chili/run.sh: --response_label_filter refusal keeps only harmful examples whose
 response is labeled a refusal (wildguardmix only, then the default dataset), --dedup keeps
 one row per prompt. They make their own setting named with their tag (refusal, dedup or
 refusal_dedup): results in ablations/<tag>/ (ablations/selected_<tag>/,
@@ -34,7 +34,7 @@ ablations/gretel_tactic_<tag>/), diversity in diversity/<tag>/, subsets in
 data/seed<seed>/<dataset>_<tag>/.
 --num_train N sets the examples per run (default 1800, or 900 with --tactic; a third harmful,
 which is also the diversity and subset size). Another size makes its own setting, named with
-the harmful count: e.g. --response_filter refusal --num_train 1500 is refusal_500, and
+the harmful count: e.g. --response_label_filter refusal --num_train 1500 is refusal_500, and
 --num_train 1500 alone default_500 (see setting_setup in range/common.sh).
 --skip leaves stages out. Rerunning resumes: training skips jobs whose checkpoint or
 results exist, and saved checkpoints are evaluated. Watch with: squeue --me
@@ -43,13 +43,13 @@ EOF
 
 args=("$@")
 seed=43 tactic=0 selected=0 models=() datasets=() abbrs=() skip=() dry_run=0
-response_filter=safe dedup=0 num_train=""
+response_label_filter=safe dedup=0 num_train=""
 while (( $# )); do
     case $1 in
         --seed) (( $# >= 2 )) || { echo "--seed needs a value" >&2; exit 2; }; seed=$2; shift 2 ;;
         --tactic) tactic=1; shift ;;
         --selected) selected=1; shift ;;
-        --response_filter|--num_train)
+        --response_label_filter|--num_train)
             (( $# >= 2 )) || { echo "$1 needs a value" >&2; exit 2; }
             printf -v "${1#--}" '%s' "$2"; shift 2 ;;
         --dedup) dedup=1; shift ;;

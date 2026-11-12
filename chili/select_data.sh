@@ -19,7 +19,7 @@ Results: data/seed<seed>/<dataset>/<metric>[_<embedder>]_600.csv.
 
 select_data.py options go after --, e.g. --metrics semantic_vendi lexical_hdd,
 --baselines qdit, --embedding_models bge-m3, --stratify none, --size 300, --overwrite,
-and the pool options --response_filter refusal (wildguardmix only, then the default
+and the pool options --response_label_filter refusal (wildguardmix only, then the default
 dataset) and --dedup (one row per prompt), whose subsets go to
 data/seed<seed>/<dataset>_<tag>/ (e.g. wildguardmix_refusal).
 Existing CSVs are kept, so rerunning resumes; CSVs from before stratified selection stop
@@ -45,7 +45,7 @@ done
 if (( ! ${#datasets[@]} )); then
     datasets=("${TRAIN_DATASETS[@]}")
     # Only wildguardmix labels refusals.
-    [[ " ${select_args[*]} " =~ \ --response_filter[=\ ]refusal\  ]] && datasets=(wildguardmix)
+    [[ " ${select_args[*]} " =~ \ --response_label_filter[=\ ]refusal\  ]] && datasets=(wildguardmix)
 fi
 # The Vendi metrics run on CPU threads; OMP_NUM_THREADS (4, from common.sh) would cap them.
 threads=${THREADS:-32}
