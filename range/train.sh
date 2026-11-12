@@ -20,11 +20,16 @@ Usage: range/train.sh [options] [-- align.py options]
   --harmful_rate R       Harmful fraction (default: 1/3)
   --general_rate R       General-instruction fraction (default: 1/3); benign gets the rest
   --seed SEED            Run seed (default: 43)
-  --output_dir DIR       Checkpoint folder (default: /scratch/zf28/ckpts/seed<seed>)
+  --response_filter F    Harmful-example responses: safe (default) or refusal (wildguardmix
+                         only, then the default dataset); align.py's pool option, as is --dedup
+  --dedup                Keep one row per prompt (default: every row)
+  --output_dir DIR       Checkpoint folder (default: /scratch/zf28/ckpts/seed<seed>, plus
+                         /<tag> with pool options: refusal, dedup or refusal_dedup)
   --results_dir DIR      Also skip jobs already evaluated into DIR (eval.py --output_dir)
   --eval                 Also evaluate each checkpoint (eval.py --output_dir RESULTS_DIR,
-                         default results/) once it is trained, then delete it; checkpoints
-                         saved by an earlier run are evaluated right away
+                         default results/, or ablations/<tag>/ with pool options) once it is
+                         trained, then delete it; checkpoints saved by an earlier run are
+                         evaluated right away
   --eval_only            Only evaluate the saved checkpoints (implies --eval)
   --dry_run              Print the plan and sbatch commands without submitting
 
@@ -38,7 +43,7 @@ DEPENDENCY (e.g. afterany:<job>) delays the training array until that job ends.
 EOF
 }
 
-models=() datasets=() abbrs=() align_args=()
+models=() datasets=() abbrs=() align_args=() response_filter=safe dedup=0
 group_by=subcategory num_train=1800 harmful_rate=0.3333333333333333
 general_rate=0.3333333333333333 seed=43 output_dir="" results_dir="" eval=0 eval_only=0 dry_run=0
 while (( $# )); do
@@ -48,7 +53,8 @@ while (( $# )); do
             shift
             while (( $# )) && [[ $1 != --* ]]; do add_values "$list" "$1"; shift; done
             ;;
-        --group_by|--num_train|--harmful_rate|--general_rate|--seed|--output_dir|--results_dir)
+        --dedup) dedup=1; shift ;;
+        --response_filter|--group_by|--num_train|--harmful_rate|--general_rate|--seed|--output_dir|--results_dir)
             (( $# >= 2 )) || { echo "$1 needs a value" >&2; exit 2; }
             printf -v "${1#--}" '%s' "$2"
             shift 2
@@ -61,10 +67,16 @@ while (( $# )); do
         *) echo "Unknown option: $1 (align.py options go after --)" >&2; exit 2 ;;
     esac
 done
-output_dir=${output_dir:-/scratch/zf28/ckpts/seed$seed}
-(( eval )) && results_dir=${results_dir:-$ROOT/results}
+# Pool options (align.py) reuse the checkpoint names, so their checkpoints and results get
+# their own folders.
+pool_setup || exit 2
+output_dir=${output_dir:-/scratch/zf28/ckpts/seed$seed${tag:+/$tag}}
+if (( eval )) && [[ -z $results_dir ]]; then
+    results_dir=$ROOT/results
+    [[ -n $tag ]] && results_dir=$ROOT/ablations/$tag
+fi
 settings=(--group_by "$group_by" --num_train "$num_train" --harmful_rate "$harmful_rate"
-          --general_rate "$general_rate" --seed "$seed")
+          --general_rate "$general_rate" --seed "$seed" "${pool_opts[@]}")
 
 if (( EFFECTIVE_BATCH % (TRAIN_NGPUS * MICRO_BATCH) )); then
     echo "EFFECTIVE_BATCH=$EFFECTIVE_BATCH is not a multiple of" \
@@ -117,7 +129,9 @@ while IFS= read -r line; do
     [[ $status == train ]] && train_lines+=("$line")
     [[ $status == saved ]] && saved_lines+=("$line")
 done <<< "$jobs_tsv"
-echo "Seed $seed, $group_by groups, $num_train examples: ${count[train]} to train," \
+pool_note="$response_filter responses"
+(( dedup )) && pool_note+=", one row per prompt"
+echo "Seed $seed, $group_by groups, $num_train examples, $pool_note: ${count[train]} to train," \
      "${count[saved]} saved, ${count[done]} evaluated. Checkpoints: $output_dir"
 (( eval_only )) && train_lines=()
 
@@ -131,7 +145,7 @@ sbatch_or_echo() {
     fi
 }
 
-mkdir -p -- "$output_dir"
+(( dry_run )) || mkdir -p -- "$output_dir"
 read -ra eval_opts <<< "$(gpu_opts 1)"
 eval_opts+=(--cpus-per-task="$EVAL_CPUS" --mem="$EVAL_MEM"
            --time="$EVAL_TIME" --kill-on-invalid-dep=yes)

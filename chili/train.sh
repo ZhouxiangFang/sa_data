@@ -60,11 +60,8 @@ while (( $# )); do
         *) echo "Unknown option: $1 (align.py options go after --)" >&2; exit 2 ;;
     esac
 done
-# Pool options (align.py) reuse the checkpoint names, so their checkpoints get their own
-# folder, named like helper.PoolOptions.tag.
-pool_opts=(--response_filter "$response_filter") tag=""
-[[ $response_filter == safe ]] || tag=$response_filter
-(( dedup )) && pool_opts+=(--dedup) tag=${tag:+${tag}_}dedup
+# Pool options (align.py) reuse the checkpoint names, so their checkpoints get their own folder.
+pool_setup || exit 2
 output_dir=${output_dir:-/scratch/zf28/ckpts/seed$seed${tag:+/$tag}}
 EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32}
 LEARNING_RATE=${LEARNING_RATE:-1e-5}
@@ -119,8 +116,9 @@ while IFS=$'\t' read -r model dataset abbr checkpoint status; do
     [[ $status == train ]] || continue
     job_model+=("$model") job_dataset+=("$dataset") job_abbr+=("$abbr") job_ckpt+=("$checkpoint")
 done <<< "$jobs_tsv"
-echo "Seed $seed, $group_by groups, $num_train examples, $response_filter responses" \
-     "$( (( dedup )) && echo '(one row per prompt)'): ${count[train]} to train," \
+pool_note="$response_filter responses"
+(( dedup )) && pool_note+=", one row per prompt"
+echo "Seed $seed, $group_by groups, $num_train examples, $pool_note: ${count[train]} to train," \
      "${count[saved]} saved, ${count[done]} evaluated. Checkpoints: $output_dir"
 echo "Effective batch $EFFECTIVE_BATCH (micro-batch $micro_batch), learning rate $LEARNING_RATE"
 (( ${#job_model[@]} )) || exit 0

@@ -61,24 +61,10 @@ while (( $# )); do
 done
 
 (( tactic && selected )) && { echo "--tactic and --selected are different settings" >&2; exit 2; }
-# Pool options (helper.PoolOptions): the same flags for every stage, and their tag
-# (refusal, dedup, refusal_dedup) names the setting's folders.
-case $response_filter in
-    safe|refusal) ;;
-    *) echo "--response_filter is safe or refusal, not $response_filter" >&2; exit 2 ;;
-esac
-pool_opts=() tag_parts=()
-[[ $response_filter == refusal ]] && pool_opts+=(--response_filter refusal) tag_parts+=(refusal)
-(( dedup )) && pool_opts+=(--dedup) tag_parts+=(dedup)
-tag=$(IFS=_; echo "${tag_parts[*]}")
-if [[ $response_filter == refusal ]]; then
-    (( tactic )) && { echo "--response_filter refusal needs wildguardmix; --tactic is gretel" >&2; exit 2; }
-    (( ${#datasets[@]} )) || datasets=(wildguardmix)
-    for dataset in "${datasets[@]}"; do
-        [[ $dataset == wildguardmix ]] ||
-            { echo "--response_filter refusal: only wildguardmix labels refusals, not $dataset" >&2; exit 2; }
-    done
-fi
+# Pool options: the same flags for every stage; their tag names the setting's folders.
+(( tactic )) && [[ $response_filter == refusal ]] &&
+    { echo "--response_filter refusal needs wildguardmix; --tactic is gretel" >&2; exit 2; }
+pool_setup || exit 2
 embedders=(bge-m3 qwen3-embedding-0.6b)
 if (( selected )); then
     setting=selected${tag:+_$tag} results=$ROOT/ablations/selected${tag:+_$tag}

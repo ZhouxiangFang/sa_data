@@ -10,5 +10,7 @@ name=${NAME:-job}
 opts=(--job-name="$name" --cpus-per-task="$EVAL_CPUS" --mem="$EVAL_MEM" --time="$EVAL_TIME"
       --output="$LOG_DIR/${name}_%j.log")
 (( ${GPUS:-1} )) && { read -ra gpu <<< "$(gpu_opts "${GPUS:-1}")"; opts+=("${gpu[@]}"); }
-id=$(submit "${opts[@]}" ${DEPENDENCY:+--dependency="$DEPENDENCY"} "$RANGE_DIR/job.sbatch" "$@") || exit
+# A dependency that can no longer be met (e.g. afterok on a failed job) cancels the job.
+id=$(submit "${opts[@]}" ${DEPENDENCY:+--dependency="$DEPENDENCY" --kill-on-invalid-dep=yes} \
+    "$RANGE_DIR/job.sbatch" "$@") || exit
 echo "Submitted job $id: $*"
