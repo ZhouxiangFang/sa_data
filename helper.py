@@ -11,11 +11,12 @@ from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
-from datasets import load_dataset
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(os.path.dirname(MODULE_DIR), "data")
 
+# Training datasets, in run order: the default of every script that trains or scores them.
+TRAIN_DATASETS = ("aegis", "wildguardmix", "gretel")
 SAFE_LABELS = {"safe", "unharmful"}
 HARMFUL_LABELS = {"harmful", "unsafe"}
 BENIGN_DATA_TYPES = ("vanilla_benign", "adversarial_benign", "mix")
@@ -192,9 +193,12 @@ model_mapping = {
 GIT20K_MODELS = ("llama3.1_git20k", "mistral_git20k", "olmo2_git20k", "qwen2.5_git20k")
 
 
-def filter_safe_responses(df: pd.DataFrame) -> pd.DataFrame:
-    label = df['response_harm_label'].astype(str).str.lower().str.strip()
-    return df[~label.isin({'harmful', 'unsafe'})]
+def load_dataset(*args, **kwargs):
+    """datasets.load_dataset, imported on first use: importing datasets takes about 2 s,
+    which scripts that never load a dataset (planning, plotting) need not pay."""
+    from datasets import load_dataset as hf_load_dataset
+
+    return hf_load_dataset(*args, **kwargs)
 
 @lru_cache(maxsize=None)
 def _subcategory_stats(path, dataset_name):
@@ -373,10 +377,6 @@ AI assistant:
 Answers: [/INST]
 <|assistant|>
 """
-
-def print_rank(rank, msg):
-    if rank == 0:
-        print(msg)
 
 def print_config(args):
     print("Configuration:")

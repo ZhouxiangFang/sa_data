@@ -26,6 +26,7 @@ RANGE_DIR=${RANGE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
 SA_DIR=$(dirname -- "$RANGE_DIR")
 ROOT=$(dirname -- "$SA_DIR")
 export RANGE_DIR SA_DIR ROOT
+source "$SA_DIR/settings.sh"
 LOG_DIR=${LOG_DIR:-$ROOT/log/slurm}
 mkdir -p -- "$LOG_DIR"
 
@@ -95,39 +96,4 @@ submit() {
     id=${id%%;*}
     [[ -n ${JOB_IDS_FILE:-} ]] && echo "$id" >> "$JOB_IDS_FILE"
     echo "$id"
-}
-
-# Splits comma- or space-separated values into the named array: add_values ARRAY VALUE...
-add_values() {
-    local -n target=$1
-    local value
-    local -a parts
-    shift
-    for value; do
-        IFS=, read -ra parts <<< "$value"
-        target+=("${parts[@]}")
-    done
-}
-
-# pool_setup: checks response_filter (safe or refusal) and dedup (0 or 1), the pool options
-# of helper.PoolOptions, and sets pool_opts (their python flags) and tag ('' for the
-# defaults, else refusal, dedup or refusal_dedup: the suffix of the option's folders). With
-# the refusal filter, an empty datasets array becomes (wildguardmix), the only dataset with
-# refusal labels, and any other dataset is an error. Returns 2 on bad options.
-pool_setup() {
-    local dataset
-    case $response_filter in
-        safe|refusal) ;;
-        *) echo "--response_filter is safe or refusal, not $response_filter" >&2; return 2 ;;
-    esac
-    pool_opts=(--response_filter "$response_filter") tag=""
-    [[ $response_filter == safe ]] || tag=$response_filter
-    (( dedup )) && pool_opts+=(--dedup) tag=${tag:+${tag}_}dedup
-    [[ $response_filter == refusal ]] || return 0
-    (( ${#datasets[@]} )) || datasets=(wildguardmix)
-    for dataset in "${datasets[@]}"; do
-        [[ $dataset == wildguardmix ]] && continue
-        echo "--response_filter refusal: only wildguardmix labels refusals, not $dataset" >&2
-        return 2
-    done
 }

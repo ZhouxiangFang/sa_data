@@ -40,7 +40,11 @@ H100, whichever frees first (`EVAL_GPU=hopper`; or `h100`, `h200`, `47gb`). At m
 Settings and pool options follow `chili/run.sh`: `--tactic` (results in `ablations/gretel_tactic/`),
 `--selected` (`ablations/selected/`), and `--response_filter refusal` (WildGuardMix only) / `--dedup`,
 which every stage applies alike and which get their own folders named by their tag (`ablations/<tag>/`,
-`diversity/<tag>/`, `data/seed<seed>/<dataset>_<tag>/`, checkpoints in `.../seed<seed>/<setting>/`).
+`diversity/<tag>/`, `data/seed<seed>/<dataset>_<tag>/`, checkpoints in `$CKPT_ROOT/seed<seed>/<setting>/`).
+`--num_train N` changes the run size (default 1800, or 900 with `--tactic`; a third is harmful, which
+is also the diversity and subset size); another size gets its own setting named with the harmful count,
+e.g. `--response_filter refusal --num_train 1500` is `refusal_500` and `--num_train 1500` alone `default_500`.
+Both clusters resolve settings with `setting_setup` in `sa_data/settings.sh`, shared with `chili/`.
 The `--selected` follow-up job runs `range/run.sh` on a compute node, so it needs `sbatch` there; if it
 fails, rerun the same command with `--skip select`.
 

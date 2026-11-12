@@ -94,7 +94,7 @@ Examples:
     python calculate_diversity.py --datasets aegis --harmful_rate 0.5
     python calculate_diversity.py --datasets wildguardmix --abbr cyberattack
     python calculate_diversity.py --datasets gretel --abbr information_hazards
-    python calculate_diversity.py --datasets gretel --group_by tactic --num_train 300 --n_clusters 6
+    python calculate_diversity.py --datasets gretel --group_by tactic --num_train 300
 """
 
 import argparse
@@ -118,6 +118,7 @@ from helper import (
     BENIGN_DATA_TYPES,
     DEFAULT_POOL,
     DEFAULT_SEED,
+    TRAIN_DATASETS,
     TRAIN_SAMPLES_DIR,
     add_pool_arguments,
     load_wildjailbreak_benign,
@@ -134,18 +135,25 @@ from helper import (
 )
 
 SUPPORTED = {
-    'train': ('wildguardmix', 'aegis', 'gretel'),
+    'train': TRAIN_DATASETS,
     'test': tuple(safety_test_datasets),
 }
 EMBEDDING_MODEL_IDS = ('BAAI/bge-m3', 'Qwen/Qwen3-Embedding-0.6B')
-# Training datasets scored by default, as in a default run (chili/run.sh).
-DEFAULT_DATASETS = ('wildguardmix', 'aegis', 'gretel')
+# Training datasets scored by default, as in a default run.
+DEFAULT_DATASETS = TRAIN_DATASETS
 # Display names of the training-data baselines (helper.BASELINE_ABBRS).
 BASELINE_NAMES = {'random': 'Random baseline', 'evenly': 'Evenly baseline'}
 HDD_DRAWS = 42
 LEXICAL_DISTINCT_ORDERS = (2, 3, 4)
 POS_NGRAM_ORDERS = (1, 2, 3, 4)
 KNN_KS = (1, 3, 5, 10)
+# k-means clusters for cluster inertia: one per this many scored examples (NovelSum's 50), so
+# 12 clusters at 600 examples and 6 at 300.
+EXAMPLES_PER_CLUSTER = 50
+
+
+def default_n_clusters(num_train):
+    return max(1, num_train // EXAMPLES_PER_CLUSTER)
 
 
 def embedding_name(model_id):
@@ -393,7 +401,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
                               harmful_rate=1.0, benign_data_type='vanilla_benign',
                               max_length=4096, max_n=5, seeds=None,
                               num_proc=4, split='train', abbrs=None, benign_pool=None,
-                              embedders=None, n_clusters=12, knn_ks=KNN_KS,
+                              embedders=None, n_clusters=None, knn_ks=KNN_KS,
                               group_by='subcategory', baselines=True, samples_dir=None,
                               options=DEFAULT_POOL):
     """Score the training samples of each group and seed; skip groups with insufficient data.
@@ -422,6 +430,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
         raise ValueError(f'Seeds must be distinct: {seeds}')
     if not 0 <= harmful_rate <= 1 or max_length < 1:
         raise ValueError('harmful_rate must be in [0, 1] and max_length positive')
+    n_clusters = n_clusters or default_n_clusters(num_train)
     if not 1 <= n_clusters <= num_train or not all(1 <= k < num_train for k in knn_ks):
         raise ValueError('n_clusters must be in [1, num_train] and each knn_ks in [1, num_train)')
 
@@ -657,9 +666,9 @@ def parse_args():
     parser.add_argument('--max_length', type=int, default=4096)
     parser.add_argument('--max_n', type=int, default=5,
                         help='Report structural Self-BLEU-1 through Self-BLEU-max_n (default: 5)')
-    parser.add_argument('--n_clusters', type=int, default=12,
-                        help='k-means clusters for semantic cluster inertia; 12 keeps '
-                             "NovelSum's 50 examples per cluster at 600 examples (default: 12)")
+    parser.add_argument('--n_clusters', type=int,
+                        help='k-means clusters for semantic cluster inertia (default: one per '
+                             f'{EXAMPLES_PER_CLUSTER} examples, as NovelSum: 12 at 600)')
     parser.add_argument('--knn_ks', '--knn_k', dest='knn_ks', type=int, nargs='+',
                         default=list(KNN_KS),
                         help='Neighbor counts for structural KNN cosine distance, one column '
@@ -707,6 +716,7 @@ def parse_args():
         parser.error('--harmful_rate must be between 0 and 1')
     if args.embed_batch_size < 1:
         parser.error('--embed_batch_size must be positive')
+    args.n_clusters = args.n_clusters or default_n_clusters(args.num_train)
     if (not 1 <= args.n_clusters <= args.num_train
             or not all(1 <= k < args.num_train for k in args.knn_ks)):
         parser.error('--n_clusters must be in [1, num_train] and each --knn_ks in [1, num_train)')

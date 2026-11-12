@@ -38,7 +38,7 @@ while (( $# )); do
     esac
 done
 if (( ! ${#datasets[@]} )); then
-    datasets=(aegis wildguardmix gretel)
+    datasets=("${TRAIN_DATASETS[@]}")
     # Only wildguardmix labels refusals.
     [[ " ${select_args[*]} " =~ \ --response_filter[=\ ]refusal\  ]] && datasets=(wildguardmix)
 fi

@@ -3,8 +3,8 @@
 Each value is the mean of the Pearson and Spearman coefficients between a
 diversity metric and the model-average harmful score, read from
 diversity/<model>/csv/<dataset>_diversity_safety_correlations.csv
-(written by plot_bars_diversity.py), for the --embedders folders (default:
-bge-m3 and qwen3-embedding-0.6b, the calculate_diversity.py defaults). Rows are grouped structural, lexical, then
+(written by plot_bars_diversity.py), for the --embedders folders (default: every
+embedding-model folder of --diversity_dir that has a csv/ folder). Rows are grouped structural, lexical, then
 semantic, and sorted alphabetically within each group. In each group, the
 lowest (most negative: more diversity, less harm) value of every model column is
 marked **bold** (Markdown). Every metric is listed except POS Self-BLEU-1, which
@@ -19,18 +19,25 @@ from pathlib import Path
 
 import pandas as pd
 
+from helper import TRAIN_DATASETS
 from plot_bars_diversity import METRICS, PLOT_METHODS
 from plot_bars_overall import DIVERSITY_DIR
 
 GROUP_ORDER = ('structural', 'lexical', 'semantic')
 SUMMARY_METRICS = [metric for metric in METRICS if metric != 'structural_self_bleu_1↓']
-# Folders of calculate_diversity.EMBEDDING_MODEL_IDS, the default embedding models.
-DEFAULT_EMBEDDERS = ('bge-m3', 'qwen3-embedding-0.6b')
 
 
-def correlation_table(diversity_dir, dataset, embedders=DEFAULT_EMBEDDERS):
+def embedder_folders(diversity_dir):
+    """Embedding-model folders of a diversity root: those with csv/, but not the per-seed
+    (seed<seed>/) or summary folders."""
+    return sorted(path.parent.name for path in Path(diversity_dir).glob('*/csv')
+                  if path.parent.name != 'summary' and not path.parent.name.startswith('seed'))
+
+
+def correlation_table(diversity_dir, dataset, embedders=None):
     """Metrics x embedding models of mean Pearson/Spearman coefficients, in embedders order."""
     columns = {}
+    embedders = embedders or embedder_folders(diversity_dir)
     for embedder in embedders:
         model_dir = diversity_dir / embedder
         path = model_dir / 'csv' / f'{dataset}_diversity_safety_correlations.csv'
@@ -64,10 +71,11 @@ def ranked(table):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--datasets', nargs='+', default=['aegis', 'gretel', 'wildguardmix'])
+    parser.add_argument('--datasets', nargs='+', default=list(TRAIN_DATASETS))
     parser.add_argument('--diversity_dir', type=Path, default=DIVERSITY_DIR)
-    parser.add_argument('--embedders', nargs='+', default=list(DEFAULT_EMBEDDERS),
-                        help='Embedding-model folders, one column each (default: %(default)s)')
+    parser.add_argument('--embedders', nargs='+',
+                        help='Embedding-model folders, one column each (default: every one '
+                             'in --diversity_dir)')
     parser.add_argument('--output_dir', type=Path, help='Default: <diversity_dir>/summary')
     args = parser.parse_args()
     output_dir = args.output_dir or args.diversity_dir / 'summary'

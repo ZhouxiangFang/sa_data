@@ -31,7 +31,7 @@ from matplotlib.patches import Patch
 import numpy as np
 import pandas as pd
 
-from helper import seed_dir
+from helper import TRAIN_DATASETS, seed_dir
 from plot_bars_diversity import (FIGURE_METRICS, GROUPS, LABELS, METRICS, PLOT_METHODS,
                                  TEST_DATASETS)
 from plot_bars_overall import DIVERSITY_DIR
@@ -171,7 +171,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--seeds", nargs="+", type=int, default=[43, 86])
-    parser.add_argument("--datasets", nargs="+", default=["aegis", "wildguardmix", "gretel"])
+    parser.add_argument("--datasets", nargs="+", default=list(TRAIN_DATASETS))
     parser.add_argument("--embedders", nargs="+", default=list(EMBEDDERS), choices=list(EMBEDDERS),
                         help="Embedding-model folders, one bar each (default: %(default)s)")
     parser.add_argument("--methods", nargs="+", default=list(PLOT_METHODS),

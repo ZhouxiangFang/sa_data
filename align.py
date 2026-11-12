@@ -75,7 +75,8 @@ MODULE_DIR = Path(__file__).resolve().parent
 DEFAULT_NUM_TRAIN = 1800
 DEFAULT_RATE = 1 / 3
 DEFAULT_GENERAL_DATASET = MODULE_DIR.parent / "data" / "git_data_20k.csv"
-DEFAULT_OUTPUT_DIR = Path("/scratch/zf28/ckpts")
+# Checkpoint root: CKPT_ROOT (set by range/common.sh), else /scratch/zf28/ckpts.
+DEFAULT_OUTPUT_DIR = Path(os.environ.get("CKPT_ROOT", "/scratch/zf28/ckpts"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -197,8 +198,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output_dir",
         type=Path,
-        help="Root directory for the trained checkpoint (default: /scratch/zf28/ckpts, "
-             "or /scratch/zf28/ckpts/<tag> with --response_filter refusal or --dedup).",
+        help=f"Root directory for the trained checkpoint (default: {DEFAULT_OUTPUT_DIR}, "
+             "plus /<tag> with --response_filter refusal or --dedup).",
     )
     parser.add_argument(
         "--run_name",

@@ -23,7 +23,7 @@ Usage: range/train.sh [options] [-- align.py options]
   --response_filter F    Harmful-example responses: safe (default) or refusal (wildguardmix
                          only, then the default dataset); align.py's pool option, as is --dedup
   --dedup                Keep one row per prompt (default: every row)
-  --output_dir DIR       Checkpoint folder (default: /scratch/zf28/ckpts/seed<seed>, plus
+  --output_dir DIR       Checkpoint folder (default: $CKPT_ROOT/seed<seed>, plus
                          /<tag> with pool options: refusal, dedup or refusal_dedup)
   --results_dir DIR      Also skip jobs already evaluated into DIR (eval.py --output_dir)
   --eval                 Also evaluate each checkpoint (eval.py --output_dir RESULTS_DIR,
@@ -70,7 +70,7 @@ done
 # Pool options (align.py) reuse the checkpoint names, so their checkpoints and results get
 # their own folders.
 pool_setup || exit 2
-output_dir=${output_dir:-/scratch/zf28/ckpts/seed$seed${tag:+/$tag}}
+output_dir=${output_dir:-$CKPT_ROOT/seed$seed${tag:+/$tag}}
 if (( eval )) && [[ -z $results_dir ]]; then
     results_dir=$ROOT/results
     [[ -n $tag ]] && results_dir=$ROOT/ablations/$tag

@@ -24,11 +24,12 @@ import sys
 from pathlib import Path
 
 from helper import (
-    BASELINE_ABBRS, DEFAULT_POOL, DEFAULT_SEED, GIT20K_MODELS, GROUP_BYS, add_pool_arguments,
-    checkpoint_name, group_sizes, mixture_counts, resolve_pool_options, selection_names,
+    BASELINE_ABBRS, DEFAULT_POOL, DEFAULT_SEED, GIT20K_MODELS, GROUP_BYS, TRAIN_DATASETS,
+    add_pool_arguments, checkpoint_name, group_sizes, mixture_counts, resolve_pool_options,
+    selection_names,
 )
 
-DATASETS = ("aegis", "wildguardmix", "gretel")
+DATASETS = TRAIN_DATASETS
 
 
 def parse_args(argv=None):
