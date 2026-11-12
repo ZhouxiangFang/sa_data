@@ -5,10 +5,11 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 
 usage() {
     cat <<'EOF'
-Usage: chili/select.sh [--seed SEED] [--datasets DATASET...] [-- select_data.py options]
+Usage: chili/select_data.sh [--seed SEED] [--datasets DATASET...] [-- select_data.py options]
 
 Selects 600-example subsets of aegis, wildguardmix and gretel (or --datasets) from every
-harmful prompt with a safe response: one per diversity metric the figures show (12, exact
+harmful example with a safe response (every row: a prompt with several safe responses
+is several candidates): one per diversity metric the figures show (12, exact
 greedy selection), one per NovelSum baseline (novelselect, kcenter_greedy, repr_filter,
 qdit, kmeans, farthest; on prompt embeddings) and the random and evenly baselines, with
 qwen3-embedding-0.6b: 20 subsets per dataset. All start from the same 50 random examples
@@ -17,7 +18,10 @@ pool's share of adversarial prompts (about 43%).
 Results: data/seed<seed>/<dataset>/<metric>[_<embedder>]_600.csv.
 
 select_data.py options go after --, e.g. --metrics semantic_vendi lexical_hdd,
---baselines qdit, --embedding_models bge-m3, --stratify none, --size 300, --overwrite.
+--baselines qdit, --embedding_models bge-m3, --stratify none, --size 300, --overwrite,
+and the pool options --response_filter refusal (wildguardmix only, then the default
+dataset) and --dedup (one row per prompt), whose subsets go to
+data/seed<seed>/<dataset>_<tag>/ (e.g. wildguardmix_refusal).
 Existing CSVs are kept, so rerunning resumes; CSVs from before stratified selection stop
 the run until they are moved away. Each dataset's log is
 log/select_seed<seed>_<dataset>_<time>.log. GPUS (default: every GPU) lists the GPUs to
@@ -38,7 +42,11 @@ while (( $# )); do
         *) echo "Unknown option: $1 (select_data.py options go after --)" >&2; exit 2 ;;
     esac
 done
-(( ${#datasets[@]} )) || datasets=(aegis wildguardmix gretel)
+if (( ! ${#datasets[@]} )); then
+    datasets=(aegis wildguardmix gretel)
+    # Only wildguardmix labels refusals.
+    [[ " ${select_args[*]} " =~ \ --response_filter[=\ ]refusal\  ]] && datasets=(wildguardmix)
+fi
 # The Vendi metrics run on CPU threads; OMP_NUM_THREADS (4, from common.sh) would cap them.
 threads=${THREADS:-32}
 export OMP_NUM_THREADS=$threads NUMBA_NUM_THREADS=$threads

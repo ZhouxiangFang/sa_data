@@ -35,7 +35,8 @@ class SelectionTests(unittest.TestCase):
         self.root = Path(folder.name)
         self.pool = pool_rows()
         for patch in (mock.patch.object(helper, "DATA_DIR", str(self.root)),
-                      mock.patch.object(helper, "selection_pool", lambda dataset: self.pool)):
+                      mock.patch.object(helper, "selection_pool",
+                                        lambda dataset, options=helper.DEFAULT_POOL: self.pool)):
             patch.start()
             self.addCleanup(patch.stop)
 
@@ -109,7 +110,7 @@ class SelectionTests(unittest.TestCase):
             "response_harm_label": ["unharmful", "unharmful", "unharmful", "harmful", "unharmful"],
             "sub_abbrs": [["small"], ["large"], ["large"], ["large"], ["large"]],
         })
-        self.assertEqual(helper.harmful_pairs(df, "wildguardmix")["prompt"].tolist(), ["a", "b"])
+        self.assertEqual(helper.eligible_rows(df, "wildguardmix")["prompt"].tolist(), ["a", "b"])
 
     def test_overlong_prompt_is_refused(self):
         self.pool.loc[5, "prompt"] = "x" * 200

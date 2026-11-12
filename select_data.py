@@ -2,9 +2,15 @@
 metric, and the selection strategies NovelSum (Yang et al., 2025) compares, as baselines.
 
 For each dataset the candidate pool is every harmful prompt with a safe response,
-from every subcategory (helper.selection_pool), with repeated prompts dropped (the
-first row is kept) and the prompts align.py would skip (at least --max_length
-tokens) removed.
+from every subcategory (helper.selection_pool), without the prompts align.py would
+skip (at least --max_length tokens). Every row is a candidate, so a prompt with
+several safe responses (WildGuardMix: a refusal and a harmless compliance; Aegis: the
+original model answer and NVIDIA's added refusals, often repeated verbatim) can be
+picked once per response. The pool options are
+align.py's: --response_filter refusal (wildguardmix only) keeps only refusals, and
+--dedup keeps the first row of each prompt; with either, results go to
+data/seed<seed>/<dataset>_<tag>/ (e.g. wildguardmix_refusal) and training reads them
+with the same options (chili/run.sh --selected --response_filter refusal).
 
 Strata (--stratify adversarial, the default): where the pool has an adversarial
 flag (wildguardmix), vanilla and adversarial prompts keep their pool shares in
@@ -78,7 +84,7 @@ but drawn from this pool and these initial examples):
 kcenter_greedy, qdit and novelselect are deterministic given the initial examples;
 repr_filter, kmeans, random and evenly also draw from --seed.
 
-Results go to data/seed<seed>/<dataset>/<metric>_<size>.csv, or
+Results go to data/seed<seed>/<dataset>[_<tag>]/<metric>_<size>.csv, or
 <metric>_<embedding model>_<size>.csv for the metrics and baselines that use an
 embedding model (semantic_*, structural_pos_*, structural_knn_cosine_*). A CSV
 holds the pool rows of the subset in selection order, with pool_index (the row's
@@ -108,6 +114,7 @@ Examples:
     python select_data.py --datasets aegis --metrics semantic_vendi lexical_hdd
     python select_data.py --embedding_models bge-m3 --size 300 --seed 44
     python select_data.py --metrics --baselines qdit random     # only two baselines
+    python select_data.py --response_filter refusal              # wildguardmix refusals only
 """
 
 import argparse
@@ -129,8 +136,11 @@ import calculate_diversity as cd
 from helper import (
     DATA_DIR,
     DEFAULT_MAX_LENGTH,
+    DEFAULT_POOL,
     DEFAULT_SEED,
+    add_pool_arguments,
     formatted_prompt_lengths,
+    resolve_pool_options,
     selection_pool,
 )
 
@@ -190,9 +200,11 @@ def metric_number(metric):
     return int(metric.rsplit('_', 1)[1])
 
 
-def output_path(output_dir, seed, dataset, metric, embedding, size):
+def output_path(output_dir, seed, dataset, metric, embedding, size, options=DEFAULT_POOL):
+    """<output_dir>/seed<seed>/<dataset>[_<options tag>]/<metric>[_<embedding>]_<size>.csv,
+    as helper.selection_csv names it for training."""
     name = f'{metric}_{embedding}_{size}.csv' if embedding else f'{metric}_{size}.csv'
-    return Path(output_dir) / f'seed{seed}' / dataset / name
+    return Path(output_dir) / f'seed{seed}' / options.folder(dataset) / name
 
 
 class Strata:
@@ -1205,15 +1217,17 @@ def greedy_select(objective, initial, size, minimize=False, label='', strata=Non
     return selected, scores
 
 
-def load_pool(dataset, tokenizer, max_length=DEFAULT_MAX_LENGTH):
-    """Harmful prompts with a safe response from every subcategory (helper.selection_pool),
-    one row per prompt, short enough to train on."""
-    pool = selection_pool(dataset)
+def load_pool(dataset, tokenizer, max_length=DEFAULT_MAX_LENGTH, options=DEFAULT_POOL):
+    """Harmful prompts with an eligible response from every subcategory
+    (helper.selection_pool with these pool options), short enough to train on. Without
+    options.dedup a prompt with several eligible responses is several rows."""
+    pool = selection_pool(dataset, options)
     rows = len(pool)
-    pool = pool.drop_duplicates('prompt')
     lengths = np.asarray(formatted_prompt_lengths(pool['prompt'].tolist(), tokenizer))
     pool = pool[lengths < max_length]
-    print(f'  Pool: {rows:,} rows, {len(pool):,} unique prompts under {max_length:,} tokens')
+    print(f'  Pool ({options.response_filter} responses'
+          f'{", one row per prompt" if options.dedup else ""}): {rows:,} rows, {len(pool):,} '
+          f'under {max_length:,} tokens ({pool["prompt"].nunique():,} distinct prompts)')
     return pool.rename_axis('pool_index').reset_index()
 
 
@@ -1252,8 +1266,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--datasets', nargs='+', type=str.lower, choices=DATASETS,
-                        default=list(cd.DEFAULT_DATASETS),
-                        help=f'Datasets to select from (default: {" ".join(cd.DEFAULT_DATASETS)})')
+                        help=f'Datasets to select from (default: {" ".join(cd.DEFAULT_DATASETS)}; '
+                             'wildguardmix with --response_filter refusal)')
     parser.add_argument('--embedding_models', '--embedding_model', dest='embedding_models',
                         nargs='+', default=list(DEFAULT_EMBEDDING_MODELS),
                         help='Embedding models for the metrics that need one: '
@@ -1296,7 +1310,9 @@ def parse_args():
     parser.add_argument('--embed_dtype', choices=('bfloat16', 'float16', 'float32'),
                         default='float32')
     parser.add_argument('--embed_batch_size', type=int, default=32)
+    add_pool_arguments(parser)
     args = parser.parse_args()
+    resolve_pool_options(parser, args, cd.DEFAULT_DATASETS)
     for metric in args.metrics:
         if not METRIC_PATTERN.fullmatch(metric):
             parser.error(f'Unknown metric {metric!r}; choose from: {" ".join(DEFAULT_METRICS)}')
@@ -1343,9 +1359,11 @@ def main():
     for dataset in args.datasets:
         jobs = [(metric, name) for metric in args.metrics + args.baselines
                 for name in (embedders if needs_embedding(metric) else [None])]
-        paths = {job: output_path(args.output_dir, args.seed, dataset, *job, args.size)
+        paths = {job: output_path(args.output_dir, args.seed, dataset, *job, args.size,
+                                  args.options)
                  for job in jobs}
-        folder = output_path(args.output_dir, args.seed, dataset, 'any', None, args.size).parent
+        folder = output_path(args.output_dir, args.seed, dataset, 'any', None, args.size,
+                             args.options).parent
         # Training lists every CSV in the folder, so earlier versions must not stay there.
         stale = stale_csvs(folder, args.size)
         others = [path for path in stale if path not in paths.values()]
@@ -1366,15 +1384,19 @@ def main():
 
             tokenizer = AutoTokenizer.from_pretrained(
                 model_mapping.get(args.model, args.model), trust_remote_code=True)
-        pool = load_pool(dataset, tokenizer, args.max_length)
-        print(f'  POS-tagging {len(pool):,} prompts...', flush=True)
-        tagged = cd.tag_corpus(pool['prompt'].tolist(), num_proc=args.num_proc)
-        # The metrics need at least one POS tag per prompt (as calculate_diversity.py).
-        keep = [bool(tags) for tags, _ in tagged]
-        pool = pool[keep].reset_index(drop=True)
-        tagged = [pair for pair, kept in zip(tagged, keep) if kept]
+        pool = load_pool(dataset, tokenizer, args.max_length, args.options)
+        prompts = list(dict.fromkeys(pool['prompt']))
+        print(f'  POS-tagging {len(prompts):,} distinct prompts...', flush=True)
+        tags_of = dict(zip(prompts, cd.tag_corpus(prompts, num_proc=args.num_proc)))
+        tagged = [tags_of[prompt] for prompt in pool['prompt']]
+        # The metrics need at least one POS tag per prompt; as calculate_diversity.py,
+        # stop rather than drop such prompts.
+        untagged = [prompt for prompt, (tags, _) in tags_of.items() if not tags]
+        if untagged:
+            raise SystemExit(f'{dataset}: {len(untagged)} prompts have no POS tags, e.g. '
+                             f'{untagged[0]!r}; the metrics cannot score them')
         if len(pool) < args.size:
-            raise SystemExit(f'{dataset}: the pool has {len(pool):,} prompts, fewer than '
+            raise SystemExit(f'{dataset}: the pool has {len(pool):,} rows, fewer than '
                              f'--size {args.size}')
         strata = pool_strata(pool, args.stratify)
         mismatched = [path for path in stale_csvs(folder, args.size, strata.names)

@@ -75,6 +75,11 @@ meaning, so all metrics use unit vectors. Squared-L2 DistSum would then equal 2 
 so it is not reported.
 Test splits remain available for prompt-only analysis, without training filters.
 
+--response_filter refusal (wildguardmix only) and --dedup filter the training pools
+exactly as align.py's options of the same name (helper.eligible_rows); their scores
+go to their own root, diversity/<tag>/ (e.g. diversity/refusal/), with the same
+layout, and their samples to the tagged sample folders the runs train on.
+
 --group_by tactic (gretel train only) scores one row per jailbreak tactic instead
 of per subcategory. Rows pass the same training filters as the non-benign
 subcategories (harmful prompt, safe response, non-empty pair; multi-label rows
@@ -111,9 +116,12 @@ from tqdm.auto import tqdm
 from helper import (
     BASELINE_ABBRS,
     BENIGN_DATA_TYPES,
+    DEFAULT_POOL,
     DEFAULT_SEED,
     TRAIN_SAMPLES_DIR,
+    add_pool_arguments,
     load_wildjailbreak_benign,
+    resolve_pool_options,
     mixture_counts,
     sample_digest,
     sample_examples,
@@ -386,11 +394,13 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
                               max_length=4096, max_n=5, seeds=None,
                               num_proc=4, split='train', abbrs=None, benign_pool=None,
                               embedders=None, n_clusters=12, knn_ks=KNN_KS,
-                              group_by='subcategory', baselines=True, samples_dir=None):
+                              group_by='subcategory', baselines=True, samples_dir=None,
+                              options=DEFAULT_POOL):
     """Score the training samples of each group and seed; skip groups with insufficient data.
 
     With samples_dir (main passes TRAIN_SAMPLES_DIR for the train split), samples
-    are the run's sample files, read or saved by helper.sample_examples.
+    are the run's sample files, read or saved by helper.sample_examples. `options`
+    (helper.PoolOptions) filter the training pools as in align.py.
 
     `seeds` defaults to [helper.DEFAULT_SEED]. For each seed, a group's
     sample is drawn by helper.sample_examples exactly as the align.py run with
@@ -419,8 +429,10 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
         raise ValueError(f'Unknown group_by: {group_by!r}')
     if group_by == 'tactic' and split != 'train':
         raise ValueError('group_by="tactic" applies the training filters; use split="train"')
+    if options != DEFAULT_POOL and split != 'train':
+        raise ValueError('Pool options filter training data; use split="train"')
     if group_by == 'tactic':
-        names, pools = tactic_pools(df, dataset_name)
+        names, pools = tactic_pools(df, dataset_name, options)
     else:
         names, pools = category_names(df, dataset_name), {}
     # Same rounding as align.py; diversity samples have no general instructions.
@@ -441,8 +453,10 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
     if group_by == 'tactic':
         pools = {abbr: pools[abbr] for abbr in names}
     elif split == 'train':
+        if options.response_filter == 'refusal':
+            names.pop('benign', None)  # the refusal filter applies to harmful prompts only
         for abbr in names:
-            pools[abbr] = select_harmful_subcategory(df, dataset_name, abbr)
+            pools[abbr] = select_harmful_subcategory(df, dataset_name, abbr, options=options)
     else:
         # Test datasets need not provide responses or response safety labels.
         df = df.dropna(subset=['prompt']).copy()
@@ -458,7 +472,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
     overall['prompt'] = overall['prompt'].astype(str).str.strip()
     # The baseline pools pool the eligible subcategories or tactics (align.py's selection).
     select_baseline = select_tactic if group_by == 'tactic' else select_harmful_subcategory
-    baseline_pools = {abbr: select_baseline(df, dataset_name, abbr, harmful_count)
+    baseline_pools = {abbr: select_baseline(df, dataset_name, abbr, harmful_count, options)
                       for abbr in baseline_names}
     groups = ([('overall', 'overall', overall)] if names else []) + [
         (abbr, name, baseline_pools[abbr]) for abbr, name in baseline_names.items()
@@ -494,6 +508,7 @@ def compute_dataset_diversity(df, dataset_name, *, tokenizer, num_train=600,
                     group_by=group_by, benign_pool=benign_pool, benign_count=benign_count,
                     benign_data_type=benign_data_type,
                     samples_dir=samples_dir if split == 'train' else None,
+                    options=options,
                 )
             except ValueError as exc:
                 if not str(exc).startswith('Requested '):
@@ -617,8 +632,9 @@ def merge_rows(existing, scored, keep_overall=False):
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--datasets', nargs='+', type=str.lower, default=list(DEFAULT_DATASETS),
-                        help=f'Datasets to score (default: {" ".join(DEFAULT_DATASETS)})')
+    parser.add_argument('--datasets', nargs='+', type=str.lower,
+                        help=f'Datasets to score (default: {" ".join(DEFAULT_DATASETS)}; '
+                             'wildguardmix with --response_filter refusal)')
     parser.add_argument('--split', choices=SUPPORTED, default='train')
     parser.add_argument('--abbr', nargs='+',
                         help='Only score these subcategory (or, with --group_by tactic, '
@@ -669,12 +685,18 @@ def parse_args():
                         help='Embedding device, e.g. cuda:0 or cpu (default: auto; on chili, '
                              'chili/gpu.sh picks a free GPU)')
     parser.add_argument('--output_dir', type=Path,
-                        default=Path(__file__).resolve().parent.parent / 'diversity',
-                        help='Diversity root, independent of the working directory '
-                             '(default: diversity/ beside sa_data)')
+                        help='Diversity root, independent of the working directory (default: '
+                             'diversity/ beside sa_data, or diversity/<tag>/ for non-default '
+                             'pool options, e.g. diversity/refusal/)')
+    add_pool_arguments(parser)
     args = parser.parse_args()
+    resolve_pool_options(parser, args, DEFAULT_DATASETS)
+    if args.output_dir is None:
+        args.output_dir = Path(__file__).resolve().parent.parent / 'diversity' / args.options.tag
     if any(dataset not in SUPPORTED[args.split] for dataset in args.datasets):
         parser.error(f'--split {args.split} supports {SUPPORTED[args.split]}')
+    if args.options.tag and args.split != 'train':
+        parser.error('--response_filter and --dedup filter training data (--split train)')
     if args.group_by == 'tactic' and (args.split != 'train' or args.datasets != ['gretel']):
         parser.error('--group_by tactic supports only --datasets gretel --split train')
     if args.num_train < 2 or min(args.max_length, args.max_n, args.num_proc) < 1:
@@ -737,6 +759,7 @@ def main():
             split=args.split, abbrs=args.abbr, benign_pool=benign_pool,
             embedders=embedders, n_clusters=args.n_clusters, knn_ks=args.knn_ks,
             group_by=args.group_by, baselines=args.baselines, samples_dir=args.samples_dir,
+            options=args.options,
         )
         for name, result in results.items():
             output = outputs[name]

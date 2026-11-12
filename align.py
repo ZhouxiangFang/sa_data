@@ -10,7 +10,12 @@ Defaults are sized for full fine-tuning a 7B/8B model on four 48 GB A6000s::
 
 The default 1,800 examples mix the three sources 1:1:1 (600 each). General
 instructions default to data/git_data_20k.csv. Safety targets use only
-safe/unharmful responses. --seed (default 43) decides every sampled example
+safe/unharmful responses (in WildGuardMix these include compliances judged harmless);
+--response_filter refusal (WildGuardMix only) keeps only refusals, and --dedup keeps
+one row per prompt (the first; default: every row). Both change the pools of every
+stage alike (helper.eligible_rows) and add their tag to the sample folder, so give
+such runs their own --output_dir and results folder (chili/run.sh does).
+--seed (default 43) decides every sampled example
 (through helper.sample_examples, the same code calculate_diversity.py samples
 with), the shuffle and the training order. The examples are read from the run's
 sample files under data/train_samples/seed<seed>/ (found from the seed and the
@@ -57,9 +62,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
 from helper import (
-    BENIGN_DATA_TYPES, DEFAULT_SEED, GROUP_BYS, TRAIN_SAMPLES_DIR, build_training_data,
-    checkpoint_name, filename_component, mixture_counts, model_mapping, print_config,
-    sample_digest,
+    BENIGN_DATA_TYPES, DEFAULT_SEED, GROUP_BYS, TRAIN_SAMPLES_DIR, add_pool_arguments,
+    build_training_data, checkpoint_name, filename_component, mixture_counts, model_mapping,
+    pool_options, print_config, sample_digest,
 )
 
 
@@ -70,6 +75,7 @@ MODULE_DIR = Path(__file__).resolve().parent
 DEFAULT_NUM_TRAIN = 1800
 DEFAULT_RATE = 1 / 3
 DEFAULT_GENERAL_DATASET = MODULE_DIR.parent / "data" / "git_data_20k.csv"
+DEFAULT_OUTPUT_DIR = Path("/scratch/zf28/ckpts")
 
 
 def parse_args() -> argparse.Namespace:
@@ -180,6 +186,7 @@ def parse_args() -> argparse.Namespace:
         "--samples_dir", type=Path, default=TRAIN_SAMPLES_DIR,
         help="Root of the per-seed sample files (default: data/train_samples).",
     )
+    add_pool_arguments(parser)
     parser.add_argument("--local_rank", type=int, default=-1)
     parser.add_argument(
         "--deepspeed",
@@ -190,8 +197,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output_dir",
         type=Path,
-        default=Path("/scratch/zf28/ckpts"),
-        help="Root directory for the trained checkpoint (default: /scratch/zf28/ckpts).",
+        help="Root directory for the trained checkpoint (default: /scratch/zf28/ckpts, "
+             "or /scratch/zf28/ckpts/<tag> with --response_filter refusal or --dedup).",
     )
     parser.add_argument(
         "--run_name",
@@ -215,6 +222,12 @@ def parse_args() -> argparse.Namespace:
         parser.error(str(error))
     if args.group_by == "tactic" and args.alignment_dataset != "gretel":
         parser.error("--group_by tactic requires --alignment_dataset gretel")
+    try:
+        pool_options(args).check(args.alignment_dataset)
+    except ValueError as error:
+        parser.error(str(error))
+    # Runs with other pool options reuse the checkpoint names, so keep them apart.
+    args.output_dir = args.output_dir or DEFAULT_OUTPUT_DIR / pool_options(args).tag
     args.general_dataset = args.general_dataset.expanduser()
     if general_count and not args.general_dataset.is_file():
         parser.error(f"General instruction CSV not found: {args.general_dataset}")
@@ -282,7 +295,8 @@ def main() -> None:
         print(
             f"Training mixture: {harmful_count:,} {prompt_kind} prompts from "
             f"{args.alignment_dataset} {args.group_by} {args.abbr} "
-            f"({harmful_available:,} available) + "
+            f"({harmful_available:,} available; {args.response_filter} responses"
+            f"{', one row per prompt' if args.dedup else ''}) + "
             f"{benign_count:,} benign prompts from WildJailbreak/"
             f"{args.benign_data_type} ({benign_available:,} available) + "
             f"{general_count:,} general instructions from {args.general_dataset} "

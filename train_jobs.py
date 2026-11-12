@@ -11,8 +11,11 @@ status, which is
 Groups default to every non-benign subcategory with enough examples for the
 harmful part (or, with --group_by tactic, every such Gretel tactic), then the random
 and evenly baselines. With --group_by selection the groups are the subsets
-select_data.py saved for the seed (data/seed<seed>/<dataset>/<name>_<harmful count>.csv). Launchers (chili/train.sh, a Slurm array) train the "train"
-jobs with align.py and the same settings.
+select_data.py saved for the seed (data/seed<seed>/<dataset>/<name>_<harmful count>.csv).
+--response_filter and --dedup are align.py's pool options: group sizes count the rows
+that pass them, and selected subsets come from data/seed<seed>/<dataset>_<tag>/.
+Launchers (chili/train.sh, a Slurm array) train the "train" jobs with align.py and the
+same settings.
 """
 
 import argparse
@@ -21,8 +24,8 @@ import sys
 from pathlib import Path
 
 from helper import (
-    BASELINE_ABBRS, DEFAULT_SEED, GIT20K_MODELS, GROUP_BYS, checkpoint_name, group_sizes,
-    mixture_counts, selection_names,
+    BASELINE_ABBRS, DEFAULT_POOL, DEFAULT_SEED, GIT20K_MODELS, GROUP_BYS, add_pool_arguments,
+    checkpoint_name, group_sizes, mixture_counts, resolve_pool_options, selection_names,
 )
 
 DATASETS = ("aegis", "wildguardmix", "gretel")
@@ -44,8 +47,9 @@ def parse_args(argv=None):
     parser.add_argument("--ckpt_dir", type=Path, required=True, help="align.py --output_dir")
     parser.add_argument("--results_dir", type=Path,
                         help="eval.py --output_dir; jobs evaluated there are done")
+    add_pool_arguments(parser)
     args = parser.parse_args(argv)
-    args.datasets = args.datasets or (["gretel"] if args.group_by == "tactic" else list(DATASETS))
+    resolve_pool_options(parser, args, ["gretel"] if args.group_by == "tactic" else DATASETS)
     if args.group_by == "tactic" and args.datasets != ["gretel"]:
         parser.error("--group_by tactic supports only --datasets gretel")
     try:
@@ -55,19 +59,22 @@ def parse_args(argv=None):
     return args
 
 
-def dataset_groups(dataset, harmful_count, group_by, abbrs=None, seed=DEFAULT_SEED):
+def dataset_groups(dataset, harmful_count, group_by, abbrs=None, seed=DEFAULT_SEED,
+                   options=DEFAULT_POOL):
     """(groups to train, {group: size} of requested groups too small) of one dataset.
 
     abbrs (default: every non-benign group and the baselines, or every selected subset
-    of the seed) may name groups of other datasets; those are ignored here.
+    of the seed) may name groups of other datasets; those are ignored here. Group sizes
+    count the rows that pass the pool options.
     """
     if group_by == "selection":
-        names = selection_names(seed, dataset, harmful_count)
+        names = selection_names(seed, dataset, harmful_count, options)
         if not names:
-            print(f"No selected subsets of {harmful_count:,} examples for {dataset}, seed "
-                  f"{seed}; run select_data.py (chili/select.sh) first", file=sys.stderr)
+            print(f"No selected subsets of {harmful_count:,} examples for "
+                  f"{options.folder(dataset)}, seed {seed}; run select_data.py "
+                  "(chili/select_data.sh) first", file=sys.stderr)
         return [name for name in (names if abbrs is None else abbrs) if name in names], {}
-    sizes = group_sizes(dataset, group_by)
+    sizes = group_sizes(dataset, group_by, options)
     if abbrs is None:
         abbrs = [abbr for abbr in sizes if abbr != "benign"] + list(BASELINE_ABBRS)
     abbrs = [abbr for abbr in abbrs if abbr in sizes or abbr in BASELINE_ABBRS]
@@ -90,7 +97,7 @@ def status(checkpoint, results_dir):
 def main():
     args = parse_args()
     plans = {dataset: dataset_groups(dataset, args.harmful_count, args.group_by, args.abbrs,
-                                     args.seed)
+                                     args.seed, args.options)
              for dataset in args.datasets}
     known = {abbr for groups, small in plans.values() for abbr in [*groups, *small]}
     unknown = [abbr for abbr in args.abbrs or [] if abbr not in known]

@@ -6,6 +6,8 @@ import json
 import os
 import re
 from collections import Counter
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -32,6 +34,91 @@ GROUP_BYS = ("subcategory", "tactic", "selection")
 # Seeds 42, 84 and 126 were trained before; checkpoints named without a seed are 42.
 DEFAULT_SEED = 43
 LEGACY_SEED = 42
+
+# Which rows of a training dataset can be training examples. Every stage applies the
+# same options the same way (eligible_rows): training on a subcategory or a baseline
+# (align.py), scoring its diversity (calculate_diversity.py) and selecting from the
+# whole dataset (select_data.py).
+RESPONSE_FILTERS = ("safe", "refusal")
+# Datasets that label whether a response is a refusal (response_refusal_label).
+REFUSAL_LABELED_DATASETS = ("wildguardmix",)
+
+
+@dataclass(frozen=True)
+class PoolOptions:
+    """Training-pool filters on top of the harmful (or benign) prompt label.
+
+    response_filter: "safe" (default) keeps responses labeled safe/unharmful, which in
+    WildGuardMix includes compliances judged harmless; "refusal" (WildGuardMix only)
+    keeps only those also labeled a refusal (one per harmful prompt there).
+    dedup: keep only the first eligible row of each prompt (default: every row, so a
+    prompt with several responses appears once per response).
+    Non-default options get their own sample, selection, diversity and result folders,
+    named with `tag` (e.g. refusal, dedup, refusal_dedup).
+    """
+
+    response_filter: str = "safe"
+    dedup: bool = False
+
+    def __post_init__(self):
+        if self.response_filter not in RESPONSE_FILTERS:
+            raise ValueError(f"Unknown response filter {self.response_filter!r}; "
+                             f"choose from {RESPONSE_FILTERS}")
+
+    @property
+    def tag(self):
+        """'' for the default options, else their folder suffix, e.g. refusal_dedup."""
+        parts = [] if self.response_filter == "safe" else [self.response_filter]
+        return "_".join(parts + (["dedup"] if self.dedup else []))
+
+    def folder(self, name):
+        """name, or name_<tag> for non-default options."""
+        return f"{name}_{self.tag}" if self.tag else name
+
+    def check(self, dataset_name):
+        if self.response_filter == "refusal" and dataset_name not in REFUSAL_LABELED_DATASETS:
+            raise ValueError(f"--response_filter refusal needs refusal labels, which only "
+                             f"{', '.join(REFUSAL_LABELED_DATASETS)} has (not {dataset_name})")
+
+
+DEFAULT_POOL = PoolOptions()
+
+
+def add_pool_arguments(parser):
+    """--response_filter and --dedup, shared by every script that builds a training pool."""
+    parser.add_argument(
+        "--response_filter", choices=RESPONSE_FILTERS, default="safe",
+        help="Responses that can be training targets: safe (default; labeled safe/unharmful, "
+             "which in WildGuardMix includes harmless compliances) or refusal (WildGuardMix "
+             "only; also labeled a refusal)")
+    parser.add_argument(
+        "--dedup", action="store_true",
+        help="Keep only the first eligible row of each prompt (default: every row, so a "
+             "prompt with several responses can appear once per response)")
+
+
+def pool_options(args):
+    """PoolOptions of parsed arguments (the default for callers without the options)."""
+    return PoolOptions(getattr(args, "response_filter", "safe"), bool(getattr(args, "dedup", False)))
+
+
+def resolve_pool_options(parser, args, default_datasets):
+    """Set args.options and, if no datasets were given, args.datasets (the defaults that
+    the options apply to: only wildguardmix with the refusal filter); a dataset the
+    options cannot apply to is a usage error."""
+    args.options = pool_options(args)
+    if not args.datasets:
+        args.datasets = [dataset for dataset in default_datasets
+                         if args.options.response_filter == "safe"
+                         or dataset in REFUSAL_LABELED_DATASETS]
+        if not args.datasets:
+            parser.error(f"--response_filter refusal needs {' or '.join(REFUSAL_LABELED_DATASETS)}")
+    for dataset in args.datasets:
+        try:
+            args.options.check(dataset)
+        except ValueError as error:
+            parser.error(str(error))
+    return args.options
 
 
 def seed_suffix(seed):
@@ -109,9 +196,25 @@ def filter_safe_responses(df: pd.DataFrame) -> pd.DataFrame:
     label = df['response_harm_label'].astype(str).str.lower().str.strip()
     return df[~label.isin({'harmful', 'unsafe'})]
 
+@lru_cache(maxsize=None)
+def _subcategory_stats(path, dataset_name):
+    with open(path) as f:
+        return json.load(f)[dataset_name]
+
+
+def subcategory_stats(dataset_name):
+    """{subcategory name: stats} of one dataset in data/subcategory_stats.json (read once
+    per process, not once per row)."""
+    return _subcategory_stats(os.path.join(DATA_DIR, 'subcategory_stats.json'), dataset_name)
+
+
+@lru_cache(maxsize=None)
+def _abbr_map(path, dataset_name):
+    return {c: v['abbr'] for c, v in _subcategory_stats(path, dataset_name).items()}
+
+
 def to_abbr(dataset_name, sub):
-    with open(os.path.join(DATA_DIR, 'subcategory_stats.json')) as f:
-        abbr_map = {ds: {c: v['abbr'] for c, v in cats.items()} for ds, cats in json.load(f).items()}[dataset_name]
+    abbr_map = _abbr_map(os.path.join(DATA_DIR, 'subcategory_stats.json'), dataset_name)
 
     if isinstance(sub, str):
         parts = sub.split(',')
@@ -124,27 +227,40 @@ def to_abbr(dataset_name, sub):
         abbrs.append(abbr_map.get(k, k))
     return abbrs
 
-def group_sizes(dataset_name, group_by="subcategory"):
-    """{abbr: training examples available} of every subcategory (safe responses in the
-    training split of subcategory_stats.json) or, with group_by tactic, every tactic."""
+# {(dataset, options): {abbr: size}}: subcategory sizes, counted once per process.
+_SUBCATEGORY_SIZES = {}
+
+
+def group_sizes(dataset_name, group_by="subcategory", options=DEFAULT_POOL, df=None):
+    """{abbr: training examples available} of every subcategory or, with group_by tactic,
+    every tactic: the rows of its pool under these options (select_harmful_subcategory,
+    select_tactic). The refusal filter has no benign group. `df` is the loaded training
+    split, if the caller has it."""
+    options.check(dataset_name)
     if group_by == "tactic":
-        _, pools = tactic_pools(load_safety_dataset(dataset_name, "train"), dataset_name)
-        return {abbr: len(pool) for abbr, pool in pools.items()}
-    with open(os.path.join(DATA_DIR, 'subcategory_stats.json')) as f:
-        categories = json.load(f)[dataset_name]
-    return {c['abbr']: c['train']['safe_response'] for c in categories.values()}
+        df = load_safety_dataset(dataset_name, "train") if df is None else df
+        return {abbr: len(pool) for abbr, pool in tactic_pools(df, dataset_name, options)[1].items()}
+    key = dataset_name, options
+    if key not in _SUBCATEGORY_SIZES:
+        df = load_safety_dataset(dataset_name, "train") if df is None else df
+        abbrs = [c['abbr'] for c in subcategory_stats(dataset_name).values()]
+        _SUBCATEGORY_SIZES[key] = {
+            abbr: len(select_harmful_subcategory(df, dataset_name, abbr, options=options))
+            for abbr in abbrs if not (abbr == 'benign' and options.response_filter == 'refusal')}
+    return dict(_SUBCATEGORY_SIZES[key])
 
 
-def training_groups(dataset_name, harmful_count, group_by="subcategory"):
+def training_groups(dataset_name, harmful_count, group_by="subcategory", options=DEFAULT_POOL,
+                    df=None):
     """Groups a run trains on their own: every non-benign subcategory (or tactic) with at
     least harmful_count examples. The random and evenly baselines pool these."""
-    return [abbr for abbr, size in group_sizes(dataset_name, group_by).items()
+    return [abbr for abbr, size in group_sizes(dataset_name, group_by, options, df).items()
             if abbr != 'benign' and size >= harmful_count]
 
 
-def baseline_abbrs(dataset_name, harmful_count):
+def baseline_abbrs(dataset_name, harmful_count, options=DEFAULT_POOL, df=None):
     """Subcategories pooled by the random and evenly baselines (training_groups)."""
-    return training_groups(dataset_name, harmful_count)
+    return training_groups(dataset_name, harmful_count, options=options, df=df)
 
 safety_test_datasets = ["wildguardmix", "aegis", "wildjailbreak", "ailuminate", "gretel"]
 overrefusal_test_datasets = ["xstest", "or-bench-hard"]
@@ -383,67 +499,77 @@ def clean_pairs(df: pd.DataFrame) -> pd.DataFrame:
     return df[(df["prompt"] != "") & (df["response"] != "")]
 
 
-def harmful_pairs(df: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
-    """Harmful prompts with a safe response, from every subcategory (the filters of
-    select_harmful_subcategory without the subcategory one)."""
+def eligible_rows(df: pd.DataFrame, dataset_name: str, prompt_labels=HARMFUL_LABELS,
+                  options: PoolOptions = DEFAULT_POOL) -> pd.DataFrame:
+    """Rows that can be training examples, in dataset order: the prompt label is in
+    prompt_labels, the response is labeled safe/unharmful (and, with response_filter
+    refusal, a refusal) and the pair is non-empty (clean_pairs); with dedup, only the
+    first such row of each prompt. Subcategory pools are taken from these rows, so a
+    deduplicated prompt keeps the same row in every pool."""
+    options.check(dataset_name)
     column = "prompt_harm_label" if dataset_name in ("wildguardmix", "gretel") else "prompt_label"
-    harmful = normalize_label(df[column]).isin(HARMFUL_LABELS)
-    safe = normalize_label(df["response_harm_label"]).isin(SAFE_LABELS)
-    return clean_pairs(df[harmful & safe])
+    required = {"prompt", "response", "response_harm_label", column}
+    if options.response_filter == "refusal":
+        required.add("response_refusal_label")
+    missing = sorted(required.difference(df.columns))
+    if missing:
+        raise ValueError(f"{dataset_name} is missing required columns: {missing}")
+    keep = (normalize_label(df[column]).isin(prompt_labels)
+            & normalize_label(df["response_harm_label"]).isin(SAFE_LABELS))
+    if options.response_filter == "refusal":
+        keep &= normalize_label(df["response_refusal_label"]).isin({"refusal"})
+    rows = clean_pairs(df[keep])
+    if options.dedup:
+        rows = rows[~rows["prompt"].duplicated()]
+    return rows
 
 
-def selection_pool(dataset_name: str) -> pd.DataFrame:
-    """Rows select_data.py selects from (before it drops repeated and overlong prompts)."""
-    return harmful_pairs(load_safety_dataset(dataset_name, "train"), dataset_name)
+def selection_pool(dataset_name: str, options: PoolOptions = DEFAULT_POOL) -> pd.DataFrame:
+    """Rows select_data.py selects from (before it drops prompts too long to train on): the
+    harmful rows of every subcategory, i.e. select_harmful_subcategory without the
+    subcategory filter."""
+    return eligible_rows(load_safety_dataset(dataset_name, "train"), dataset_name,
+                         options=options)
 
 
 def load_harmful_subcategory(
-    dataset_name: str, abbr: str, harmful_count: int | None = None
+    dataset_name: str, abbr: str, harmful_count: int | None = None,
+    options: PoolOptions = DEFAULT_POOL,
 ) -> pd.DataFrame:
-    """Load prompts in one subcategory with safe response targets."""
+    """Load prompts in one subcategory with eligible response targets."""
     return select_harmful_subcategory(
-        load_safety_dataset(dataset_name, "train"), dataset_name, abbr, harmful_count
+        load_safety_dataset(dataset_name, "train"), dataset_name, abbr, harmful_count, options
     )
 
 
 def select_harmful_subcategory(
-    df: pd.DataFrame, dataset_name: str, abbr: str, harmful_count: int | None = None
+    df: pd.DataFrame, dataset_name: str, abbr: str, harmful_count: int | None = None,
+    options: PoolOptions = DEFAULT_POOL,
 ) -> pd.DataFrame:
-    """Apply the alignment filters to an already loaded dataset.
+    """Apply the alignment filters (eligible_rows) to an already loaded dataset.
 
     A baseline abbr selects rows from any subcategory in
     baseline_abbrs(dataset_name, harmful_count), counting multi-label rows once.
     """
-    prompt_label_column = (
-        "prompt_harm_label" if dataset_name in ("wildguardmix", "gretel") else "prompt_label"
-    )
-    required = {
-        "prompt",
-        "response",
-        "response_harm_label",
-        prompt_label_column,
-        "sub_abbrs",
-    }
-    missing = sorted(required.difference(df.columns))
-    if missing:
-        raise ValueError(f"{dataset_name} is missing required columns: {missing}")
+    if "sub_abbrs" not in df.columns:
+        raise ValueError(f"{dataset_name} is missing required columns: ['sub_abbrs']")
+    benign = abbr.lower() == "benign"
+    if benign and options.response_filter == "refusal":
+        raise ValueError("--response_filter refusal applies to harmful prompts only")
 
     if abbr in BASELINE_ABBRS:
         if harmful_count is None:
             raise ValueError(f"Baseline {abbr!r} needs harmful_count to pick subcategories")
-        targets = set(baseline_abbrs(dataset_name, harmful_count))
+        targets = set(baseline_abbrs(dataset_name, harmful_count, options, df))
     else:
         targets = {abbr}
-    is_subcategory = df["sub_abbrs"].apply(
+    rows = eligible_rows(df, dataset_name, SAFE_LABELS if benign else HARMFUL_LABELS, options)
+    # astype(bool): an empty object mask would otherwise select columns, not rows.
+    is_subcategory = rows["sub_abbrs"].apply(
         lambda abbreviations: isinstance(abbreviations, (list, tuple, set))
         and not targets.isdisjoint(abbreviations)
-    )
-    prompt_labels = SAFE_LABELS if abbr.lower() == "benign" else HARMFUL_LABELS
-    has_target_prompt_label = normalize_label(df[prompt_label_column]).isin(
-        prompt_labels
-    )
-    is_safe_response = normalize_label(df["response_harm_label"]).isin(SAFE_LABELS)
-    return clean_pairs(df[is_subcategory & has_target_prompt_label & is_safe_response])
+    ).astype(bool)
+    return rows[is_subcategory]
 
 
 def tactic_abbr(tactic):
@@ -451,7 +577,7 @@ def tactic_abbr(tactic):
     return re.sub(r"[^a-z0-9]+", "_", str(tactic).lower()).strip("_")
 
 
-def tactic_pools(df, dataset_name):
+def tactic_pools(df, dataset_name, options=DEFAULT_POOL):
     """Group the training rows eligible under any non-benign subcategory by tactic.
 
     Each row passes exactly the filters select_harmful_subcategory applies to
@@ -464,7 +590,7 @@ def tactic_pools(df, dataset_name):
     subcategories = list(dict.fromkeys(
         abbr for abbrs in df["sub_abbrs"] for abbr in abbrs if abbr != "benign"
     ))
-    eligible = pd.concat([select_harmful_subcategory(df, dataset_name, abbr)
+    eligible = pd.concat([select_harmful_subcategory(df, dataset_name, abbr, options=options)
                           for abbr in subcategories])
     eligible = eligible[~eligible.index.duplicated()].sort_index()
     eligible = eligible[eligible["tactic"].notna()
@@ -479,13 +605,13 @@ def tactic_pools(df, dataset_name):
     return names, {abbr: eligible[tactics == tactic] for abbr, tactic in names.items()}
 
 
-def select_tactic(df, dataset_name, abbr, harmful_count=None):
+def select_tactic(df, dataset_name, abbr, harmful_count=None, options=DEFAULT_POOL):
     """Training rows for one tactic, or the pooled tactics for a baseline abbr.
 
     The random and evenly baselines pool the tactics with at least
     harmful_count eligible rows, the tactics trained on their own (training_groups).
     """
-    _, pools = tactic_pools(df, dataset_name)
+    _, pools = tactic_pools(df, dataset_name, options)
     if abbr in BASELINE_ABBRS:
         if harmful_count is None:
             raise ValueError(f"Baseline {abbr!r} needs harmful_count to pick tactics")
@@ -499,51 +625,52 @@ def select_tactic(df, dataset_name, abbr, harmful_count=None):
     return pools[abbr]
 
 
-def selection_csv(seed, dataset_name, name, count):
-    """select_data.py's subset file: data/seed<seed>/<dataset>/<name>_<count>.csv."""
-    return Path(DATA_DIR) / seed_dir(seed) / dataset_name / f"{name}_{count}.csv"
+def selection_csv(seed, dataset_name, name, count, options=DEFAULT_POOL):
+    """select_data.py's subset file: data/seed<seed>/<dataset>[_<options tag>]/<name>_<count>.csv."""
+    return (Path(DATA_DIR) / seed_dir(seed) / options.folder(dataset_name)
+            / f"{name}_{count}.csv")
 
 
-def selection_names(seed, dataset_name, count):
-    """Names of the subsets of `count` examples selected for a seed and dataset."""
+def selection_names(seed, dataset_name, count, options=DEFAULT_POOL):
+    """Names of the subsets of `count` examples selected for a seed, dataset and options."""
     suffix = f"_{count}.csv"
-    folder = selection_csv(seed, dataset_name, "", count).parent
+    folder = selection_csv(seed, dataset_name, "", count, options).parent
     return sorted(path.name[:-len(suffix)] for path in folder.glob(f"*{suffix}"))
 
 
-def load_selection(seed, dataset_name, name, count):
+def load_selection(seed, dataset_name, name, count, options=DEFAULT_POOL):
     """The prompt/response rows of a selected subset, checked against its pool.
 
-    The subset must hold exactly `count` distinct prompts, each with its response
-    from the pool select_data.py selects from (selection_pool: every subcategory).
+    The subset must hold exactly `count` rows of the pool select_data.py selects from
+    with these options (selection_pool: every subcategory), each at most as often as
+    the pool has it (so with dedup, distinct prompts).
     """
-    path = selection_csv(seed, dataset_name, name, count)
+    path = selection_csv(seed, dataset_name, name, count, options)
     if not path.is_file():
-        raise ValueError(f"No selected subset {path}; run select_data.py (chili/select.sh) first")
+        raise ValueError(f"No selected subset {path}; run select_data.py (chili/select_data.sh) first")
     # Keep prompts such as "None" or "N/A" as text.
     rows = pd.read_csv(path, keep_default_na=False, dtype=str)
     if not {"prompt", "response"} <= set(rows) or len(rows) != count:
         raise ValueError(f"{path}: expected {count:,} prompt/response rows, found {len(rows):,}")
-    if rows["prompt"].duplicated().any():
-        raise ValueError(f"{path} repeats a prompt")
-    pool = selection_pool(dataset_name)
-    available = set(zip(pool["prompt"], pool["response"]))
-    if not all(pair in available for pair in zip(rows["prompt"], rows["response"])):
-        raise ValueError(f"{path} holds examples that are not in the {dataset_name} pool; "
-                         "select the subset again")
+    pool = selection_pool(dataset_name, options)
+    available = Counter(zip(pool["prompt"], pool["response"]))
+    if Counter(zip(rows["prompt"], rows["response"])) - available:
+        raise ValueError(f"{path} holds examples that are not in the {dataset_name} pool"
+                         f"{f' ({options.tag})' if options.tag else ''}, or more often than "
+                         "the pool has them; select the subset again")
     return rows[["prompt", "response"]]
 
 
 def load_harmful_group(dataset_name, abbr, harmful_count=None, group_by="subcategory",
-                       seed=None):
+                       seed=None, options=DEFAULT_POOL):
     """Training rows for one subcategory or tactic (or a baseline over them), or, with
     group_by selection, the subset `abbr` selected for `seed`."""
     if group_by == "selection":
-        return load_selection(seed, dataset_name, abbr, harmful_count)
+        return load_selection(seed, dataset_name, abbr, harmful_count, options)
     if group_by == "tactic":
         return select_tactic(load_safety_dataset(dataset_name, "train"), dataset_name,
-                             abbr, harmful_count)
-    return load_harmful_subcategory(dataset_name, abbr, harmful_count)
+                             abbr, harmful_count, options)
+    return load_harmful_subcategory(dataset_name, abbr, harmful_count, options)
 
 
 def load_wildjailbreak_benign(data_type: str) -> pd.DataFrame:
@@ -709,18 +836,21 @@ DEFAULT_MAX_LENGTH = 4096
 
 def sample_paths(samples_dir, seed, *, dataset_name, abbr, harmful_count,
                  group_by="subcategory", benign_data_type="vanilla_benign", benign_count=0,
-                 general_dataset=None, general_count=0, max_length=DEFAULT_MAX_LENGTH):
+                 general_dataset=None, general_count=0, max_length=DEFAULT_MAX_LENGTH,
+                 options=DEFAULT_POOL):
     """Files holding the parts of one run's sample, found from the seed and the run settings.
 
-    <samples_dir>/seed<seed>/<dataset>[_tactic|_selection]/<abbr>_<count>.jsonl     harmful
+    <samples_dir>/seed<seed>/<dataset>[_tactic|_selection][_<tag>]/<abbr>_<count>.jsonl  harmful
     <samples_dir>/seed<seed>/wildjailbreak/<benign_data_type>_<count>.jsonl
     <samples_dir>/seed<seed>/general/<general dataset stem>_<count>.jsonl
-    A --max_length other than 4096 adds _len<max_length>. Parts with no
-    examples have no file (None).
+    A --max_length other than 4096 adds _len<max_length>; non-default pool options add
+    their tag (PoolOptions.tag) to the harmful folder. Parts with no examples have no
+    file (None).
     """
     base = Path(samples_dir) / seed_dir(seed)
     length = "" if max_length == DEFAULT_MAX_LENGTH else f"_len{max_length}"
-    folder = dataset_name if group_by == "subcategory" else f"{dataset_name}_{group_by}"
+    folder = options.folder(
+        dataset_name if group_by == "subcategory" else f"{dataset_name}_{group_by}")
     return {
         "harmful": base / folder / f"{abbr}_{harmful_count}{length}.jsonl" if harmful_count else None,
         "benign": (base / "wildjailbreak" / f"{benign_data_type}_{benign_count}{length}.jsonl"
@@ -792,8 +922,12 @@ def sample_examples(
     general_count: int = 0,
     general_dataset=None,
     samples_dir=None,
+    options: PoolOptions = DEFAULT_POOL,
 ) -> tuple[dict[str, pd.DataFrame], dict]:
     """Get the examples of one run; given the pools and counts, only the seed decides.
+
+    `options` are the pool options harmful_pool was built with; they name the sample
+    folder and the subcategories a baseline pools.
 
     This is the only code that picks training examples. align.py calls it
     through build_training_data and calculate_diversity.py calls it directly.
@@ -821,7 +955,7 @@ def sample_examples(
                           harmful_count=harmful_count, group_by=group_by,
                           benign_data_type=benign_data_type, benign_count=benign_count,
                           general_dataset=general_dataset, general_count=general_count,
-                          max_length=max_length)
+                          max_length=max_length, options=options)
              if samples_dir is not None else {"harmful": None, "benign": None, "general": None})
     harmful_source = f"{group_by} {abbr!r} in {dataset_name}"
     # Selected subsets named random or evenly (select_data.py) are drawn whole, like any subset.
@@ -831,7 +965,7 @@ def sample_examples(
         info["baseline_groups"] = (
             sorted({group for groups in harmful_pool["tactic_abbrs"] for group in groups})
             if group_by == "tactic"
-            else baseline_abbrs(dataset_name, harmful_count)
+            else baseline_abbrs(dataset_name, harmful_count, options)
         )
 
     def draw_harmful():
@@ -914,9 +1048,11 @@ def build_training_data(
     )
 
     group_by = getattr(args, "group_by", "subcategory")
+    options = pool_options(args)
+    options.check(args.alignment_dataset)
     harmful_pool = harmful_pool if harmful_pool is not None else (
         load_harmful_group(args.alignment_dataset, args.abbr, harmful_count, group_by,
-                           seed=args.seed)
+                           seed=args.seed, options=options)
         if harmful_count
         else pd.DataFrame(columns=["prompt", "response"])
     )
@@ -939,6 +1075,7 @@ def build_training_data(
         benign_data_type=args.benign_data_type,
         general_pool=general_pool, general_count=general_count,
         general_dataset=getattr(args, "general_dataset", None), samples_dir=samples_dir,
+        options=options,
     )
     train_df = pd.concat(list(parts.values()), ignore_index=True)
     train_df = train_df.sample(frac=1, random_state=args.seed).reset_index(drop=True)

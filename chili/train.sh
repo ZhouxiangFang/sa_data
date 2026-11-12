@@ -19,7 +19,11 @@ Usage: chili/train.sh [options] [-- align.py options]
   --harmful_rate R       Harmful fraction (default: 1/3)
   --general_rate R       General-instruction fraction (default: 1/3); benign gets the rest
   --seed SEED            Run seed (default: 43)
-  --output_dir DIR       Checkpoint folder (default: /scratch/zf28/ckpts/seed<seed>)
+  --response_filter F    Harmful-example responses: safe (default) or refusal (wildguardmix
+                         only); align.py's pool option, as is --dedup
+  --dedup                Keep one row per prompt (default: every row)
+  --output_dir DIR       Checkpoint folder (default: /scratch/zf28/ckpts/seed<seed>, plus
+                         /<tag> with pool options: refusal, dedup or refusal_dedup)
   --results_dir DIR      Also skip jobs already evaluated into DIR (eval.py --output_dir)
 
 Jobs whose checkpoint is saved (or evaluated) are skipped, so rerunning resumes.
@@ -27,14 +31,15 @@ Each job's log is log/align_<checkpoint>_<time>.log. GPU_GROUPS (default
 "0,1,2,3 4,5,6,7") lists the GPU groups; a group takes the next job when it is free.
 EFFECTIVE_BATCH (default 32, examples per optimizer update over a group's GPUs) and
 LEARNING_RATE (default 1e-5) set align.py's training; align.py options after -- (e.g.
---learning_rate) override them. The checkpoint name does not record them, so give other
-values their own --output_dir and --results_dir. Every group's GPU count x micro-batch
+--learning_rate) override them. The checkpoint name records neither them nor the pool
+options, so give other values their own --output_dir and --results_dir (the default
+--output_dir already adds the pool options' tag). Every group's GPU count x micro-batch
 (default 1) must divide the effective batch. Keep the micro-batch at 1 on the 48 GB A6000s:
 2 and 4 ran out of memory on 4096-token examples (llama3.1, qwen2.5).
 EOF
 }
 
-models=() datasets=() abbrs=() align_args=()
+models=() datasets=() abbrs=() align_args=() response_filter=safe dedup=0
 group_by=subcategory num_train=1800 harmful_rate=0.3333333333333333
 general_rate=0.3333333333333333 seed=43 output_dir="" results_dir=""
 while (( $# )); do
@@ -44,7 +49,8 @@ while (( $# )); do
             shift
             while (( $# )) && [[ $1 != --* ]]; do add_values "$list" "$1"; shift; done
             ;;
-        --group_by|--num_train|--harmful_rate|--general_rate|--seed|--output_dir|--results_dir)
+        --dedup) dedup=1; shift ;;
+        --response_filter|--group_by|--num_train|--harmful_rate|--general_rate|--seed|--output_dir|--results_dir)
             (( $# >= 2 )) || { echo "$1 needs a value" >&2; exit 2; }
             printf -v "${1#--}" '%s' "$2"
             shift 2
@@ -54,7 +60,12 @@ while (( $# )); do
         *) echo "Unknown option: $1 (align.py options go after --)" >&2; exit 2 ;;
     esac
 done
-output_dir=${output_dir:-/scratch/zf28/ckpts/seed$seed}
+# Pool options (align.py) reuse the checkpoint names, so their checkpoints get their own
+# folder, named like helper.PoolOptions.tag.
+pool_opts=(--response_filter "$response_filter") tag=""
+[[ $response_filter == safe ]] || tag=$response_filter
+(( dedup )) && pool_opts+=(--dedup) tag=${tag:+${tag}_}dedup
+output_dir=${output_dir:-/scratch/zf28/ckpts/seed$seed${tag:+/$tag}}
 EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32}
 LEARNING_RATE=${LEARNING_RATE:-1e-5}
 micro_batch=1  # align.py's default
@@ -91,7 +102,7 @@ done
     echo "Warning: micro-batch $micro_batch; on the 48 GB A6000s, micro-batches of 2 and 4 ran" \
          "out of memory on 4096-token examples (llama3.1, qwen2.5)." >&2
 settings=(--group_by "$group_by" --num_train "$num_train" --harmful_rate "$harmful_rate"
-          --general_rate "$general_rate" --seed "$seed")
+          --general_rate "$general_rate" --seed "$seed" "${pool_opts[@]}")
 
 plan=(--ckpt_dir "$output_dir" "${settings[@]}")
 (( ${#models[@]} )) && plan+=(--models "${models[@]}")
@@ -108,7 +119,8 @@ while IFS=$'\t' read -r model dataset abbr checkpoint status; do
     [[ $status == train ]] || continue
     job_model+=("$model") job_dataset+=("$dataset") job_abbr+=("$abbr") job_ckpt+=("$checkpoint")
 done <<< "$jobs_tsv"
-echo "Seed $seed, $group_by groups, $num_train examples: ${count[train]} to train," \
+echo "Seed $seed, $group_by groups, $num_train examples, $response_filter responses" \
+     "$( (( dedup )) && echo '(one row per prompt)'): ${count[train]} to train," \
      "${count[saved]} saved, ${count[done]} evaluated. Checkpoints: $output_dir"
 echo "Effective batch $EFFECTIVE_BATCH (micro-batch $micro_batch), learning rate $LEARNING_RATE"
 (( ${#job_model[@]} )) || exit 0
