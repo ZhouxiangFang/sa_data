@@ -13,7 +13,6 @@ LOG_DIR=${LOG_DIR:-$ROOT/log}
 MAX_USED_MB=${MAX_USED_MB:-2000}
 POLL_SECONDS=${POLL_SECONDS:-10}
 JOB_ATTEMPTS=${JOB_ATTEMPTS:-2}
-STAMP=$(date +%Y%m%d_%H%M%S)
 mkdir -p -- "$LOG_DIR"
 
 if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then

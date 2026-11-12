@@ -4,6 +4,9 @@
 
 export CKPT_ROOT=${CKPT_ROOT:-/scratch/zf28/ckpts}  # checkpoints; align.py reads it too
 TRAIN_DATASETS=(aegis wildguardmix gretel)         # helper.TRAIN_DATASETS
+# Names one launch's logs, job lists and plans. The host and PID keep launches in the same second
+# (several seeds, or follow-up jobs on different nodes) from sharing or overwriting a file.
+STAMP=$(date +%Y%m%d_%H%M%S)_${HOSTNAME%%.*}_$$
 
 # Splits comma- or space-separated values into the named array: add_values ARRAY VALUE...
 add_values() {
