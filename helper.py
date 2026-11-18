@@ -41,8 +41,14 @@ LEGACY_SEED = 42
 # (align.py), scoring its diversity (calculate_diversity.py) and selecting from the
 # whole dataset (select_data.py).
 RESPONSE_LABEL_FILTERS = ("safe", "refusal")
-# Datasets that label whether a response is a refusal (response_refusal_label).
-REFUSAL_LABELED_DATASETS = ("wildguardmix",)
+# The label that marks a response as a refusal, (column, value), in the datasets that have one:
+# WildGuardMix labels refusals; Aegis 2.0 marks the refusals NVIDIA added to its harmful prompts
+# by their response label source (its other responses are the original model answers).
+REFUSAL_LABELS = {
+    "wildguardmix": ("response_refusal_label", "refusal"),
+    "aegis": ("response_label_source", "refusal_data_augmentation"),
+}
+REFUSAL_LABELED_DATASETS = tuple(REFUSAL_LABELS)
 
 
 @dataclass(frozen=True)
@@ -50,8 +56,9 @@ class PoolOptions:
     """Training-pool filters on top of the harmful (or benign) prompt label.
 
     response_label_filter: "safe" (default) keeps responses labeled safe/unharmful, which in
-    WildGuardMix includes compliances judged harmless; "refusal" (WildGuardMix only)
-    keeps only those also labeled a refusal (one per harmful prompt there).
+    WildGuardMix includes compliances judged harmless; "refusal" (REFUSAL_LABELED_DATASETS)
+    keeps only refusals (REFUSAL_LABELS): one per harmful prompt in WildGuardMix; in Aegis,
+    NVIDIA's added refusals, some repeated verbatim for a prompt.
     dedup: keep only the first eligible row of each prompt (default: every row, so a
     prompt with several responses appears once per response).
     Non-default options get their own sample, selection, diversity and result folders,
@@ -105,7 +112,7 @@ def pool_options(args):
 
 def resolve_pool_options(parser, args, default_datasets):
     """Set args.options and, if no datasets were given, args.datasets (the defaults that
-    the options apply to: only wildguardmix with the refusal filter); a dataset the
+    the options apply to: REFUSAL_LABELED_DATASETS with the refusal filter); a dataset the
     options cannot apply to is a usage error."""
     args.options = pool_options(args)
     if not args.datasets:
@@ -509,15 +516,17 @@ def eligible_rows(df: pd.DataFrame, dataset_name: str, prompt_labels=HARMFUL_LAB
     options.check(dataset_name)
     column = "prompt_harm_label" if dataset_name in ("wildguardmix", "gretel") else "prompt_label"
     required = {"prompt", "response", "response_harm_label", column}
-    if options.response_label_filter == "refusal":
-        required.add("response_refusal_label")
+    refusal = options.response_label_filter == "refusal"
+    if refusal:
+        refusal_column, refusal_value = REFUSAL_LABELS[dataset_name]
+        required.add(refusal_column)
     missing = sorted(required.difference(df.columns))
     if missing:
         raise ValueError(f"{dataset_name} is missing required columns: {missing}")
     keep = (normalize_label(df[column]).isin(prompt_labels)
             & normalize_label(df["response_harm_label"]).isin(SAFE_LABELS))
-    if options.response_label_filter == "refusal":
-        keep &= normalize_label(df["response_refusal_label"]).isin({"refusal"})
+    if refusal:
+        keep &= normalize_label(df[refusal_column]).isin({refusal_value})
     rows = clean_pairs(df[keep])
     if options.dedup:
         rows = rows[~rows["prompt"].duplicated()]

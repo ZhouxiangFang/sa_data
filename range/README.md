@@ -38,7 +38,7 @@ H100, whichever frees first (`EVAL_GPU=hopper`; or `h100`, `h200`, `47gb`). At m
 `MAX_TRAIN=8` training and `MAX_EVAL=16` eval jobs run at once. Logs are in `log/slurm/`.
 
 Settings and pool options follow `chili/run.sh`: `--tactic` (results in `ablations/gretel_tactic/`),
-`--selected` (`ablations/selected/`), and `--response_label_filter refusal` (WildGuardMix only) / `--dedup`,
+`--selected` (`ablations/selected/`), and `--response_label_filter refusal` (WildGuardMix and Aegis) / `--dedup`,
 which every stage applies alike and which get their own folders named by their tag (`ablations/<tag>/`,
 `diversity/<tag>/`, `data/seed<seed>/<dataset>_<tag>/`, checkpoints in `$CKPT_ROOT/seed<seed>/<setting>/`).
 `--num_train N` changes the run size (default 1800, or 900 with `--tactic`; a third is harmful, which

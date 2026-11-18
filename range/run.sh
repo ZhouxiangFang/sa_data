@@ -27,7 +27,7 @@ The run of chili/run.sh (seed 43 by default; --tactic for the Gretel tactic sett
              --selected, and plot not with --tactic or pool options
 --abbrs trains only the named groups, e.g. --selected --abbrs lexical_hdd random.
 Pool options, as in chili/run.sh: --response_label_filter refusal keeps only harmful examples whose
-response is labeled a refusal (wildguardmix only, then the default dataset), --dedup keeps
+response is a refusal (aegis and wildguardmix, then the default datasets), --dedup keeps
 one row per prompt. They make their own setting named with their tag (refusal, dedup or
 refusal_dedup): results in ablations/<tag>/ (ablations/selected_<tag>/,
 ablations/gretel_tactic_<tag>/), diversity in diversity/<tag>/, subsets in

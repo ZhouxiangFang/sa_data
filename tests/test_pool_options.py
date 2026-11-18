@@ -111,14 +111,29 @@ class PoolOptionTests(unittest.TestCase):
         self.assertEqual((len(pool), list(pool.columns)), (0, list(self.df.columns)))
 
     def test_refusal_needs_refusal_labels(self):
-        for dataset in ("aegis", "gretel"):
-            with self.subTest(dataset=dataset), self.assertRaises(ValueError):
-                REFUSAL.check(dataset)
         with self.assertRaises(ValueError):
-            helper.eligible_rows(self.df, "aegis", options=REFUSAL)
+            REFUSAL.check("gretel")
+        REFUSAL.check("aegis")
+        # Aegis marks refusals by their response label source, which these rows lack.
+        with self.assertRaises(ValueError):
+            helper.eligible_rows(self.df.rename(columns={"prompt_harm_label": "prompt_label"}),
+                                 "aegis", options=REFUSAL)
         with self.assertRaises(ValueError):
             self.pool("benign", REFUSAL)
         DEDUP.check("aegis")
+
+    def test_aegis_refusals_are_the_added_refusals_with_their_repeats(self):
+        sources = ["llm_jury", "refusal_data_augmentation", "refusal_data_augmentation",
+                   "refusal_data_augmentation", "refusal_data_augmentation", None]
+        df = pd.DataFrame({
+            "prompt": ["q1", "q1", "q1", "q2", "q3", "q4"],
+            "response": ["q1 answer", "q1 refuses", "q1 refuses", "q2 refuses", "q3 refuses", "x"],
+            "prompt_label": ["unsafe", "unsafe", "unsafe", "unsafe", "safe", "unsafe"],
+            "response_harm_label": ["safe"] * 6, "response_label_source": sources,
+        })
+        self.assertEqual(helper.eligible_rows(df, "aegis", options=REFUSAL).index.tolist(), [1, 2, 3])
+        self.assertEqual(helper.eligible_rows(df, "aegis", options=BOTH).index.tolist(), [1, 3])
+        self.assertEqual(helper.eligible_rows(df, "aegis").index.tolist(), [0, 1, 2, 3, 5])
 
     def test_subcategory_pools_are_rows_of_the_selection_pool(self):
         for options in (DEFAULT, REFUSAL, DEDUP, BOTH):
@@ -148,7 +163,7 @@ class PoolOptionTests(unittest.TestCase):
                          (["a", "b", "random", "evenly"], {}))
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
             train_jobs.parse_args(["--ckpt_dir", "x", "--response_label_filter", "refusal",
-                                   "--datasets", "aegis"])
+                                   "--datasets", "gretel"])
         args = train_jobs.parse_args(["--ckpt_dir", "x", "--dedup"])
         self.assertEqual(args.options, DEDUP)
 
@@ -221,9 +236,9 @@ class PoolOptionTests(unittest.TestCase):
 
     def test_scripts_accept_the_options(self):
         cases = {
-            sd: [(["--response_label_filter", "refusal"], ["wildguardmix"]),
+            sd: [(["--response_label_filter", "refusal"], ["aegis", "wildguardmix"]),
                  (["--dedup"], list(cd.DEFAULT_DATASETS))],
-            cd: [(["--response_label_filter", "refusal"], ["wildguardmix"]),
+            cd: [(["--response_label_filter", "refusal"], ["aegis", "wildguardmix"]),
                  (["--dedup"], list(cd.DEFAULT_DATASETS))],
         }
         for module, runs in cases.items():
@@ -232,9 +247,9 @@ class PoolOptionTests(unittest.TestCase):
                         mock.patch.object(sys, "argv", ["prog", *argv]):
                     args = module.parse_args()
                     self.assertEqual(args.datasets, datasets)
-            with self.subTest(module=module.__name__, argv="refusal on aegis"), \
+            with self.subTest(module=module.__name__, argv="refusal on gretel"), \
                     mock.patch.object(sys, "argv", ["prog", "--response_label_filter", "refusal",
-                                                    "--datasets", "aegis"]), \
+                                                    "--datasets", "gretel"]), \
                     mock.patch("sys.stderr"), self.assertRaises(SystemExit):
                 module.parse_args()
         # Diversity scores of other options get their own root.

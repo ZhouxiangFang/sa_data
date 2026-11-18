@@ -11,7 +11,8 @@ Defaults are sized for full fine-tuning a 7B/8B model on four 48 GB A6000s::
 The default 1,800 examples mix the three sources 1:1:1 (600 each). General
 instructions default to data/git_data_20k.csv. Safety targets use only
 safe/unharmful responses (in WildGuardMix these include compliances judged harmless);
---response_label_filter refusal (WildGuardMix only) keeps only refusals, and --dedup keeps
+--response_label_filter refusal (WildGuardMix, and Aegis by response label source) keeps only
+refusals, and --dedup keeps
 one row per prompt (the first; default: every row). Both change the pools of every
 stage alike (helper.eligible_rows) and add their tag to the sample folder, so give
 such runs their own --output_dir and results folder (chili/run.sh does).

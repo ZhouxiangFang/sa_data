@@ -7,7 +7,7 @@ skip (at least --max_length tokens). Every row is a candidate, so a prompt with
 several safe responses (WildGuardMix: a refusal and a harmless compliance; Aegis: the
 original model answer and NVIDIA's added refusals, often repeated verbatim) can be
 picked once per response. The pool options are
-align.py's: --response_label_filter refusal (wildguardmix only) keeps only refusals, and
+align.py's: --response_label_filter refusal (wildguardmix and aegis) keeps only refusals, and
 --dedup keeps the first row of each prompt; with either, results go to
 data/seed<seed>/<dataset>_<tag>/ (e.g. wildguardmix_refusal) and training reads them
 with the same options (chili/run.sh --selected --response_label_filter refusal).

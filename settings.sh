@@ -4,6 +4,7 @@
 
 export CKPT_ROOT=${CKPT_ROOT:-/scratch/zf28/ckpts}  # checkpoints; align.py reads it too
 TRAIN_DATASETS=(aegis wildguardmix gretel)         # helper.TRAIN_DATASETS
+REFUSAL_DATASETS=(aegis wildguardmix)              # helper.REFUSAL_LABELED_DATASETS
 # Names one launch's logs, job lists and plans. The host and PID keep launches in the same second
 # (several seeds, or follow-up jobs on different nodes) from sharing or overwriting a file.
 STAMP=$(date +%Y%m%d_%H%M%S)_${HOSTNAME%%.*}_$$
@@ -23,7 +24,7 @@ add_values() {
 # pool_setup: checks response_label_filter (safe or refusal) and dedup (0 or 1), the pool options
 # of helper.PoolOptions, and sets pool_opts (their python flags) and tag ('' for the
 # defaults, else refusal, dedup or refusal_dedup: the suffix of the option's folders). With
-# the refusal filter, an empty datasets array becomes (wildguardmix), the only dataset with
+# the refusal filter, an empty datasets array becomes REFUSAL_DATASETS, the datasets with
 # refusal labels, and any other dataset is an error. Returns 2 on bad options.
 pool_setup() {
     local dataset
@@ -35,10 +36,10 @@ pool_setup() {
     [[ $response_label_filter == safe ]] || tag=$response_label_filter
     (( dedup )) && pool_opts+=(--dedup) tag=${tag:+${tag}_}dedup
     [[ $response_label_filter == refusal ]] || return 0
-    (( ${#datasets[@]} )) || datasets=(wildguardmix)
+    (( ${#datasets[@]} )) || datasets=("${REFUSAL_DATASETS[@]}")
     for dataset in "${datasets[@]}"; do
-        [[ $dataset == wildguardmix ]] && continue
-        echo "--response_label_filter refusal: only wildguardmix labels refusals, not $dataset" >&2
+        [[ " ${REFUSAL_DATASETS[*]} " == *" $dataset "* ]] && continue
+        echo "--response_label_filter refusal: only ${REFUSAL_DATASETS[*]} label refusals, not $dataset" >&2
         return 2
     done
 }

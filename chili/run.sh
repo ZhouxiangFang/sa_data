@@ -25,7 +25,8 @@ baseline strategy; data/seed<seed>/<dataset>/); results in ablations/selected/se
 --abbrs trains only the named groups, e.g. --selected --abbrs semantic_vendi_qwen3-embedding-0.6b lexical_hdd.
 Pool options apply to every stage alike (training, diversity, selection):
 --response_label_filter refusal keeps only harmful examples whose response is labeled a refusal
-(wildguardmix only, its default dataset then; default safe: any response labeled safe,
+(aegis and wildguardmix, its default datasets then; in aegis, NVIDIA's added refusals, by their
+response label source; default safe: any response labeled safe,
 which includes harmless compliances), and --dedup keeps one row per prompt (default: every
 row). They make their own setting, named with the tag refusal, dedup or refusal_dedup:
 results in ablations/<tag>/ (ablations/selected_<tag>/, ablations/gretel_tactic_<tag>/),

@@ -75,7 +75,7 @@ meaning, so all metrics use unit vectors. Squared-L2 DistSum would then equal 2 
 so it is not reported.
 Test splits remain available for prompt-only analysis, without training filters.
 
---response_label_filter refusal (wildguardmix only) and --dedup filter the training pools
+--response_label_filter refusal (wildguardmix and aegis) and --dedup filter the training pools
 exactly as align.py's options of the same name (helper.eligible_rows); their scores
 go to their own root, diversity/<tag>/ (e.g. diversity/refusal/), with the same
 layout, and their samples to the tagged sample folders the runs train on.
@@ -643,7 +643,7 @@ def parse_args():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--datasets', nargs='+', type=str.lower,
                         help=f'Datasets to score (default: {" ".join(DEFAULT_DATASETS)}; '
-                             'wildguardmix with --response_label_filter refusal)')
+                             'aegis and wildguardmix with --response_label_filter refusal)')
     parser.add_argument('--split', choices=SUPPORTED, default='train')
     parser.add_argument('--abbr', nargs='+',
                         help='Only score these subcategory (or, with --group_by tactic, '
