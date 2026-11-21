@@ -1,0 +1,30 @@
+# Pinned to the nlp env on RANGE (Nov 2026) so runs on every cluster match.
+# Python 3.12. The torch 2.8.0 wheel on PyPI is built for CUDA 12.8.
+#   pip install -r requirements.txt
+
+# Training
+torch==2.8.0
+transformers==4.57.3
+trl==0.25.1
+deepspeed==0.19.6  # >= 0.19.6: older 0.17.6-0.19.5 break ZeRO-2 with accumulation
+accelerate==1.10.1
+datasets==4.4.1
+
+# Evaluation
+vllm==0.11.0
+ifbench @ git+https://github.com/allenai/IFBench.git@cd189a9c2889526d8af901d2103fd3e1ffcea6df
+
+# Diversity and data selection
+sentence-transformers==5.2.0
+scikit-learn==1.7.2
+scipy==1.16.2
+numpy==2.2.6
+numba==0.61.2
+nltk==3.9.2
+spacy==3.8.18
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+
+# Analysis and plots
+pandas==2.3.3
+matplotlib
+tqdm
