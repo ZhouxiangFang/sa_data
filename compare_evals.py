@@ -2,6 +2,8 @@
 
 python compare_evals.py ROOT_A ROOT_B MODEL... [--limit N]
 
+MODEL is a result name as eval.py derives it: a model shortcut or a checkpoint folder name.
+
 For each model: share of identical IF responses and safety responses (per test set), share
 of identical WildGuard labels, and the score differences. With --limit, only the first N
 prompts of every benchmark / test set are compared (ROOT_B ran with eval.py --limit N).
@@ -11,31 +13,40 @@ from pathlib import Path
 
 import pandas as pd
 
+from eval import result_dirs
+
+
+def folders(root, model):
+    """(safety folder, IF folder, file prefix) of MODEL (a model or checkpoint name) under root."""
+    safety_dir, if_dir, prefix = result_dirs(str(root), model)
+    return Path(safety_dir), Path(if_dir), prefix
+
 
 def if_responses(root, model):
-    frame = pd.read_csv(Path(root) / "if_eval" / f"{model}_if_responses.csv", keep_default_na=False)
+    _, if_dir, prefix = folders(root, model)
+    frame = pd.read_csv(if_dir / f"{prefix}_if_responses.csv", keep_default_na=False)
     return {source: rows.reset_index(drop=True) for source, rows in frame.groupby("prompt_source")}
 
 
 def safety_responses(root, model):
-    folder = Path(root) / model
+    folder, _, prefix = folders(root, model)
     out = {}
-    for path in sorted(folder.glob(f"{model}_*_responses.csv")):
-        name = path.name[len(model) + 1:-len("_responses.csv")]
+    for path in sorted(folder.glob(f"{prefix}_*_responses.csv")):
+        name = path.name[len(prefix) + 1:-len("_responses.csv")]
         out[name] = pd.read_csv(path, keep_default_na=False)
     return out
 
 
 def scores(root, model):
-    folder = Path(root) / model
+    folder, if_dir, prefix = folders(root, model)
     rows = {}
     for kind in ("overall", "overrefusal"):
-        path = folder / f"{model}_{kind}.csv"
+        path = folder / f"{prefix}_{kind}.csv"
         if path.exists():
             frame = pd.read_csv(path)
             col = [c for c in frame.columns if c.endswith("_score_pct")][0]
             rows.update({f"{kind}:{d}": v for d, v in zip(frame["dataset"], frame[col])})
-    if_path = Path(root) / "if_eval" / f"{model}_if_summary.csv"
+    if_path = if_dir / f"{prefix}_if_summary.csv"
     if if_path.exists():
         frame = pd.read_csv(if_path)
         rows.update({f"IF:{b}": v * 100 for b, v in zip(frame["benchmark"], frame["prompt_loose"])})

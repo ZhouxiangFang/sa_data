@@ -122,7 +122,7 @@ can be pooled only if these match.
 qwen2.5 `_git20k` (jobs 420696, 420697, 420698), all 9 test sets had 100% identical responses and
 WildGuard labels in both comparisons, and identical scores between the two full runs.
 
-**New env vs old training** (pending): train llama3.1_git20k / wildguardmix / random / seed 43
+**New env vs old training** (done 2026-11-22, H200): train llama3.1_git20k / wildguardmix / random / seed 43
 twice in nlp (`ALIGN_VENV=`, torch 2.8: jobs 420689, 420690, done) and once in the align env (job
 420723), and evaluate the three checkpoints in the align env (420716, 420717, 420725). The two
 torch 2.8 runs give the training noise. The training logs must show these digests:
@@ -142,6 +142,24 @@ python compare_evals.py RES_T28_A RES_T28_B MODEL       # and RES_T211 against e
 Pass: the align-env run differs from each torch 2.8 run no more than the two torch 2.8 runs differ
 from each other (per-step loss, grad norm), every checkpoint moved from its base model, and the
 align-env checkpoint's harmful / over-refusal / IF scores are within the two torch 2.8 ones' spread.
+
+Result: the align env differs from torch 2.8 about as much as two torch 2.8 runs differ from each
+other. Training is not bitwise repeatable in either env, so a rerun of the same seed moves scores by
+up to about 1 point per test set.
+
+| | torch 2.8 A vs B | align env vs torch 2.8 A / B |
+|---|---|---|
+| Loss, mean relative difference | 0.037% | 0.035% / 0.032% |
+| Grad norm, mean (max) relative difference | 0.33% (1.4%) | 0.46% (2.4%) / 0.70% (3.1%) |
+| Relative weight change from base | 5.004e-3 / 5.003e-3 | 5.005e-3 |
+| Identical responses (IFEval, aegis, or-bench-hard) | 30%, 53%, 26% | 31%, 52%, 25% / 32%, 53%, 26% |
+| Largest score difference, one test set | 0.75 | 0.66 / 1.0 |
+
+| Score | torch 2.8 A | torch 2.8 B | align env |
+|---|---|---|---|
+| Harmful, Avg | 9.33 | 9.13 | 9.44 |
+| Over-refusal, Avg | 16.34 | 16.15 | 16.04 |
+| IF, Average | 36.56 | 36.30 | 36.99 |
 
 Every result evaluated in this env needs its training rerun too: checkpoints are deleted after
 evaluation, and batch-invariant decoding changes eval outputs.
