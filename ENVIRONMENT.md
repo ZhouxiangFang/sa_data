@@ -105,7 +105,8 @@ can be pooled only if these match.
   `full_determinism`): reruns agree to about 0.6% in grad norm.
 - **Generation**: greedy, vLLM seed 42, `VLLM_BATCH_INVARIANT=1` (eval.py default) with the
   FLASH_ATTN backend; eval.py prints `vLLM 0.23.0: batch-invariant, FLASH_ATTN attention`. Outputs
-  are independent of batch size and order on one GPU type; H100, H200 and A6000 can differ.
+  are independent of batch size and order on one GPU type (checked: see Checks); H100, H200 and
+  A6000 can differ.
 - **IF scoring**: `eval_if.evaluate` seeds `random` and langdetect (`SCORING_SEED = 0`); before,
   the same responses scored up to 0.55 IFEval points apart.
 - **Tokenizers**: eval.py refuses a model whose tokenizer splits a probe text unlike its own
@@ -115,12 +116,16 @@ can be pooled only if these match.
 
 ## Checks
 
-**Eval repeatability**: evaluate one model twice and once with `--limit 100`, then
-`python compare_evals.py RUN_A RUN_B MODEL...` (expect identical responses) and
-`python compare_evals.py RUN_A RUN_LIMIT100 MODEL... --limit 100`.
+**Eval repeatability** (passed 2026-11-21, H200): evaluate one model twice and once with
+`--limit 100`, then `python compare_evals.py RUN_A RUN_B MODEL...` and
+`python compare_evals.py RUN_A RUN_LIMIT100 MODEL... --limit 100`. For llama3.1, mistral, olmo2 and
+qwen2.5 `_git20k` (jobs 420696, 420697, 420698), all 9 test sets had 100% identical responses and
+WildGuard labels in both comparisons, and identical scores between the two full runs.
 
-**New env vs old training**: train llama3.1_git20k / wildguardmix / random / seed 43 twice in nlp
-(`ALIGN_VENV=`, torch 2.8) and twice in the align env. The training logs must show these digests:
+**New env vs old training** (pending): train llama3.1_git20k / wildguardmix / random / seed 43
+twice in nlp (`ALIGN_VENV=`, torch 2.8: jobs 420689, 420690, done) and once in the align env (job
+420723), and evaluate the three checkpoints in the align env (420716, 420717, 420725). The two
+torch 2.8 runs give the training noise. The training logs must show these digests:
 
 | File (`data/train_samples/seed43/`) | SHA-256 (12) |
 |---|---|
@@ -129,13 +134,14 @@ can be pooled only if these match.
 | `general/git_data_20k_600.jsonl` | `5312175b53c2` |
 
 ```bash
-python compare_train_logs.py t28_a=LOG t28_b=LOG t211_a=LOG t211_b=LOG
+python compare_train_logs.py t28_a=LOG t28_b=LOG t211=LOG
 python /scratch/zf28/ckpts/abtest/weight_diff.py BASE_MODEL_DIR CKPT...
+python compare_evals.py RES_T28_A RES_T28_B MODEL       # and RES_T211 against each
 ```
 
-Pass: the new env differs from torch 2.8 no more than the two torch 2.8 runs differ from each
-other (per-step loss, grad norm), every checkpoint moved from its base model, and the four
-checkpoints' harmful / over-refusal / IF scores agree within run noise.
+Pass: the align-env run differs from each torch 2.8 run no more than the two torch 2.8 runs differ
+from each other (per-step loss, grad norm), every checkpoint moved from its base model, and the
+align-env checkpoint's harmful / over-refusal / IF scores are within the two torch 2.8 ones' spread.
 
 Every result evaluated in this env needs its training rerun too: checkpoints are deleted after
 evaluation, and batch-invariant decoding changes eval outputs.
