@@ -82,7 +82,7 @@ def result_files(output_dir, name):
 def release(llm, timeout=120):
     """Stop vLLM's engine and wait until the GPU memory it held is free again.
 
-    vLLM 0.11 runs the engine in a child process that is still exiting when `del llm`
+    vLLM runs the engine in a child process that can still be exiting when `del llm`
     returns, so WildGuard's engine then found 7 of 93 GiB free on an H100 and refused to
     start (range, 2026-11-05). Waits for vLLM's default 90% to be free.
     """

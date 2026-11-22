@@ -82,7 +82,9 @@ def main():
             print(f"  {name:22} n={n:5} identical responses {same:7.2%}  labels {same_label:7.2%}")
         if not args.limit:
             sa, sb = scores(args.root_a, model), scores(args.root_b, model)
-            diffs = {k: round(sb[k] - sa[k], 3) for k in sa if k in sb}
+            # A score both runs leave undefined (NaN: no harmful prompt within --limit) is equal
+            diffs = {k: round(sb[k] - sa[k], 3) for k in sa
+                     if k in sb and not (pd.isna(sa[k]) and pd.isna(sb[k]))}
             print(f"  score differences (B - A): max |diff| {max(map(abs, diffs.values()), default=0)}")
             for key, diff in diffs.items():
                 if diff:

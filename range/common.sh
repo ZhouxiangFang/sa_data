@@ -4,9 +4,9 @@
 # the environment overrides:
 #
 #   TRAIN_GPU=h200 TRAIN_NGPUS=2   GPUs per training job (full fine-tuning)
-#   EVAL_GPU=h200                  GPU of an eval/diversity job: h200, h100, 47gb, or hopper (an
-#                                  H200 or an H100, whichever frees first). Batch invariance makes
-#                                  reruns identical on one GPU type only, so keep evals on one.
+#   EVAL_GPU=hopper                GPU of an eval/diversity job: hopper (an H200 or an H100,
+#                                  whichever frees first), h200, h100 or 47gb. Batch-invariant
+#                                  decoding repeats exactly on one GPU type; types can differ slightly.
 #   MAX_TRAIN=8 MAX_EVAL=16        Jobs of one array that may run at once (8 training
 #                                  jobs use 16 of the 64 H200s)
 #   TRAIN_TIME/EVAL_TIME=04:00:00  Wall time per job (partition maximum: 1 day)
@@ -36,7 +36,7 @@ PARTITION=${PARTITION:-commons}
 ACCOUNT=${ACCOUNT:-}
 TRAIN_GPU=${TRAIN_GPU:-h200} TRAIN_NGPUS=${TRAIN_NGPUS:-2}
 TRAIN_CPUS=${TRAIN_CPUS:-16} TRAIN_MEM=${TRAIN_MEM:-128G} TRAIN_TIME=${TRAIN_TIME:-04:00:00}
-EVAL_GPU=${EVAL_GPU:-h200}
+EVAL_GPU=${EVAL_GPU:-hopper}
 EVAL_CPUS=${EVAL_CPUS:-8} EVAL_MEM=${EVAL_MEM:-64G} EVAL_TIME=${EVAL_TIME:-04:00:00}
 MAX_TRAIN=${MAX_TRAIN:-8} MAX_EVAL=${MAX_EVAL:-16}
 EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32} MICRO_BATCH=${MICRO_BATCH:-4} LEARNING_RATE=${LEARNING_RATE:-1e-5}

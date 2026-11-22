@@ -1,4 +1,4 @@
-"""Compare per-step loss and grad norm of align.py training logs (e.g. torch 2.8 vs 2.14).
+"""Compare per-step loss and grad norm of align.py training logs (e.g. two envs or optimizers).
 
 python compare_train_logs.py NAME=LOG ...
 

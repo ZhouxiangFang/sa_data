@@ -33,11 +33,8 @@ and cost 2 IFEval points. At the same batch and lr, RANGE and chili agree to wit
 both clusters on one setting. Chili uses ZeRO-3 (`sa_data/ds_config.json`). ZeRO-2 needs DeepSpeed ≥ 0.19.6,
 which nlp has since Nov 9, 2026. With gradient accumulation, 0.17.6 to 0.19.5 compute wrong gradients:
 the seed 43/86/129 runs before Nov 9, on 0.18.0, came out bit-identical to the base models. `train.sh`
-refuses ZeRO-2 on those versions unless `ALLOW_ZERO2=1`. Eval uses one H200 (`EVAL_GPU=h200`; or `h100`, `47gb`, `hopper`): batch-invariant decoding repeats
-exactly only on one GPU type. Every job runs in nlp
-(torch 2.11, transformers 4.57.3, vLLM 0.23; `sa_data/requirements.txt`, built as `sa_data/ENVIRONMENT.md`
-says), so training and evaluation share torch and tokenizers. vLLM 0.11 (nlp before Nov 22, 2026) silently
-ignored `VLLM_BATCH_INVARIANT`, and `eval.py` refuses it. At most
+refuses ZeRO-2 on those versions unless `ALLOW_ZERO2=1`. Eval uses one H200 or H100 (`EVAL_GPU=hopper`; or `h200`, `h100`, `47gb`). Every job runs in nlp
+(`sa_data/ENVIRONMENT.md`), so training and evaluation share torch and tokenizers. At most
 `MAX_TRAIN=8` training and `MAX_EVAL=16` eval jobs run at once. Logs are in `log/slurm/`.
 
 Settings and pool options follow `chili/run.sh`: `--tactic` (results in `ablations/gretel_tactic/`),
