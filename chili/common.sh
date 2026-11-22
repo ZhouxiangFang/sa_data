@@ -20,8 +20,9 @@ if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     source /home/zf28/miniconda3/etc/profile.d/conda.sh && conda activate nlp || exit 1
     set -u
 fi
-# DeepSpeed compiles its CUDA ops against the pip-installed NVIDIA headers.
-for include_dir in "$CONDA_PREFIX"/lib/python*/site-packages/nvidia/*/include; do
+# DeepSpeed compiles its CUDA ops against the pip-installed NVIDIA headers: those of an
+# activated venv (e.g. torch 2.14's CUDA 13 ones), otherwise nlp's.
+for include_dir in "${VIRTUAL_ENV:-$CONDA_PREFIX}"/lib/python*/site-packages/nvidia/*/include; do
     [[ -d $include_dir && ":${CPATH:-}:" != *":$include_dir:"* ]] &&
         export CPATH="$include_dir${CPATH:+:$CPATH}"
 done

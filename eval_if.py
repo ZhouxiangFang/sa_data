@@ -10,6 +10,9 @@ import os
 
 SCORE_NAMES = ["prompt_strict", "instruction_strict", "prompt_loose", "instruction_loose"]
 MAX_TOKENS = 4096
+# Seeds the two random sources of scoring (see evaluate), so the same responses always get
+# the same scores.
+SCORING_SEED = 0
 
 
 def load_benchmarks(limit=None):
@@ -88,7 +91,18 @@ def check_response(example, response, loose=False):
 
 
 def evaluate(benchmark, examples, responses, model_name, model_id):
-    """Strict and loose prompt/instruction accuracy."""
+    """Strict and loose prompt/instruction accuracy, the same on every call for the same responses.
+
+    Scoring has two random sources, both seeded here per benchmark: checkers draw any
+    argument their kwargs leave unset from `random`, and langdetect (the response-language
+    and English-case checks) samples unless DetectorFactory.seed is set.
+    """
+    import random
+
+    from langdetect import DetectorFactory
+
+    random.seed(SCORING_SEED)
+    DetectorFactory.seed = SCORING_SEED
     strict, loose = [], []
     # Strict then loose per example, the official order (some checkers draw from `random`).
     for example, response in zip(examples, responses):

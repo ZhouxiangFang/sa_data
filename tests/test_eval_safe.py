@@ -166,7 +166,8 @@ class OverrefusalTests(unittest.TestCase):
 class EvalMainTests(unittest.TestCase):
     """eval.py: one model load serves IF and safety, then the guard judges."""
 
-    def run_main(self, directory, *argv, judge_text="Response refusal: yes\nHarmful response: no"):
+    def run_main(self, directory, *argv, judge_text="Response refusal: yes\nHarmful response: no",
+                 batch_invariant_vllm=True):
         model = Mock()
         model.generate.side_effect = lambda prompts, params, use_tqdm=False: [
             guard_output("if reply") for _ in prompts]
@@ -176,10 +177,13 @@ class EvalMainTests(unittest.TestCase):
         llm = Mock(side_effect=[model, guard])
         torch = Mock()
         torch.cuda.mem_get_info.return_value = (80, 80)  # the model's GPU memory is free again
+        # vLLM 0.11 has no VLLM_BATCH_INVARIANT; vllm.envs then lacks the attribute.
+        envs = SimpleNamespace(**({"VLLM_BATCH_INVARIANT": True} if batch_invariant_vllm else {}))
         modules = {
             "torch": torch,
             "transformers": Mock(),
-            "vllm": SimpleNamespace(LLM=llm, SamplingParams=Mock()),
+            "vllm": SimpleNamespace(LLM=llm, SamplingParams=Mock(), envs=envs, __version__="test"),
+            "vllm.envs": envs,
         }
         example = {"prompt": "write two lines", "instruction_id_list": [], "kwargs": []}
         with (
@@ -209,6 +213,9 @@ class EvalMainTests(unittest.TestCase):
             llm, model, guard, generate = self.run_main(
                 directory, "--model", str(checkpoint), "--datasets", "ailuminate", "xstest")
             self.assertEqual(llm.call_count, 2)  # the model, then the guard
+            for call in llm.call_args_list:  # both batch-invariant on a tested backend
+                self.assertEqual(call.kwargs["attention_config"],
+                                 {"backend": evaluation.ATTENTION_BACKEND})
             self.assertEqual(model.generate.call_count, 2)  # IFBench, IFEval
             model.reset_prefix_cache.assert_called_once()
             self.assertEqual(generate.call_count, 2)  # one call per test set
@@ -219,6 +226,30 @@ class EvalMainTests(unittest.TestCase):
                                   / "aegis_hate_if_summary.csv")
             self.assertEqual(summary["benchmark"].tolist(), ["IFBench", "IFEval", "Average"])
             self.assertEqual(summary["num_prompts"].tolist(), [1, 2, 3])
+
+    def test_refuses_a_vllm_that_ignores_batch_invariance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(SystemExit) as raised:
+                self.run_main(directory, "--model", "qwen2.5-ins", batch_invariant_vllm=False)
+            self.assertIn("ignores VLLM_BATCH_INVARIANT", str(raised.exception))
+
+    def test_if_scores_do_not_depend_on_the_random_state(self):
+        import random
+
+        from langdetect import DetectorFactory
+
+        example = {"prompt": "p", "instruction_id_list": ["a", "b"], "kwargs": [{}, {}]}
+        # A checker that draws from `random`, as IFEval's do when a kwarg is unset.
+        draw = lambda example, response, loose=False: [random.random() < 0.5 for _ in range(2)]
+        scores = []
+        with patch.object(eval_if, "check_response", side_effect=draw):
+            for state in (1, 2, 3):
+                random.seed(state)
+                DetectorFactory.seed = None
+                scores.append(eval_if.evaluate("IFEval", [example] * 50, ["r"] * 50, "m", "m"))
+                self.assertEqual(DetectorFactory.seed, eval_if.SCORING_SEED)
+        self.assertEqual(scores[0], scores[1])
+        self.assertEqual(scores[0], scores[2])
 
     def test_overrefusal_only_permit_run_skips_if(self):
         with tempfile.TemporaryDirectory() as directory:

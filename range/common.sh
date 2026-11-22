@@ -21,6 +21,10 @@
 #                                  ZeRO-3) gives the same updates.
 #   PARTITION=commons ACCOUNT=     Slurm partition / account (account: the default one)
 #   TRAIN_VENV=                    Train in this venv over the nlp env (another DeepSpeed version)
+#   EVAL_VENV=/scratch/zf28/envs/vllm0330
+#                                  Evaluate in this venv: vLLM 0.33 with batch-invariant kernels
+#                                  (sa_data/requirements-eval.txt). nlp's vLLM 0.11 ignores
+#                                  VLLM_BATCH_INVARIANT, so eval.py refuses to run there.
 
 RANGE_DIR=${RANGE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
 SA_DIR=$(dirname -- "$RANGE_DIR")
@@ -39,6 +43,7 @@ EVAL_CPUS=${EVAL_CPUS:-8} EVAL_MEM=${EVAL_MEM:-64G} EVAL_TIME=${EVAL_TIME:-04:00
 MAX_TRAIN=${MAX_TRAIN:-8} MAX_EVAL=${MAX_EVAL:-16}
 EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32} MICRO_BATCH=${MICRO_BATCH:-4} LEARNING_RATE=${LEARNING_RATE:-1e-5}
 DS_CONFIG=${DS_CONFIG:-$RANGE_DIR/ds_zero2.json}
+EVAL_VENV=${EVAL_VENV-/scratch/zf28/envs/vllm0330}
 
 if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     set +u  # the activation scripts reference unset variables

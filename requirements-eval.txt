@@ -1,0 +1,33 @@
+# Evaluation (eval.py: IFBench/IFEval + safety with the WildGuard judge), in its own venv
+# because vLLM pins its own torch. range/common.sh EVAL_VENV points to it; training stays in
+# the nlp env (requirements.txt). Built Nov 21, 2026 with nlp's Python 3.12:
+#   /home/zf28/miniconda3/envs/nlp/bin/python -m venv /scratch/zf28/envs/vllm0330
+#   /scratch/zf28/envs/vllm0330/bin/python -m pip install -r requirements-eval.txt
+# The torch 2.14.0 wheel is built for CUDA 13.0 (NVIDIA driver >= 580).
+
+# vLLM 0.11 silently ignored VLLM_BATCH_INVARIANT; 0.33.0 (Nov 2, 2026) reads it and lists
+# Llama 3.1, Qwen2.5, Mistral-7B-v0.3 (WildGuard's base) and OLMo 2 (1B) as tested.
+vllm==0.33.0
+torch==2.14.0  # pinned by vllm 0.33.0
+flashinfer-python==0.7.2.post1  # pinned by vllm 0.33.0
+
+# Not pinned exactly by vLLM, and each changes what the models see or how they load:
+transformers==5.20.2
+tokenizers==0.23.3
+mistral_common==1.13.1  # Mistral tokenizers (WildGuard, Mistral checkpoints)
+huggingface-hub==1.33.0
+safetensors==0.8.0
+
+# Test sets
+datasets==4.4.1
+pandas==2.3.3
+numpy==2.2.6
+
+# IFBench / IFEval scorers (eval_if.py seeds random and langdetect)
+ifbench @ git+https://github.com/allenai/IFBench.git@cd189a9c2889526d8af901d2103fd3e1ffcea6df
+nltk==3.9.2
+langdetect==1.0.9
+absl-py==2.3.1
+immutabledict==4.3.1
+emoji==2.16.0
+syllapy==0.8.0

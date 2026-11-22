@@ -29,13 +29,16 @@ import eval_safe
 from helper import LEGACY_SEED, model_mapping, seed_dir
 
 logging.getLogger("vllm").setLevel(logging.WARNING)
-# Greedy decoding alone is not repeatable in vLLM (outputs depend on batching): two runs
-# shared only ~40% of responses. Batch-invariant kernels (FLASH_ATTN backend required)
-# made reruns give the same labels and scores at the same speed on an A6000 (2026-11-05).
+# Greedy decoding alone is not repeatable in vLLM: outputs depend on how requests are
+# batched (two runs of one checkpoint shared ~40% of responses; identical weights gave ~16%
+# different responses on RANGE). Batch-invariant kernels make each output independent of
+# the batch. vLLM 0.11 silently ignored VLLM_BATCH_INVARIANT, so main() refuses a vLLM that
+# does not read it; the eval env (requirements-eval.txt) has one that does.
 # VLLM_BATCH_INVARIANT=0 turns this off.
 os.environ.setdefault("VLLM_BATCH_INVARIANT", "1")
-if os.environ["VLLM_BATCH_INVARIANT"] == "1":
-    os.environ.setdefault("VLLM_ATTENTION_BACKEND", "FLASH_ATTN")
+BATCH_INVARIANT = os.environ["VLLM_BATCH_INVARIANT"] == "1"
+# One of the attention backends vLLM tests batch invariance with on CUDA.
+ATTENTION_BACKEND = "FLASH_ATTN"
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 CHECKPOINT_NAME = re.compile(
@@ -96,6 +99,23 @@ def release(llm, timeout=120):
     torch.cuda.empty_cache()
 
 
+def load_llm(model_id):
+    """A vLLM engine, batch-invariant unless VLLM_BATCH_INVARIANT=0."""
+    import vllm
+    import vllm.envs
+
+    if not BATCH_INVARIANT:
+        print(f"vLLM {vllm.__version__}: batch invariance OFF, outputs depend on batching")
+        return vllm.LLM(model=model_id)
+    if not getattr(vllm.envs, "VLLM_BATCH_INVARIANT", False):
+        raise SystemExit(
+            f"vLLM {vllm.__version__} ignores VLLM_BATCH_INVARIANT, so outputs would depend on "
+            "batching. Run in the eval env (requirements-eval.txt; range/common.sh EVAL_VENV) "
+            "or set VLLM_BATCH_INVARIANT=0 to accept that.")
+    print(f"vLLM {vllm.__version__}: batch-invariant, {ATTENTION_BACKEND} attention")
+    return vllm.LLM(model=model_id, attention_config={"backend": ATTENTION_BACKEND})
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -142,11 +162,9 @@ def main(argv=None):
     if not args.skip_safety:
         print(f"Safety results: {safety_dir}")
 
-    import torch
     from transformers import AutoTokenizer
-    from vllm import LLM
 
-    llm = LLM(model=model_id)
+    llm = load_llm(model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     if not args.skip_if:
         eval_if.run(llm, tokenizer, args.model, model_id, if_dir, if_prefix, limit=args.limit)
@@ -160,7 +178,7 @@ def main(argv=None):
     release(llm)
     del llm
 
-    guard = LLM(model=guard_id)
+    guard = load_llm(guard_id)
     eval_safe.judge(guard_id, guard, datasets)
     del guard
     eval_safe.save_results(datasets, safety_dir, prefix, merge=args.merge,
