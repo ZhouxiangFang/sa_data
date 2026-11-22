@@ -23,16 +23,9 @@ refuses vLLM 0.11, since its outputs depend on batching.
 
 - **NVIDIA driver ≥ 580** (CUDA 13.0 wheels). RANGE H200 nodes: 580.173.02. Chili: check
   `nvidia-smi`; `chili/common.sh` adds user-space libraries for driver 595.84.
-- **CUDA 13.0.2 toolkit (nvcc 13.0.88)** at `/scratch/zf28/cuda/13.0.2` on both clusters, for
-  DeepSpeed's FusedAdam JIT build (training only); the `common.sh` of each cluster sets `CUDA_HOME`
-  to it and unsets CPATH. It is the CUDA torch 2.11 is built with. Not other versions:
-  - nvcc 13.3 (RANGE's module) drops a `typename` from torch's `ATen/core/List_inl.h:202` and the
-    build fails with every GCC from 12 to 15 (job 420705).
-  - CUDA 13's headers refuse an nvcc of another minor version ("CUDA compiler and CUDA toolkit
-    headers are incompatible"), so the env's pip CUDA packages (13.0 runtime headers, nvcc 13.2,
-    cccl 13.3) can't be used either.
-
-  GCC 14 (RANGE: `/opt/apps`, compute nodes have no g++); GCC ≤ 15.
+- **A C compiler** for the small helpers Triton and torch.compile build at run time (RANGE: GCC 14
+  from `/opt/apps`, set by `range/common.sh`). No CUDA toolkit or nvcc: DeepSpeed runs torch's own
+  fused AdamW (`"torch_adam": true` in both DeepSpeed configs), compiled into torch.
 - **Hugging Face snapshots**: the code loads each repo's `main`, so check that the cache
   (`$HF_HOME/hub/*/refs/main`; RANGE `HF_HOME=/scratch/zf28/huggingface`) holds these revisions:
 
@@ -69,24 +62,9 @@ $P -m pip install -c constraints.txt -r requirements.txt
 $P -m pip check
 ```
 
-CUDA 13.0.2 toolkit (1.8 GB; the conda package cache goes to /scratch, /home has a quota):
-
-```bash
-source ~/miniconda3/etc/profile.d/conda.sh
-CONDA_PKGS_DIRS=/scratch/zf28/conda_pkgs conda create -y -p /scratch/zf28/cuda/13.0.2 \
-    --override-channels -c nvidia -c conda-forge "cuda-version=13.0" "cuda-nvcc-impl=13.0.88" \
-    "cuda-cudart-dev=13.0.96" "cuda-cccl=13.0.*" libcublas-dev libcusparse-dev libcusolver-dev \
-    libcurand-dev cuda-nvrtc-dev cuda-nvtx-dev cuda-profiler-api
-ln -sfn targets/x86_64-linux/include /scratch/zf28/cuda/13.0.2/include   # torch looks for
-ln -sfn targets/x86_64-linux/lib /scratch/zf28/cuda/13.0.2/lib64         # include/ and lib64/
-/scratch/zf28/cuda/13.0.2/bin/nvcc --version                              # V13.0.88
-```
-
-/scratch purges old files; rebuild the toolkit when it disappears.
-
 ## Running
 
-**RANGE**: `range/common.sh` activates nlp and the toolkit for every job; nothing to do.
+**RANGE**: `range/common.sh` activates nlp for every job; nothing to do.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -94,7 +72,7 @@ ln -sfn targets/x86_64-linux/lib /scratch/zf28/cuda/13.0.2/lib64         # inclu
 | `VLLM_USE_FLASHINFER_SAMPLER` | `0` | greedy decoding bypasses it; avoids a JIT build per job |
 | `DS_CONFIG` | `range/ds_zero2.json` | ZeRO-2 |
 
-**Chili**: `chili/common.sh` activates nlp and the toolkit (build both as above first).
+**Chili**: `chili/common.sh` activates nlp (build it as above first).
 ```bash
 export VLLM_USE_FLASHINFER_SAMPLER=0
 chili/train.sh --models llama3.1_git20k --datasets wildguardmix --abbrs random --seed 43 --output_dir DIR
@@ -110,9 +88,10 @@ chili/eval.sh MODEL_OR_CKPT -- --output_dir DIR
 | Micro-batch × accumulation | 4 × 4 | 1 × 8 |
 | Effective batch | 32 | 32 |
 
-Both: lr 1e-5, cosine schedule, 10% warmup, 2 epochs, weight decay 0.01, max grad norm 1, bf16
-(TF32 on), max length 4096, completion-only loss, seeds 43 / 86 / 129. Seeds from the two clusters
-can be pooled only if these match.
+Both: torch's fused AdamW (DeepSpeed `torch_adam`; DeepSpeed's FusedAdam before 2026-11-22), lr 1e-5,
+cosine schedule, 10% warmup, 2 epochs, weight decay 0.01, max grad norm 1, bf16 (TF32 on), max
+length 4096, completion-only loss, seeds 43 / 86 / 129. Seeds from the two clusters can be pooled
+only if these match.
 
 ## Determinism measures
 
@@ -177,6 +156,10 @@ up to about 1 point per test set.
 | Harmful, Avg | 9.33 | 9.13 | 9.44 |
 | Over-refusal, Avg | 16.34 | 16.15 | 16.04 |
 | IF, Average | 36.56 | 36.30 | 36.99 |
+
+**Torch AdamW instead of FusedAdam** (pending): the same training once more with torch's fused AdamW
+(job 420793), and its checkpoint evaluated (420801). Pass as above, against the torch 2.8 pair and
+the FusedAdam run 420723.
 
 Every result evaluated in this env needs its training rerun too: checkpoints are deleted after
 evaluation, and batch-invariant decoding changes eval outputs.

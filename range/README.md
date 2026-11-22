@@ -52,9 +52,9 @@ The `--selected` follow-up job runs `range/run.sh` on a compute node, so it need
 fails, rerun the same command with `--skip select`.
 
 Notes:
-- The first training job JIT-compiles DeepSpeed's FusedAdam into `~/.cache/torch_extensions`.
-  It is built with GCC 14 from `/opt/apps` (compute nodes have no system g++) and `nvcc` from
-  `/opt/apps/software/CUDA/12.8.0`. The env's libstdc++ was upgraded so GCC 14 builds load. `common.sh` sets both.
+- Training uses torch's own fused AdamW (`"torch_adam": true` in the DeepSpeed configs), so nothing is
+  compiled with nvcc. Triton and torch.compile build small C helpers with GCC 14 from `/opt/apps` (compute
+  nodes have no system g++); the env's libstdc++ was upgraded so they load. `common.sh` sets `CC`/`CXX`.
 - /home has a 50 GB quota, so the whole HF cache (`HF_HOME`, including the token) is in
   `/scratch/zf28/huggingface`, and `~/.cache/huggingface` is a symlink to it. /scratch purges
   old files: an earlier cache there lost all of them. If models disappear, rerun

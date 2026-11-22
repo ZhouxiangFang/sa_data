@@ -47,19 +47,10 @@ if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     source /home/zf28/miniconda3/etc/profile.d/conda.sh && conda activate nlp || exit 1
     set -u
 fi
-# DeepSpeed JIT-builds FusedAdam on the first training job (cached in TORCH_EXTENSIONS_DIR)
-# with nvcc from CUDA_HOME and GCC 14 from the modules: compute nodes have no system g++.
-# GCC 14's libraries need GLIBCXX_3.4.32+, so the env's libstdc++ was upgraded to conda-forge's
-# (conda revision 1; the old 11.2 one stopped at 3.4.29). Only nvcc is put on PATH; the CUDA
-# toolkit's libraries stay off LD_LIBRARY_PATH so torch and vLLM keep their bundled CUDA.
-# The toolkit is CUDA 13.0.2 (nvcc 13.0.88), the CUDA torch 2.11 is built with, from conda
-# (ENVIRONMENT.md): the 13.3.0 module's nvcc drops a `typename` from torch's ATen/core/List_inl.h
-# and FusedAdam fails to compile with every GCC (12-15). nvcc uses only the toolkit's own headers
-# (CPATH unset, not inherited): CUDA 13's headers refuse a compiler of another minor version, and
-# the env's pip CUDA packages mix 13.0 runtime headers with 13.2-13.5 tools.
-export CUDA_HOME=/scratch/zf28/cuda/13.0.2
-unset CPATH
-export PATH="$CUDA_HOME/bin:$PATH"
+# Nothing is built with nvcc: DeepSpeed runs torch's own AdamW (torch_adam in the DeepSpeed
+# configs), which ships compiled. Triton and torch.compile build small C helpers at run time with
+# CC, GCC 14 from the modules (compute nodes have no system g++). GCC 14's libraries need
+# GLIBCXX_3.4.32+, so the env's libstdc++ was upgraded to conda-forge's (conda revision 1).
 export CC=/opt/apps/software/GCCcore/14.2.0/bin/gcc CXX=/opt/apps/software/GCCcore/14.2.0/bin/g++
 # The Hugging Face cache (models, datasets, token) is on scratch: /home has a 50 GB quota.
 # ~/.cache/huggingface is a symlink to it as well.

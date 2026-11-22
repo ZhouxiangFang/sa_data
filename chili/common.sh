@@ -21,14 +21,8 @@ if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     set -u
 fi
 # nlp is the one env of every stage (sa_data/requirements.txt: torch 2.11, transformers 4.57.3,
-# vLLM 0.23); ENVIRONMENT.md says how to build it. DeepSpeed compiles FusedAdam with nvcc from
-# CUDA_HOME: CUDA 13.0.2 (nvcc 13.0.88), the CUDA torch 2.11 is built with and the one RANGE uses,
-# with its own headers only (CUDA 13's headers refuse a compiler of another minor version, the
-# env's pip CUDA packages mix 13.0 headers with 13.2-13.5 tools, nvcc 13.3 fails on torch's headers).
-export CUDA_HOME=/scratch/zf28/cuda/13.0.2
-unset CPATH
-[[ -x $CUDA_HOME/bin/nvcc && $("$CUDA_HOME/bin/nvcc" --version) == *"V13.0.88"* ]] ||
-    echo "Warning: no CUDA 13.0.2 toolkit at $CUDA_HOME (ENVIRONMENT.md); FusedAdam won't build" >&2
+# vLLM 0.23); ENVIRONMENT.md says how to build it. Nothing is built with nvcc: DeepSpeed runs
+# torch's own AdamW (torch_adam in ds_config.json).
 # Driver 595.84 needs matching user-space libraries; a no-op with other drivers.
 if grep -q '595\.84' /proc/driver/nvidia/version 2>/dev/null; then
     export LD_LIBRARY_PATH="/home/zf28/align/.nvidia-595.84/compute-lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
