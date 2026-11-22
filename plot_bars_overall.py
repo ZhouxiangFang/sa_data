@@ -2,8 +2,9 @@
 
 Run from any directory: python sa_data/plot_bars_overall.py
 Select a result configuration with --suffix 800_wildguardmix and a training
-seed with --seed (default: 43): trained runs are read from
-<results>/seed<seed>/ (IF: <results>/seed<seed>/if_eval/), while the official and
+seed with --seed (default: 43; several seeds, e.g. --seed 43 86 129, are
+averaged per model and run, and their figures default to
+figs/summary/<baseline>_<suffix>): trained runs are read from <results>/seed<seed>/ (IF: <results>/seed<seed>/if_eval/), while the official and
 self-trained instruct baselines, always included, stay in <results>/ and
 <results>/if_eval/. --models selects the models (default: llama3.1 mistral olmo2
 qwen2.5). Figures default to figs/seed<seed>/<baseline>_<size>_<dataset> (for
@@ -18,8 +19,11 @@ macro-average over XSTest and OR-Bench-Hard); IFBench and IFEval prompt_loose
 fractions are converted to percent and averaged equally. Official and
 self-trained instruct baselines come first, then the random and evenly
 training-data baselines, followed by subcategories ranked by descending harmful
-score. Pale blue and gray bars beside the harmful bars show the secondary
+score; --ascending instead ranks random, evenly and the subcategories together,
+least harmful first (instruct baselines stay first), with bold mix labels. Pale blue and gray bars beside the harmful bars show the secondary
 overrefusal and IF metrics. The average figure gives each model equal weight.
+X labels drop the embedding-model suffix of select_data.py subsets
+(semantic_kmeans_qwen3-embedding-0.6b -> semantic_kmeans) unless two would match.
 The same figures are drawn per safety test dataset in <output>/<test>/, with
 that dataset's harmful score in place of the Avg row.
 """
@@ -36,6 +40,7 @@ import numpy as np
 import pandas as pd
 
 from helper import DEFAULT_SEED, insert_seed_dir, seed_dir
+from calculate_diversity import EMBEDDING_MODEL_IDS, embedding_name
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -70,11 +75,24 @@ BASELINE_ABBRS = ("random", "evenly")
 # Training subcategories left out of every figure and score table; benign runs
 # have no harmful prompts (align.py).
 EXCLUDED_ABBRS = ("benign",)
+# Embedding-model suffixes of select_data.py subset names
+# (semantic_kmeans_qwen3-embedding-0.6b), left out of the x labels.
+EMBEDDER_SUFFIXES = tuple(f"_{embedding_name(model)}" for model in EMBEDDING_MODEL_IDS)
 
 
 def training_subcategory(version):
     """Training subcategory of a DATASET_SUBCATEGORY_SIZE version label."""
     return version.split("_", 1)[1].rsplit("_", 1)[0]
+
+
+def short_labels(subcategories):
+    """X labels without the embedding-model suffix, unless that makes two equal."""
+    short = [
+        next((name.removesuffix(suffix) for suffix in EMBEDDER_SUFFIXES
+              if name.endswith(suffix)), name)
+        for name in subcategories
+    ]
+    return short if len(set(short)) == len(short) else list(subcategories)
 
 
 def discover_runs(results_dir, model, suffix=None, seed=DEFAULT_SEED):
@@ -194,8 +212,41 @@ def load_scores(results_dir, if_eval_dir, models, suffix=None, seed=DEFAULT_SEED
     return data, versions
 
 
+def load_seed_means(results_dir, if_eval_dir, models, suffix, seeds):
+    """Scores averaged over seeds, the versions, and every seed's scores.
+
+    The instruct baselines do not depend on the seed, so their mean is their score.
+    """
+    frames = []
+    versions = None
+    for seed in seeds:
+        data, seed_versions = load_scores(results_dir, if_eval_dir, models, suffix, seed)
+        if versions is None:
+            versions = seed_versions
+        elif set(seed_versions) != set(versions):
+            raise ValueError(
+                f"seed {seed}: versions differ from seed {seeds[0]}; "
+                f"missing={sorted(set(versions) - set(seed_versions))}, "
+                f"extra={sorted(set(seed_versions) - set(versions))}"
+            )
+        frames.append(data.assign(seed=seed))
+    per_seed = pd.concat(frames, ignore_index=True)
+    score_columns = [column for column in per_seed if column.endswith("_pct")]
+    first_seed = seed_dir(seeds[0]) + "/"
+    mean = (
+        per_seed.groupby(["model", "version"], sort=False)
+        .agg(run=("run", "first"), **{column: (column, "mean") for column in score_columns})
+        .reset_index()
+    )
+    mean["run"] = mean["run"].str.removeprefix(first_seed)
+    return mean, versions, per_seed
+
+
 def default_output_dir(data, versions, suffix=None, seed=DEFAULT_SEED):
-    """Infer the figure folder from seed, baseline, training size, and dataset."""
+    """Infer the figure folder from seed, baseline, training size, and dataset.
+
+    seed may be a list of seeds; several seeds go to figs/summary/.
+    """
     baselines = {
         row.run[len(row.model):].lstrip("_-")
         for row in data.loc[data["version"] == "-20k"].itertuples()
@@ -214,21 +265,24 @@ def default_output_dir(data, versions, suffix=None, seed=DEFAULT_SEED):
             "sizes or datasets; specify --output-dir"
         )
     output_suffix = suffix or f"{next(iter(sizes))}_{next(iter(datasets))}"
-    return ROOT / "figs" / seed_dir(seed) / f"{next(iter(baselines))}_{output_suffix}"
+    seeds = seed if isinstance(seed, (list, tuple)) else [seed]
+    folder = seed_dir(seeds[0]) if len(seeds) == 1 else "summary"
+    return ROOT / "figs" / folder / f"{next(iter(baselines))}_{output_suffix}"
 
 
 def plot_bars(scores, versions, title, output_path, harmful_column="harmful_score_pct",
-              harmful_label=METRICS["harmful_score_pct"][0]):
+              harmful_label=METRICS["harmful_score_pct"][0], ascending=False):
+    """ascending ranks the mixes with the subcategories, least harmful first."""
     baselines = ["-ins", "-20k"]
     trained = [version for version in versions if version not in baselines]
-    mixes = sorted(
+    mixes = [] if ascending else sorted(
         (version for version in trained if training_subcategory(version) in BASELINE_ABBRS),
         key=lambda version: BASELINE_ABBRS.index(training_subcategory(version)),
     )
     subcategories = scores.reindex([
         version for version in trained if version not in mixes
     ]).sort_values(
-        harmful_column, ascending=False, kind="stable"
+        harmful_column, ascending=ascending, kind="stable"
     )
     groups = [group for group in (baselines, mixes, subcategories.index.tolist()) if group]
     versions = [version for group in groups for version in group]
@@ -269,11 +323,17 @@ def plot_bars(scores, versions, title, output_path, harmful_column="harmful_scor
             subcategory, size = subcategory_and_size.rsplit("_", 1)
             labels.append(subcategory)
             training_sets.add((dataset, int(size)))
+    labels = short_labels(labels)
     training_info = "; ".join(
         f"{dataset}, {size:,} examples per subcategory"
         for dataset, size in sorted(training_sets)
     )
     ax.set_xticks(x, labels, rotation=45, ha="right", rotation_mode="anchor")
+    if ascending:
+        # Bold the random/evenly mixes, which are ranked among the subcategories.
+        for tick, version in zip(ax.get_xticklabels(), versions):
+            if version not in baselines and training_subcategory(version) in BASELINE_ABBRS:
+                tick.set_fontweight("bold")
     ax.tick_params(axis="x", labelsize=13)
     ax.tick_params(axis="y", labelsize=14)
     for boundary in boundaries:
@@ -311,8 +371,10 @@ def main():
         help="Result folder suffix, e.g. 800_wildguardmix (always includes both instruct baselines)",
     )
     parser.add_argument(
-        "--seed", type=int, default=DEFAULT_SEED,
-        help="Training seed of the runs (results_dir/seed<seed>; default: %(default)s)",
+        "--seed", type=int, nargs="+", default=[DEFAULT_SEED],
+        help="Training seed(s) of the runs (results_dir/seed<seed>; default: %(default)s). "
+             "Several seeds are averaged per model and run; their figures default to "
+             "ROOT/figs/summary/ and their per-seed scores go to seed_scores.csv",
     )
     parser.add_argument(
         "--if-eval-dir", type=Path,
@@ -327,40 +389,60 @@ def main():
         "--models", nargs="+", choices=MODELS, default=list(DEFAULT_MODELS),
         help="Models to plot and average (default: %(default)s)",
     )
+    parser.add_argument(
+        "--ascending", action="store_true",
+        help="Rank random, evenly and the subcategories together, least harmful first "
+             "(default: mixes first, then subcategories most harmful first)",
+    )
     args = parser.parse_args()
     if args.suffix is not None:
         args.suffix = args.suffix.lstrip("_")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.suffix):
             parser.error("--suffix must be a nonempty folder-name suffix without path separators")
+    seeds = list(dict.fromkeys(args.seed))
+    if_eval_dir = args.if_eval_dir or args.results_dir / "if_eval"
     try:
-        data, versions = load_scores(
-            args.results_dir, args.if_eval_dir or args.results_dir / "if_eval",
-            args.models, args.suffix, args.seed,
-        )
+        if len(seeds) == 1:
+            data, versions = load_scores(
+                args.results_dir, if_eval_dir, args.models, args.suffix, seeds[0],
+            )
+            per_seed = None
+        else:
+            data, versions, per_seed = load_seed_means(
+                args.results_dir, if_eval_dir, args.models, args.suffix, seeds,
+            )
         output_dir = args.output_dir or default_output_dir(data, versions, args.suffix,
-                                                           args.seed)
+                                                           seeds)
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
 
+    # Several seeds: say so in every title.
+    seed_note = "" if len(seeds) == 1 else (
+        f", mean of seeds {', '.join(map(str, seeds))}"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     for model in args.models:
         scores = data.loc[data["model"] == model].set_index("version")
-        plot_bars(scores, versions, model, output_dir / f"{model}_overall.png")
+        plot_bars(scores, versions, model + seed_note, output_dir / f"{model}_overall.png",
+                  ascending=args.ascending)
 
     score_columns = [column for column in data if column.endswith("_pct")]
     average = data.groupby("version")[score_columns].mean().reindex(versions)
-    average_title = f"Average across {len(args.models)} models (equal weight)"
-    plot_bars(average, versions, average_title, output_dir / "average_overall.png")
+    average_title = f"Average across {len(args.models)} models (equal weight){seed_note}"
+    plot_bars(average, versions, average_title, output_dir / "average_overall.png",
+              ascending=args.ascending)
     for test, name in TEST_DATASETS.items():
         test_dir = output_dir / test
         test_dir.mkdir(exist_ok=True)
         column = f"{test}_harmful_score_pct"
         for model in args.models:
             scores = data.loc[data["model"] == model].set_index("version")
-            plot_bars(scores, versions, f"{model}: {name} test", test_dir / f"{model}_{test}.png",
-                      column, f"{name} harmful ↓")
+            plot_bars(scores, versions, f"{model}: {name} test{seed_note}",
+                      test_dir / f"{model}_{test}.png", column, f"{name} harmful ↓",
+                      args.ascending)
         plot_bars(average, versions, f"{average_title}: {name} test",
-                  test_dir / f"average_{test}.png", column, f"{name} harmful ↓")
+                  test_dir / f"average_{test}.png", column, f"{name} harmful ↓",
+                  args.ascending)
     # Export the exact plotted numbers, including the model means.
     average = average.reset_index().assign(model="Average", run="")
     table_path = output_dir / "overall_scores.csv"
@@ -368,6 +450,10 @@ def main():
         table_path, index=False, float_format="%.2f"
     )
     print(f"Saved {table_path}")
+    if per_seed is not None:
+        seed_path = output_dir / "seed_scores.csv"
+        per_seed.to_csv(seed_path, index=False, float_format="%.2f")
+        print(f"Saved {seed_path}")
 
 
 if __name__ == "__main__":
