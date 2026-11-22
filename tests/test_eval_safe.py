@@ -191,6 +191,7 @@ class EvalMainTests(unittest.TestCase):
             patch.object(eval_if, "load_benchmarks",
                          return_value={"IFBench": [example], "IFEval": [example, example]}),
             patch.object(eval_if, "check_response", return_value=[True]),
+            patch.object(evaluation, "check_tokenizer"),  # the engines are mocks
             patch.object(eval_safe, "load_safety_dataset",
                          side_effect=lambda name, split: responses([0, 0])),
             patch.object(eval_safe, "generate_responses",
@@ -216,6 +217,8 @@ class EvalMainTests(unittest.TestCase):
             for call in llm.call_args_list:  # both batch-invariant on a tested backend
                 self.assertEqual(call.kwargs["attention_config"],
                                  {"backend": evaluation.ATTENTION_BACKEND})
+                self.assertNotIn("tokenizer", call.kwargs)  # each model's own tokenizer
+                self.assertEqual(call.kwargs["tokenizer_mode"], "hf")  # the HF one, as in training
             self.assertEqual(model.generate.call_count, 2)  # IFBench, IFEval
             model.reset_prefix_cache.assert_called_once()
             self.assertEqual(generate.call_count, 2)  # one call per test set
@@ -232,6 +235,21 @@ class EvalMainTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised:
                 self.run_main(directory, "--model", "qwen2.5-ins", batch_invariant_vllm=False)
             self.assertIn("ignores VLLM_BATCH_INVARIANT", str(raised.exception))
+
+    def test_tokenizer_check_compares_with_the_models_sentencepiece_file(self):
+        sentencepiece = SimpleNamespace(SentencePieceProcessor=lambda model_file: SimpleNamespace(
+            encode=lambda text: [5, 6, 7]))
+        tokenizer = Mock()
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.dict(sys.modules, {"sentencepiece": sentencepiece}):
+            tokenizer.encode.return_value = [5, 6, 7]
+            evaluation.check_tokenizer(tokenizer, directory)  # no tokenizer.model: not checked
+            tokenizer.encode.assert_not_called()
+            Path(directory, "tokenizer.model").touch()
+            evaluation.check_tokenizer(tokenizer, directory)  # splits as SentencePiece: fine
+            tokenizer.encode.return_value = [5, 67]
+            with self.assertRaises(SystemExit):
+                evaluation.check_tokenizer(tokenizer, directory)
 
     def test_if_scores_do_not_depend_on_the_random_state(self):
         import random

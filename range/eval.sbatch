@@ -9,10 +9,6 @@
 # folder named ..._seed<seed>) once its evaluation succeeds.
 set -uo pipefail
 source "${RANGE_DIR:?submit with range/eval.sh}/common.sh"
-# The eval venv (common.sh EVAL_VENV): vLLM with batch-invariant kernels, requirements-eval.txt.
-if [[ -n $EVAL_VENV ]]; then
-    source "$EVAL_VENV/bin/activate" || exit 1
-fi
 python -c 'import vllm, transformers, torch; print("vLLM", vllm.__version__, "transformers",
     transformers.__version__, "torch", torch.__version__, "from", vllm.__file__)' 2>&1 | grep '^vLLM'
 

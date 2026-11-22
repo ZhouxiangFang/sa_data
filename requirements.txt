@@ -1,11 +1,15 @@
-# Training, diversity and data selection: the nlp env on RANGE (Nov 2026), pinned so runs on
-# every cluster match. Evaluation runs in its own env, requirements-eval.txt (a newer vLLM
-# needs a newer torch, and training stays on this one).
-# Python 3.12. The torch 2.8.0 wheel on PyPI is built for CUDA 12.8.
-#   pip install -r requirements.txt
+# The align env: one env for every stage (training, evaluation, diversity, data selection, plots),
+# so training and evaluation see the same torch, transformers and tokenizers. Python 3.12.
+# torch 2.11.0 is the version vLLM 0.23.0 pins; vLLM 0.23.0 is the newest that still accepts
+# transformers 4.x (later ones need transformers >= 5.5, and 5.20 tokenizes WildGuard wrongly).
+# The torch 2.11.0 wheel on PyPI is built for CUDA 13.0 (NVIDIA driver >= 580; DeepSpeed's
+# FusedAdam JIT build needs a CUDA 13 nvcc). DeepSpeed must be built against the installed torch:
+#   python -m pip install torch==2.11.0 ninja packaging psutil py-cpuinfo hjson msgpack einops
+#   DS_BUILD_OPS=0 python -m pip install --no-build-isolation deepspeed==0.19.6
+#   python -m pip install -r requirements.txt
 
 # Training
-torch==2.8.0
+torch==2.11.0
 transformers==4.57.3
 trl==0.25.1
 deepspeed==0.19.6  # >= 0.19.6: older 0.17.6-0.19.5 break ZeRO-2 with accumulation
@@ -17,14 +21,24 @@ datasets==4.4.1
 tokenizers==0.22.1
 huggingface-hub==0.35.3
 safetensors==0.6.2
-mistral_common==1.8.5
+mistral_common==1.13.1  # vllm 0.23.0 needs >= 1.11.3
+
+# Evaluation: batch-invariant greedy decoding (eval.py) and the IFBench/IFEval scorers
+# (eval_if.py seeds random and langdetect)
+vllm==0.23.0
+ifbench @ git+https://github.com/allenai/IFBench.git@cd189a9c2889526d8af901d2103fd3e1ffcea6df
+langdetect==1.0.9
+absl-py==2.3.1
+immutabledict==4.3.1
+emoji==2.16.0
+syllapy==0.8.0
 
 # Diversity and data selection
 sentence-transformers==5.2.0
 scikit-learn==1.7.2
 scipy==1.16.2
 numpy==2.2.6
-numba==0.61.2
+numba==0.65.0  # pinned by vllm 0.23.0
 nltk==3.9.2
 spacy==3.8.18
 thinc==8.3.14  # spaCy's tagger runs on it: the POS tags behind every POS metric

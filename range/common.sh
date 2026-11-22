@@ -1,9 +1,15 @@
 # Shared by the range (Rice RANGE cluster, Slurm) launchers and batch scripts; source it.
-# Sets up the nlp environment and holds the Slurm defaults, which the environment overrides:
+# Sets up the align environment and holds the Slurm defaults, which the environment overrides:
 #
+#   ALIGN_VENV=/scratch/zf28/envs/align_t211
+#                                  The one env of every stage (sa_data/requirements.txt: torch 2.11,
+#                                  transformers 4.57.3, vLLM 0.23 with batch-invariant kernels),
+#                                  activated over the nlp conda env (its Python and libstdc++).
+#                                  Empty: nlp alone (vLLM 0.11, which eval.py refuses).
 #   TRAIN_GPU=h200 TRAIN_NGPUS=2   GPUs per training job (full fine-tuning)
-#   EVAL_GPU=hopper                GPU of an eval/diversity job: hopper (an H200 or an H100,
-#                                  whichever frees first), or one type: h100, h200, 47gb
+#   EVAL_GPU=h200                  GPU of an eval/diversity job: h200, h100, 47gb, or hopper (an
+#                                  H200 or an H100, whichever frees first). Batch invariance makes
+#                                  reruns identical on one GPU type only, so keep evals on one.
 #   MAX_TRAIN=8 MAX_EVAL=16        Jobs of one array that may run at once (8 training
 #                                  jobs use 16 of the 64 H200s)
 #   TRAIN_TIME/EVAL_TIME=04:00:00  Wall time per job (partition maximum: 1 day)
@@ -20,11 +26,7 @@
 #                                  refuses those unless ALLOW_ZERO2=1. sa_data/ds_config.json (chili's
 #                                  ZeRO-3) gives the same updates.
 #   PARTITION=commons ACCOUNT=     Slurm partition / account (account: the default one)
-#   TRAIN_VENV=                    Train in this venv over the nlp env (another DeepSpeed version)
-#   EVAL_VENV=/scratch/zf28/envs/vllm0330
-#                                  Evaluate in this venv: vLLM 0.33 with batch-invariant kernels
-#                                  (sa_data/requirements-eval.txt). nlp's vLLM 0.11 ignores
-#                                  VLLM_BATCH_INVARIANT, so eval.py refuses to run there.
+#   TRAIN_VENV=                    Train in this venv instead (e.g. another DeepSpeed version)
 
 RANGE_DIR=${RANGE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
 SA_DIR=$(dirname -- "$RANGE_DIR")
@@ -38,27 +40,37 @@ PARTITION=${PARTITION:-commons}
 ACCOUNT=${ACCOUNT:-}
 TRAIN_GPU=${TRAIN_GPU:-h200} TRAIN_NGPUS=${TRAIN_NGPUS:-2}
 TRAIN_CPUS=${TRAIN_CPUS:-16} TRAIN_MEM=${TRAIN_MEM:-128G} TRAIN_TIME=${TRAIN_TIME:-04:00:00}
-EVAL_GPU=${EVAL_GPU:-hopper}
+EVAL_GPU=${EVAL_GPU:-h200}
 EVAL_CPUS=${EVAL_CPUS:-8} EVAL_MEM=${EVAL_MEM:-64G} EVAL_TIME=${EVAL_TIME:-04:00:00}
 MAX_TRAIN=${MAX_TRAIN:-8} MAX_EVAL=${MAX_EVAL:-16}
 EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32} MICRO_BATCH=${MICRO_BATCH:-4} LEARNING_RATE=${LEARNING_RATE:-1e-5}
 DS_CONFIG=${DS_CONFIG:-$RANGE_DIR/ds_zero2.json}
-EVAL_VENV=${EVAL_VENV-/scratch/zf28/envs/vllm0330}
+ALIGN_VENV=${ALIGN_VENV-/scratch/zf28/envs/align_t211}
 
 if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     set +u  # the activation scripts reference unset variables
     source /home/zf28/miniconda3/etc/profile.d/conda.sh && conda activate nlp || exit 1
     set -u
 fi
-# DeepSpeed JIT-builds FusedAdam on the first training job (cached in ~/.cache/torch_extensions)
+if [[ -n $ALIGN_VENV && ${VIRTUAL_ENV:-} != "$ALIGN_VENV" ]]; then
+    source "$ALIGN_VENV/bin/activate" || exit 1
+    export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-$ALIGN_VENV/torch_extensions}
+fi
+# DeepSpeed JIT-builds FusedAdam on the first training job (cached in TORCH_EXTENSIONS_DIR)
 # with nvcc from the CUDA module and GCC 14 from the modules: compute nodes have no system g++.
 # GCC 14's libraries need GLIBCXX_3.4.32+, so the env's libstdc++ was upgraded to conda-forge's
 # (conda revision 1; the old 11.2 one stopped at 3.4.29). Only nvcc is put on PATH; the CUDA
 # module's libraries stay off LD_LIBRARY_PATH so torch and vLLM keep their bundled CUDA.
-export CUDA_HOME=${CUDA_HOME:-/opt/apps/software/CUDA/12.8.0}
+# The align env's torch is built for CUDA 13 (nlp's for 12.8), and so are its pip headers. Set
+# from the env in use, not inherited: a job gets the submitting shell's environment.
+if [[ -n ${VIRTUAL_ENV:-} ]]; then
+    export CUDA_HOME=/opt/apps/software/CUDA/13.3.0
+else
+    export CUDA_HOME=/opt/apps/software/CUDA/12.8.0
+fi
 export PATH="$CUDA_HOME/bin:$PATH"
 export CC=/opt/apps/software/GCCcore/14.2.0/bin/gcc CXX=/opt/apps/software/GCCcore/14.2.0/bin/g++
-for include_dir in "$CONDA_PREFIX"/lib/python*/site-packages/nvidia/*/include; do
+for include_dir in "${VIRTUAL_ENV:-$CONDA_PREFIX}"/lib/python*/site-packages/nvidia/*/include; do
     [[ -d $include_dir && ":${CPATH:-}:" != *":$include_dir:"* ]] &&
         export CPATH="$include_dir${CPATH:+:$CPATH}"
 done

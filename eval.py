@@ -32,13 +32,17 @@ logging.getLogger("vllm").setLevel(logging.WARNING)
 # Greedy decoding alone is not repeatable in vLLM: outputs depend on how requests are
 # batched (two runs of one checkpoint shared ~40% of responses; identical weights gave ~16%
 # different responses on RANGE). Batch-invariant kernels make each output independent of
-# the batch. vLLM 0.11 silently ignored VLLM_BATCH_INVARIANT, so main() refuses a vLLM that
-# does not read it; the eval env (requirements-eval.txt) has one that does.
+# the batch. vLLM 0.11 silently ignored VLLM_BATCH_INVARIANT, so load_llm() refuses a vLLM
+# that does not read it; the align env (requirements.txt, vLLM 0.23) has one that does.
 # VLLM_BATCH_INVARIANT=0 turns this off.
 os.environ.setdefault("VLLM_BATCH_INVARIANT", "1")
 BATCH_INVARIANT = os.environ["VLLM_BATCH_INVARIANT"] == "1"
 # One of the attention backends vLLM tests batch invariance with on CUDA.
 ATTENTION_BACKEND = "FLASH_ATTN"
+# check_tokenizer's text: starts with a word and has double spaces, indentation and a tab,
+# where converted SentencePiece tokenizers go wrong (transformers 5.20 did on allenai/wildguard,
+# which ships only a tokenizer.model: no leading-space marker, double spaces merged).
+TOKENIZER_PROBE = "Hello,  i.e. two  spaces\n  indented line\n\tTab and   three spaces.  End"
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 CHECKPOINT_NAME = re.compile(
@@ -99,21 +103,54 @@ def release(llm, timeout=120):
     torch.cuda.empty_cache()
 
 
+def sentencepiece_file(model_id):
+    """The model's own SentencePiece tokenizer.model (local folder or HF cache), or None."""
+    if os.path.isdir(model_id):
+        path = os.path.join(model_id, "tokenizer.model")
+        return path if os.path.isfile(path) else None
+    from huggingface_hub import try_to_load_from_cache
+
+    path = try_to_load_from_cache(model_id, "tokenizer.model")
+    return path if isinstance(path, str) else None
+
+
+def check_tokenizer(tokenizer, model_id):
+    """Refuse a tokenizer that splits text unlike the model's own SentencePiece file."""
+    path = sentencepiece_file(model_id)
+    if path is None:
+        return
+    import sentencepiece
+
+    expected = sentencepiece.SentencePieceProcessor(model_file=path).encode(TOKENIZER_PROBE)
+    got = list(tokenizer.encode(TOKENIZER_PROBE, add_special_tokens=False))
+    if got != expected:
+        raise SystemExit(
+            f"The tokenizer of {model_id} disagrees with its SentencePiece model ({path}) on "
+            f"{TOKENIZER_PROBE!r}: {got[:12]} vs {expected[:12]}; check the transformers "
+            "version (requirements.txt).")
+
+
 def load_llm(model_id):
-    """A vLLM engine, batch-invariant unless VLLM_BATCH_INVARIANT=0."""
+    """A vLLM engine, batch-invariant unless VLLM_BATCH_INVARIANT=0, with a checked tokenizer."""
     import vllm
     import vllm.envs
 
+    # The Hugging Face tokenizer, as in training: vLLM's "auto" switches Mistral-format repos
+    # (mistralai/Mistral-7B-Instruct-v0.3) to mistral_common, which tokenizes differently.
+    options = {"tokenizer_mode": "hf"}
     if not BATCH_INVARIANT:
         print(f"vLLM {vllm.__version__}: batch invariance OFF, outputs depend on batching")
-        return vllm.LLM(model=model_id)
-    if not getattr(vllm.envs, "VLLM_BATCH_INVARIANT", False):
+    elif not getattr(vllm.envs, "VLLM_BATCH_INVARIANT", False):
         raise SystemExit(
             f"vLLM {vllm.__version__} ignores VLLM_BATCH_INVARIANT, so outputs would depend on "
-            "batching. Run in the eval env (requirements-eval.txt; range/common.sh EVAL_VENV) "
+            "batching. Run in the align env (requirements.txt; range/common.sh ALIGN_VENV) "
             "or set VLLM_BATCH_INVARIANT=0 to accept that.")
-    print(f"vLLM {vllm.__version__}: batch-invariant, {ATTENTION_BACKEND} attention")
-    return vllm.LLM(model=model_id, attention_config={"backend": ATTENTION_BACKEND})
+    else:
+        print(f"vLLM {vllm.__version__}: batch-invariant, {ATTENTION_BACKEND} attention")
+        options["attention_config"] = {"backend": ATTENTION_BACKEND}
+    llm = vllm.LLM(model=model_id, **options)
+    check_tokenizer(llm.get_tokenizer(), model_id)
+    return llm
 
 
 def parse_args(argv=None):

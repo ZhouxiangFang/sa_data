@@ -20,6 +20,14 @@ if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     source /home/zf28/miniconda3/etc/profile.d/conda.sh && conda activate nlp || exit 1
     set -u
 fi
+# The align env (sa_data/requirements.txt: torch 2.11, transformers 4.57.3, vLLM 0.23), one env for
+# every stage, over nlp's Python. Build it as ENVIRONMENT.md says; its torch is built for CUDA 13,
+# so set CUDA_HOME to a CUDA 13 toolkit for DeepSpeed's FusedAdam build. ALIGN_VENV= : nlp alone.
+ALIGN_VENV=${ALIGN_VENV-/scratch/zf28/envs/align_t211}
+if [[ -n $ALIGN_VENV && ${VIRTUAL_ENV:-} != "$ALIGN_VENV" ]]; then
+    source "$ALIGN_VENV/bin/activate" || { echo "No align env at $ALIGN_VENV (ENVIRONMENT.md)" >&2; exit 1; }
+    export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-$ALIGN_VENV/torch_extensions}
+fi
 # DeepSpeed compiles its CUDA ops against the pip-installed NVIDIA headers: those of an
 # activated venv (e.g. torch 2.14's CUDA 13 ones), otherwise nlp's.
 for include_dir in "${VIRTUAL_ENV:-$CONDA_PREFIX}"/lib/python*/site-packages/nvidia/*/include; do
