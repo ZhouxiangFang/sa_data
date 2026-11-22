@@ -33,7 +33,7 @@ logging.getLogger("vllm").setLevel(logging.WARNING)
 # batched (two runs of one checkpoint shared ~40% of responses; identical weights gave ~16%
 # different responses on RANGE). Batch-invariant kernels make each output independent of
 # the batch. vLLM 0.11 silently ignored VLLM_BATCH_INVARIANT, so load_llm() refuses a vLLM
-# that does not read it; the align env (requirements.txt, vLLM 0.23) has one that does.
+# that does not read it; the nlp env (requirements.txt, vLLM 0.23) has one that does.
 # VLLM_BATCH_INVARIANT=0 turns this off.
 os.environ.setdefault("VLLM_BATCH_INVARIANT", "1")
 BATCH_INVARIANT = os.environ["VLLM_BATCH_INVARIANT"] == "1"
@@ -143,7 +143,7 @@ def load_llm(model_id):
     elif not getattr(vllm.envs, "VLLM_BATCH_INVARIANT", False):
         raise SystemExit(
             f"vLLM {vllm.__version__} ignores VLLM_BATCH_INVARIANT, so outputs would depend on "
-            "batching. Run in the align env (requirements.txt; range/common.sh ALIGN_VENV) "
+            "batching. Build the env from requirements.txt (ENVIRONMENT.md) "
             "or set VLLM_BATCH_INVARIANT=0 to accept that.")
     else:
         print(f"vLLM {vllm.__version__}: batch-invariant, {ATTENTION_BACKEND} attention")

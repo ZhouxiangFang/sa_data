@@ -5,9 +5,9 @@ Branch `vllm033-torch214`, 2026-11-22.
 
 ## One env for every stage
 
-`/scratch/zf28/envs/align_t211`, a venv over the `nlp` conda env's Python 3.12, pinned by
-`requirements.txt`. Training, evaluation, diversity, data selection and plots all run in it, so
-training and evaluation see the same torch, transformers and tokenizers.
+The `nlp` conda env (`~/miniconda3/envs/nlp`, Python 3.12.11), pinned by `requirements.txt`.
+Training, evaluation, diversity, data selection and plots all run in it, so training and
+evaluation see the same torch, transformers and tokenizers.
 
 | Package | Version | Why this one |
 |---|---|---|
@@ -16,8 +16,8 @@ training and evaluation see the same torch, transformers and tokenizers.
 | transformers | 4.57.3 | unchanged; transformers 5.20 (vLLM ≥ 0.24 needs ≥ 5.5) tokenized WildGuard wrongly |
 | trl / deepspeed / accelerate | 0.25.1 / 0.19.6 / 1.10.1 | unchanged (DeepSpeed ≥ 0.19.6 for ZeRO-2 with accumulation) |
 
-The old `nlp` env (torch 2.8, vLLM 0.11) stays as it is; `ALIGN_VENV=` (empty) runs a stage in it.
-`eval.py` refuses vLLM 0.11, since its outputs depend on batching.
+Before 2026-11-22 nlp had torch 2.8 and vLLM 0.11 (package list: `log/env_backup/`); `eval.py`
+refuses vLLM 0.11, since its outputs depend on batching.
 
 ## Requirements outside pip
 
@@ -29,11 +29,10 @@ The old `nlp` env (torch 2.8, vLLM 0.11) stays as it is; `ALIGN_VENV=` (empty) r
   - nvcc 13.3 (RANGE's module) drops a `typename` from torch's `ATen/core/List_inl.h:202` and the
     build fails with every GCC from 12 to 15 (job 420705).
   - CUDA 13's headers refuse an nvcc of another minor version ("CUDA compiler and CUDA toolkit
-    headers are incompatible"), so the venv's pip CUDA packages (13.0 runtime headers, nvcc 13.2,
+    headers are incompatible"), so the env's pip CUDA packages (13.0 runtime headers, nvcc 13.2,
     cccl 13.3) can't be used either.
 
   GCC 14 (RANGE: `/opt/apps`, compute nodes have no g++); GCC ≤ 15.
-- **Python 3.12.11**, the `nlp` conda env's.
 - **Hugging Face snapshots**: the code loads each repo's `main`, so check that the cache
   (`$HF_HOME/hub/*/refs/main`; RANGE `HF_HOME=/scratch/zf28/huggingface`) holds these revisions:
 
@@ -56,15 +55,18 @@ The old `nlp` env (torch 2.8, vLLM 0.11) stays as it is; `ALIGN_VENV=` (empty) r
 
 ## Build
 
+Into nlp (keep its conda OpenSSL at 3.0.x: RANGE preloads libcrypto 3.2.2 into Slurm jobs). Remove
+packages built for the old torch or CUDA 12 first (xformers, cupy-cuda12x, `nvidia-*-cu12`).
+`constraints.txt` holds the exact version of every package in the verified env, dependencies included.
+Run in sa_data:
+
 ```bash
-PY=~/miniconda3/envs/nlp/bin/python          # Python 3.12; keeps nlp's OpenSSL 3.0.x
-V=/scratch/zf28/envs/align_t211/bin/python
-$PY -m venv /scratch/zf28/envs/align_t211
-$V -m pip install -U pip setuptools wheel
-$V -m pip install torch==2.11.0 numpy==2.2.6 ninja packaging psutil py-cpuinfo hjson msgpack einops "pydantic>=2" tqdm==4.67.1
-DS_BUILD_OPS=0 $V -m pip install --no-build-isolation deepspeed==0.19.6   # built against that torch
-$V -m pip install -r ~/align/sa_data/requirements.txt
-$V -m pip check
+P=~/miniconda3/envs/nlp/bin/python
+export PIP_CACHE_DIR=/scratch/zf28/pip_cache                 # /home has a 50 GB quota
+$P -m pip install -c constraints.txt torch==2.11.0 numpy ninja packaging psutil py-cpuinfo hjson msgpack einops pydantic tqdm
+DS_BUILD_OPS=0 $P -m pip install -c constraints.txt --no-build-isolation deepspeed   # built against that torch
+$P -m pip install -c constraints.txt -r requirements.txt
+$P -m pip check
 ```
 
 CUDA 13.0.2 toolkit (1.8 GB; the conda package cache goes to /scratch, /home has a quota):
@@ -80,21 +82,19 @@ ln -sfn targets/x86_64-linux/lib /scratch/zf28/cuda/13.0.2/lib64         # inclu
 /scratch/zf28/cuda/13.0.2/bin/nvcc --version                              # V13.0.88
 ```
 
-/scratch purges old files; rebuild the venv from `requirements.txt` and the toolkit when they
-disappear.
+/scratch purges old files; rebuild the toolkit when it disappears.
 
 ## Running
 
-**RANGE**: `range/common.sh` activates nlp, then `ALIGN_VENV`, for every job; nothing to do.
+**RANGE**: `range/common.sh` activates nlp and the toolkit for every job; nothing to do.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ALIGN_VENV` | `/scratch/zf28/envs/align_t211` | empty = the old nlp env |
 | `EVAL_GPU` | `h200` | keep evals on one GPU type (batch invariance holds per GPU type) |
 | `VLLM_USE_FLASHINFER_SAMPLER` | `0` | greedy decoding bypasses it; avoids a JIT build per job |
 | `DS_CONFIG` | `range/ds_zero2.json` | ZeRO-2 |
 
-**Chili**: `chili/common.sh` activates the same `ALIGN_VENV` and toolkit (build both at those paths first).
+**Chili**: `chili/common.sh` activates nlp and the toolkit (build both as above first).
 ```bash
 export VLLM_USE_FLASHINFER_SAMPLER=0
 chili/train.sh --models llama3.1_git20k --datasets wildguardmix --abbrs random --seed 43 --output_dir DIR
@@ -140,8 +140,8 @@ qwen2.5 `_git20k` (jobs 420696, 420697, 420698), all 9 test sets had 100% identi
 WildGuard labels in both comparisons, and identical scores between the two full runs.
 
 **New env vs old training** (done 2026-11-22, H200): train llama3.1_git20k / wildguardmix / random / seed 43
-twice in nlp (`ALIGN_VENV=`, torch 2.8: jobs 420689, 420690, done) and once in the align env (job
-420723), and evaluate the three checkpoints in the align env (420716, 420717, 420725). The two
+twice with torch 2.8 / vLLM 0.11 (jobs 420689, 420690) and once in this env (job 420723), and
+evaluate the three checkpoints in this env (420716, 420717, 420725). The two
 torch 2.8 runs give the training noise. The training logs must show these digests:
 
 | File (`data/train_samples/seed43/`) | SHA-256 (12) |
@@ -156,15 +156,15 @@ python /scratch/zf28/ckpts/abtest/weight_diff.py BASE_MODEL_DIR CKPT...
 python compare_evals.py RES_T28_A RES_T28_B MODEL       # and RES_T211 against each
 ```
 
-Pass: the align-env run differs from each torch 2.8 run no more than the two torch 2.8 runs differ
+Pass: this env's run differs from each torch 2.8 run no more than the two torch 2.8 runs differ
 from each other (per-step loss, grad norm), every checkpoint moved from its base model, and the
-align-env checkpoint's harmful / over-refusal / IF scores are within the two torch 2.8 ones' spread.
+its checkpoint's harmful / over-refusal / IF scores are within the two torch 2.8 ones' spread.
 
-Result: the align env differs from torch 2.8 about as much as two torch 2.8 runs differ from each
+Result: this env differs from torch 2.8 about as much as two torch 2.8 runs differ from each
 other. Training is not bitwise repeatable in either env, so a rerun of the same seed moves scores by
 up to about 1 point per test set.
 
-| | torch 2.8 A vs B | align env vs torch 2.8 A / B |
+| | torch 2.8 A vs B | this env vs torch 2.8 A / B |
 |---|---|---|
 | Loss, mean relative difference | 0.037% | 0.035% / 0.032% |
 | Grad norm, mean (max) relative difference | 0.33% (1.4%) | 0.46% (2.4%) / 0.70% (3.1%) |
@@ -172,7 +172,7 @@ up to about 1 point per test set.
 | Identical responses (IFEval, aegis, or-bench-hard) | 30%, 53%, 26% | 31%, 52%, 25% / 32%, 53%, 26% |
 | Largest score difference, one test set | 0.75 | 0.66 / 1.0 |
 
-| Score | torch 2.8 A | torch 2.8 B | align env |
+| Score | torch 2.8 A | torch 2.8 B | this env |
 |---|---|---|---|
 | Harmful, Avg | 9.33 | 9.13 | 9.44 |
 | Over-refusal, Avg | 16.34 | 16.15 | 16.04 |

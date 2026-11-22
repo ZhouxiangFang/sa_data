@@ -1,11 +1,8 @@
 # Shared by the range (Rice RANGE cluster, Slurm) launchers and batch scripts; source it.
-# Sets up the align environment and holds the Slurm defaults, which the environment overrides:
+# Activates the nlp conda env, the one env of every stage (sa_data/requirements.txt: torch 2.11,
+# transformers 4.57.3, vLLM 0.23 with batch-invariant kernels), and holds the Slurm defaults, which
+# the environment overrides:
 #
-#   ALIGN_VENV=/scratch/zf28/envs/align_t211
-#                                  The one env of every stage (sa_data/requirements.txt: torch 2.11,
-#                                  transformers 4.57.3, vLLM 0.23 with batch-invariant kernels),
-#                                  activated over the nlp conda env (its Python and libstdc++).
-#                                  Empty: nlp alone (vLLM 0.11, which eval.py refuses).
 #   TRAIN_GPU=h200 TRAIN_NGPUS=2   GPUs per training job (full fine-tuning)
 #   EVAL_GPU=h200                  GPU of an eval/diversity job: h200, h100, 47gb, or hopper (an
 #                                  H200 or an H100, whichever frees first). Batch invariance makes
@@ -26,7 +23,6 @@
 #                                  refuses those unless ALLOW_ZERO2=1. sa_data/ds_config.json (chili's
 #                                  ZeRO-3) gives the same updates.
 #   PARTITION=commons ACCOUNT=     Slurm partition / account (account: the default one)
-#   TRAIN_VENV=                    Train in this venv instead (e.g. another DeepSpeed version)
 
 RANGE_DIR=${RANGE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
 SA_DIR=$(dirname -- "$RANGE_DIR")
@@ -45,41 +41,24 @@ EVAL_CPUS=${EVAL_CPUS:-8} EVAL_MEM=${EVAL_MEM:-64G} EVAL_TIME=${EVAL_TIME:-04:00
 MAX_TRAIN=${MAX_TRAIN:-8} MAX_EVAL=${MAX_EVAL:-16}
 EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32} MICRO_BATCH=${MICRO_BATCH:-4} LEARNING_RATE=${LEARNING_RATE:-1e-5}
 DS_CONFIG=${DS_CONFIG:-$RANGE_DIR/ds_zero2.json}
-ALIGN_VENV=${ALIGN_VENV-/scratch/zf28/envs/align_t211}
 
 if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     set +u  # the activation scripts reference unset variables
     source /home/zf28/miniconda3/etc/profile.d/conda.sh && conda activate nlp || exit 1
     set -u
 fi
-if [[ -n $ALIGN_VENV && ${VIRTUAL_ENV:-} != "$ALIGN_VENV" ]]; then
-    source "$ALIGN_VENV/bin/activate" || exit 1
-    export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-$ALIGN_VENV/torch_extensions}
-fi
 # DeepSpeed JIT-builds FusedAdam on the first training job (cached in TORCH_EXTENSIONS_DIR)
 # with nvcc from CUDA_HOME and GCC 14 from the modules: compute nodes have no system g++.
 # GCC 14's libraries need GLIBCXX_3.4.32+, so the env's libstdc++ was upgraded to conda-forge's
 # (conda revision 1; the old 11.2 one stopped at 3.4.29). Only nvcc is put on PATH; the CUDA
 # toolkit's libraries stay off LD_LIBRARY_PATH so torch and vLLM keep their bundled CUDA.
-# The align env's torch is built for CUDA 13 (nlp's for 12.8), and so are its pip headers. Set
-# from the env in use, not inherited: a job gets the submitting shell's environment.
-# CPATH is rebuilt, not inherited. In the align env, nvcc must use only its toolkit's own
-# headers: CUDA 13's headers refuse a compiler of another minor version ("CUDA compiler and
-# CUDA toolkit headers are incompatible"), and the venv's pip CUDA packages mix 13.0 runtime
-# headers with 13.2-13.5 tools. The toolkit is CUDA 13.0.2 (nvcc 13.0.88), the CUDA torch 2.11
-# is built with, from conda (ENVIRONMENT.md): the 13.3.0 module's nvcc drops a `typename` from
-# torch's ATen/core/List_inl.h and FusedAdam fails to compile with every GCC (12-15).
-if [[ -n ${VIRTUAL_ENV:-} ]]; then
-    export CUDA_HOME=/scratch/zf28/cuda/13.0.2
-    unset CPATH
-else
-    export CUDA_HOME=/opt/apps/software/CUDA/12.8.0
-    CPATH=
-    for include_dir in "$CONDA_PREFIX"/lib/python*/site-packages/nvidia/*/include; do
-        [[ -d $include_dir ]] && CPATH="$include_dir${CPATH:+:$CPATH}"
-    done
-    export CPATH
-fi
+# The toolkit is CUDA 13.0.2 (nvcc 13.0.88), the CUDA torch 2.11 is built with, from conda
+# (ENVIRONMENT.md): the 13.3.0 module's nvcc drops a `typename` from torch's ATen/core/List_inl.h
+# and FusedAdam fails to compile with every GCC (12-15). nvcc uses only the toolkit's own headers
+# (CPATH unset, not inherited): CUDA 13's headers refuse a compiler of another minor version, and
+# the env's pip CUDA packages mix 13.0 runtime headers with 13.2-13.5 tools.
+export CUDA_HOME=/scratch/zf28/cuda/13.0.2
+unset CPATH
 export PATH="$CUDA_HOME/bin:$PATH"
 export CC=/opt/apps/software/GCCcore/14.2.0/bin/gcc CXX=/opt/apps/software/GCCcore/14.2.0/bin/g++
 # The Hugging Face cache (models, datasets, token) is on scratch: /home has a 50 GB quota.

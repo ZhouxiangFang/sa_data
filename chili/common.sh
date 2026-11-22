@@ -20,30 +20,15 @@ if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     source /home/zf28/miniconda3/etc/profile.d/conda.sh && conda activate nlp || exit 1
     set -u
 fi
-# The align env (sa_data/requirements.txt: torch 2.11, transformers 4.57.3, vLLM 0.23), one env for
-# every stage, over nlp's Python. Build it and its CUDA 13.0.2 toolkit (/scratch/zf28/cuda/13.0.2,
-# for DeepSpeed's FusedAdam build) as ENVIRONMENT.md says. ALIGN_VENV= : nlp alone.
-ALIGN_VENV=${ALIGN_VENV-/scratch/zf28/envs/align_t211}
-if [[ -n $ALIGN_VENV && ${VIRTUAL_ENV:-} != "$ALIGN_VENV" ]]; then
-    source "$ALIGN_VENV/bin/activate" || { echo "No align env at $ALIGN_VENV (ENVIRONMENT.md)" >&2; exit 1; }
-    export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-$ALIGN_VENV/torch_extensions}
-fi
-# DeepSpeed compiles its CUDA ops (FusedAdam) with nvcc from CUDA_HOME. In the align env that is
-# CUDA 13.0.2 (nvcc 13.0.88), the CUDA torch 2.11 is built with and the one RANGE uses, with its own
-# headers only: CUDA 13's headers refuse a compiler of another minor version, the venv's pip CUDA
-# packages mix 13.0 headers with 13.2-13.5 tools, and nvcc 13.3 fails on torch's headers.
-# nlp (CUDA 12.8) compiles against its pip-installed NVIDIA headers.
-if [[ -n ${VIRTUAL_ENV:-} ]]; then
-    export CUDA_HOME=/scratch/zf28/cuda/13.0.2
-    unset CPATH
-    [[ -x $CUDA_HOME/bin/nvcc && $("$CUDA_HOME/bin/nvcc" --version) == *"V13.0.88"* ]] ||
-        echo "Warning: no CUDA 13.0.2 toolkit at $CUDA_HOME (ENVIRONMENT.md); FusedAdam won't build" >&2
-else
-    for include_dir in "$CONDA_PREFIX"/lib/python*/site-packages/nvidia/*/include; do
-        [[ -d $include_dir && ":${CPATH:-}:" != *":$include_dir:"* ]] &&
-            export CPATH="$include_dir${CPATH:+:$CPATH}"
-    done
-fi
+# nlp is the one env of every stage (sa_data/requirements.txt: torch 2.11, transformers 4.57.3,
+# vLLM 0.23); ENVIRONMENT.md says how to build it. DeepSpeed compiles FusedAdam with nvcc from
+# CUDA_HOME: CUDA 13.0.2 (nvcc 13.0.88), the CUDA torch 2.11 is built with and the one RANGE uses,
+# with its own headers only (CUDA 13's headers refuse a compiler of another minor version, the
+# env's pip CUDA packages mix 13.0 headers with 13.2-13.5 tools, nvcc 13.3 fails on torch's headers).
+export CUDA_HOME=/scratch/zf28/cuda/13.0.2
+unset CPATH
+[[ -x $CUDA_HOME/bin/nvcc && $("$CUDA_HOME/bin/nvcc" --version) == *"V13.0.88"* ]] ||
+    echo "Warning: no CUDA 13.0.2 toolkit at $CUDA_HOME (ENVIRONMENT.md); FusedAdam won't build" >&2
 # Driver 595.84 needs matching user-space libraries; a no-op with other drivers.
 if grep -q '595\.84' /proc/driver/nvidia/version 2>/dev/null; then
     export LD_LIBRARY_PATH="/home/zf28/align/.nvidia-595.84/compute-lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

@@ -1,13 +1,10 @@
-# The align env: one env for every stage (training, evaluation, diversity, data selection, plots),
+# The nlp env: one env for every stage (training, evaluation, diversity, data selection, plots),
 # so training and evaluation see the same torch, transformers and tokenizers. Python 3.12.
 # torch 2.11.0 is the version vLLM 0.23.0 pins; vLLM 0.23.0 is the newest that still accepts
 # transformers 4.x (later ones need transformers >= 5.5, and 5.20 tokenizes WildGuard wrongly).
 # The torch 2.11.0 wheel on PyPI is built for CUDA 13.0 (NVIDIA driver >= 580; DeepSpeed's
-# FusedAdam JIT build needs the CUDA 13.0.2 toolkit, ENVIRONMENT.md). DeepSpeed must be built
-# against the installed torch:
-#   python -m pip install torch==2.11.0 ninja packaging psutil py-cpuinfo hjson msgpack einops
-#   DS_BUILD_OPS=0 python -m pip install --no-build-isolation deepspeed==0.19.6
-#   python -m pip install -r requirements.txt
+# FusedAdam JIT build needs the CUDA 13.0.2 toolkit). DeepSpeed must be built against the installed
+# torch: ENVIRONMENT.md has the build commands. constraints.txt pins every dependency to the verified env.
 
 # Training
 torch==2.11.0

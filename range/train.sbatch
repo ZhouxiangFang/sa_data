@@ -8,13 +8,6 @@
 # checkpoint, status) with DeepSpeed on every GPU of the allocation.
 set -uo pipefail
 source "${RANGE_DIR:?submit with range/train.sh}/common.sh"
-# TRAIN_VENV: train in another venv than the align env (common.sh ALIGN_VENV), e.g. with another
-# DeepSpeed (/scratch/zf28/envs/ds0196). Its deepspeed launcher, and so its python, comes first on PATH,
-# and its ops are JIT-built into a folder of their own.
-if [[ -n ${TRAIN_VENV:-} ]]; then
-    source "$TRAIN_VENV/bin/activate" || exit 1
-    export TORCH_EXTENSIONS_DIR=$TRAIN_VENV/torch_extensions
-fi
 python -c 'import deepspeed, torch, transformers; print("DeepSpeed", deepspeed.__version__, "torch",
     torch.__version__, "transformers", transformers.__version__, "from", deepspeed.__file__)' 2>&1 | grep '^DeepSpeed'
 

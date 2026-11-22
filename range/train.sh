@@ -87,9 +87,9 @@ fi
 # ZeRO-2 with gradient accumulation computes wrong gradients on DeepSpeed 0.17.6 to 0.19.5
 # (issues #7718, #8224): on 0.18.0, 8B checkpoints came out bit-identical to the base; on 0.18.3,
 # gradients were 1/accumulation^2 of ZeRO-3's. 0.19.6 matches ZeRO-3. Check the DeepSpeed that
-# training will import (TRAIN_VENV's if set).
+# training will import.
 if [[ ${ALLOW_ZERO2:-0} != 1 ]]; then
-    bad_zero2=$("${TRAIN_VENV:+$TRAIN_VENV/bin/}python" - "$DS_CONFIG" <<'EOF'
+    bad_zero2=$(python - "$DS_CONFIG" <<'EOF'
 import json, sys
 from importlib.metadata import version
 from packaging.version import Version
