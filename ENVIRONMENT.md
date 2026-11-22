@@ -11,7 +11,7 @@ training and evaluation see the same torch, transformers and tokenizers.
 
 | Package | Version | Why this one |
 |---|---|---|
-| torch | 2.11.0 (CUDA 13.0) | the version vLLM 0.23.0 pins |
+| torch | 2.11.0 (CUDA 13.0) | the version vLLM 0.23.0 pins; PyTorch builds for CUDA 13.0 up to 2.14 (2.15: 13.2+ only) |
 | vllm | 0.23.0 | newest vLLM that still accepts transformers 4.x; reads `VLLM_BATCH_INVARIANT` (0.11 ignored it) |
 | transformers | 4.57.3 | unchanged; transformers 5.20 (vLLM ≥ 0.24 needs ≥ 5.5) tokenized WildGuard wrongly |
 | trl / deepspeed / accelerate | 0.25.1 / 0.19.6 / 1.10.1 | unchanged (DeepSpeed ≥ 0.19.6 for ZeRO-2 with accumulation) |
@@ -23,12 +23,16 @@ The old `nlp` env (torch 2.8, vLLM 0.11) stays as it is; `ALIGN_VENV=` (empty) r
 
 - **NVIDIA driver ≥ 580** (CUDA 13.0 wheels). RANGE H200 nodes: 580.173.02. Chili: check
   `nvidia-smi`; `chili/common.sh` adds user-space libraries for driver 595.84.
-- **A full CUDA 13 toolkit** for DeepSpeed's FusedAdam JIT build (training only), used with its own
-  headers only: CUDA 13's headers refuse an nvcc of another minor version ("CUDA compiler and CUDA
-  toolkit headers are incompatible"). The venv's pip CUDA packages can't be used for this (13.0
-  runtime headers, nvcc 13.2, cccl 13.3). RANGE: `range/common.sh` sets the CUDA 13.3.0 module and
-  unsets CPATH; GCC 14 from `/opt/apps` (compute nodes have no g++). Chili: export `CUDA_HOME` to a
-  CUDA 13.x toolkit; `chili/common.sh` unsets CPATH and warns if nvcc isn't 13.x. GCC ≤ 15.
+- **CUDA 13.0.2 toolkit (nvcc 13.0.88)** at `/scratch/zf28/cuda/13.0.2` on both clusters, for
+  DeepSpeed's FusedAdam JIT build (training only); the `common.sh` of each cluster sets `CUDA_HOME`
+  to it and unsets CPATH. It is the CUDA torch 2.11 is built with. Not other versions:
+  - nvcc 13.3 (RANGE's module) drops a `typename` from torch's `ATen/core/List_inl.h:202` and the
+    build fails with every GCC from 12 to 15 (job 420705).
+  - CUDA 13's headers refuse an nvcc of another minor version ("CUDA compiler and CUDA toolkit
+    headers are incompatible"), so the venv's pip CUDA packages (13.0 runtime headers, nvcc 13.2,
+    cccl 13.3) can't be used either.
+
+  GCC 14 (RANGE: `/opt/apps`, compute nodes have no g++); GCC ≤ 15.
 - **Hugging Face cache**: RANGE `HF_HOME=/scratch/zf28/huggingface`. Model and dataset revisions
   are **not pinned**; use the same snapshots on both clusters.
 - **NLTK data** in `~/nltk_data` for the IF scorers (`range/prefetch.sh`).
@@ -46,7 +50,21 @@ $V -m pip install -r ~/align/sa_data/requirements.txt
 $V -m pip check
 ```
 
-/scratch purges old files; rebuild the venv from `requirements.txt` when it disappears.
+CUDA 13.0.2 toolkit (1.8 GB; the conda package cache goes to /scratch, /home has a quota):
+
+```bash
+source ~/miniconda3/etc/profile.d/conda.sh
+CONDA_PKGS_DIRS=/scratch/zf28/conda_pkgs conda create -y -p /scratch/zf28/cuda/13.0.2 \
+    --override-channels -c nvidia -c conda-forge "cuda-version=13.0" "cuda-nvcc-impl=13.0.88" \
+    "cuda-cudart-dev=13.0.96" "cuda-cccl=13.0.*" libcublas-dev libcusparse-dev libcusolver-dev \
+    libcurand-dev cuda-nvrtc-dev cuda-nvtx-dev cuda-profiler-api
+ln -sfn targets/x86_64-linux/include /scratch/zf28/cuda/13.0.2/include   # torch looks for
+ln -sfn targets/x86_64-linux/lib /scratch/zf28/cuda/13.0.2/lib64         # include/ and lib64/
+/scratch/zf28/cuda/13.0.2/bin/nvcc --version                              # V13.0.88
+```
+
+/scratch purges old files; rebuild the venv from `requirements.txt` and the toolkit when they
+disappear.
 
 ## Running
 
@@ -59,9 +77,9 @@ $V -m pip check
 | `VLLM_USE_FLASHINFER_SAMPLER` | `0` | greedy decoding bypasses it; avoids a JIT build per job |
 | `DS_CONFIG` | `range/ds_zero2.json` | ZeRO-2 |
 
-**Chili**: `chili/common.sh` activates the same `ALIGN_VENV` (build it at that path first).
+**Chili**: `chili/common.sh` activates the same `ALIGN_VENV` and toolkit (build both at those paths first).
 ```bash
-export CUDA_HOME=<CUDA 13 toolkit> VLLM_USE_FLASHINFER_SAMPLER=0
+export VLLM_USE_FLASHINFER_SAMPLER=0
 chili/train.sh --models llama3.1_git20k --datasets wildguardmix --abbrs random --seed 43 --output_dir DIR
 chili/eval.sh MODEL_OR_CKPT -- --output_dir DIR
 ```

@@ -21,21 +21,23 @@ if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     set -u
 fi
 # The align env (sa_data/requirements.txt: torch 2.11, transformers 4.57.3, vLLM 0.23), one env for
-# every stage, over nlp's Python. Build it as ENVIRONMENT.md says; its torch is built for CUDA 13,
-# so set CUDA_HOME to a CUDA 13 toolkit for DeepSpeed's FusedAdam build. ALIGN_VENV= : nlp alone.
+# every stage, over nlp's Python. Build it and its CUDA 13.0.2 toolkit (/scratch/zf28/cuda/13.0.2,
+# for DeepSpeed's FusedAdam build) as ENVIRONMENT.md says. ALIGN_VENV= : nlp alone.
 ALIGN_VENV=${ALIGN_VENV-/scratch/zf28/envs/align_t211}
 if [[ -n $ALIGN_VENV && ${VIRTUAL_ENV:-} != "$ALIGN_VENV" ]]; then
     source "$ALIGN_VENV/bin/activate" || { echo "No align env at $ALIGN_VENV (ENVIRONMENT.md)" >&2; exit 1; }
     export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-$ALIGN_VENV/torch_extensions}
 fi
-# DeepSpeed compiles its CUDA ops (FusedAdam) with nvcc from CUDA_HOME. In the align env that must
-# be a full CUDA 13 toolkit used with its own headers only: CUDA 13's headers refuse a compiler of
-# another minor version, and the venv's pip CUDA packages mix 13.0 headers with 13.2-13.5 tools.
+# DeepSpeed compiles its CUDA ops (FusedAdam) with nvcc from CUDA_HOME. In the align env that is
+# CUDA 13.0.2 (nvcc 13.0.88), the CUDA torch 2.11 is built with and the one RANGE uses, with its own
+# headers only: CUDA 13's headers refuse a compiler of another minor version, the venv's pip CUDA
+# packages mix 13.0 headers with 13.2-13.5 tools, and nvcc 13.3 fails on torch's headers.
 # nlp (CUDA 12.8) compiles against its pip-installed NVIDIA headers.
 if [[ -n ${VIRTUAL_ENV:-} ]]; then
+    export CUDA_HOME=/scratch/zf28/cuda/13.0.2
     unset CPATH
-    [[ -x ${CUDA_HOME:-}/bin/nvcc && $("$CUDA_HOME/bin/nvcc" --version) == *"release 13."* ]] ||
-        echo "Warning: set CUDA_HOME to a CUDA 13 toolkit for DeepSpeed's FusedAdam build" >&2
+    [[ -x $CUDA_HOME/bin/nvcc && $("$CUDA_HOME/bin/nvcc" --version) == *"V13.0.88"* ]] ||
+        echo "Warning: no CUDA 13.0.2 toolkit at $CUDA_HOME (ENVIRONMENT.md); FusedAdam won't build" >&2
 else
     for include_dir in "$CONDA_PREFIX"/lib/python*/site-packages/nvidia/*/include; do
         [[ -d $include_dir && ":${CPATH:-}:" != *":$include_dir:"* ]] &&

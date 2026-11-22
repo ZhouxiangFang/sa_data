@@ -57,18 +57,20 @@ if [[ -n $ALIGN_VENV && ${VIRTUAL_ENV:-} != "$ALIGN_VENV" ]]; then
     export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-$ALIGN_VENV/torch_extensions}
 fi
 # DeepSpeed JIT-builds FusedAdam on the first training job (cached in TORCH_EXTENSIONS_DIR)
-# with nvcc from the CUDA module and GCC 14 from the modules: compute nodes have no system g++.
+# with nvcc from CUDA_HOME and GCC 14 from the modules: compute nodes have no system g++.
 # GCC 14's libraries need GLIBCXX_3.4.32+, so the env's libstdc++ was upgraded to conda-forge's
 # (conda revision 1; the old 11.2 one stopped at 3.4.29). Only nvcc is put on PATH; the CUDA
-# module's libraries stay off LD_LIBRARY_PATH so torch and vLLM keep their bundled CUDA.
+# toolkit's libraries stay off LD_LIBRARY_PATH so torch and vLLM keep their bundled CUDA.
 # The align env's torch is built for CUDA 13 (nlp's for 12.8), and so are its pip headers. Set
 # from the env in use, not inherited: a job gets the submitting shell's environment.
-# CPATH is rebuilt, not inherited. In the align env, nvcc must use only the module's own
+# CPATH is rebuilt, not inherited. In the align env, nvcc must use only its toolkit's own
 # headers: CUDA 13's headers refuse a compiler of another minor version ("CUDA compiler and
 # CUDA toolkit headers are incompatible"), and the venv's pip CUDA packages mix 13.0 runtime
-# headers with 13.2-13.5 tools.
+# headers with 13.2-13.5 tools. The toolkit is CUDA 13.0.2 (nvcc 13.0.88), the CUDA torch 2.11
+# is built with, from conda (ENVIRONMENT.md): the 13.3.0 module's nvcc drops a `typename` from
+# torch's ATen/core/List_inl.h and FusedAdam fails to compile with every GCC (12-15).
 if [[ -n ${VIRTUAL_ENV:-} ]]; then
-    export CUDA_HOME=/opt/apps/software/CUDA/13.3.0
+    export CUDA_HOME=/scratch/zf28/cuda/13.0.2
     unset CPATH
 else
     export CUDA_HOME=/opt/apps/software/CUDA/12.8.0
