@@ -1,7 +1,7 @@
 # Environment and fixed settings
 
 What a run depends on, and how to rebuild it on RANGE (Slurm, H200/H100) or chili (8 × A6000).
-Branch `vllm033-torch214`, 2026-11-21.
+Branch `vllm033-torch214`, 2026-11-22.
 
 ## One env for every stage
 
@@ -33,8 +33,25 @@ The old `nlp` env (torch 2.8, vLLM 0.11) stays as it is; `ALIGN_VENV=` (empty) r
     cccl 13.3) can't be used either.
 
   GCC 14 (RANGE: `/opt/apps`, compute nodes have no g++); GCC ≤ 15.
-- **Hugging Face cache**: RANGE `HF_HOME=/scratch/zf28/huggingface`. Model and dataset revisions
-  are **not pinned**; use the same snapshots on both clusters.
+- **Python 3.12.11**, the `nlp` conda env's.
+- **Hugging Face snapshots**: the code loads each repo's `main`, so check that the cache
+  (`$HF_HOME/hub/*/refs/main`; RANGE `HF_HOME=/scratch/zf28/huggingface`) holds these revisions:
+
+  | Models | Revision | Datasets | Revision |
+  |---|---|---|---|
+  | FocusV857/llama3.1_git20k | `05b0426c0fac` | allenai/wildguardmix | `d29c47f41c8b` |
+  | FocusV857/mistral_git20k | `4bfe7aacd29d` | allenai/wildjailbreak | `5ddc12a7894f` |
+  | FocusV857/olmo2_git20k | `c2c5e0434584` | nvidia/Aegis-AI-Content-Safety-Dataset-2.0 | `d86bb8bedff5` |
+  | FocusV857/qwen2.5_git20k | `4d223cec223a` | gretelai/gretel-safety-alignment-en-v1 | `7f220b493d70` |
+  | meta-llama/Meta-Llama-3.1-8B-Instruct | `0e9e39f249a1` | bench-llm/or-bench | `e36d8b80e818` |
+  | mistralai/Mistral-7B-Instruct-v0.3 | `c170c708c41d` | Paul/XSTest | `f600c994b256` |
+  | allenai/OLMo-2-1124-7B-Instruct | `470b1fba1ae0` | google/IFEval | `966cd89545d6` |
+  | Qwen/Qwen2.5-7B-Instruct | `a09a35458c70` | Babelscape/ALERT | `c76d0637f457` |
+  | allenai/wildguard | `cbba4823f3e8` | Babelscape/ALERT_DPO | `7542cdc795ca` |
+  | BAAI/bge-m3 | `5617a9f61b02` | nvidia/Nemotron-SFT-Safety-v2 | `8a40a63c9a1a` |
+  | Qwen/Qwen3-Embedding-0.6B | `97b0c614be4d` | | |
+
+  IFBench is pinned by commit in `requirements.txt`.
 - **NLTK data** in `~/nltk_data` for the IF scorers (`range/prefetch.sh`).
 
 ## Build
