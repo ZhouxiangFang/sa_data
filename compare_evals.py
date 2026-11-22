@@ -65,7 +65,9 @@ def main():
             assert list(a["prompt"][:n]) == list(b["prompt"][:n]), name
             same = (a["generated_response"][:n] == b["generated_response"][:n]).mean()
             label = "is_refusal" if "is_refusal" in a else "is_unsafe"
-            same_label = (a[label][:n].astype(str) == b[label][:n].astype(str)).mean()
+            # Numerically: a column with missing labels is read as float (0.0), a full one as int (0)
+            labels_a, labels_b = (pd.to_numeric(x[label][:n]).fillna(-1).to_numpy() for x in (a, b))
+            same_label = (labels_a == labels_b).mean()
             print(f"  {name:22} n={n:5} identical responses {same:7.2%}  labels {same_label:7.2%}")
         if not args.limit:
             sa, sb = scores(args.root_a, model), scores(args.root_b, model)
