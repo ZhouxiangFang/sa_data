@@ -23,9 +23,12 @@ The old `nlp` env (torch 2.8, vLLM 0.11) stays as it is; `ALIGN_VENV=` (empty) r
 
 - **NVIDIA driver ≥ 580** (CUDA 13.0 wheels). RANGE H200 nodes: 580.173.02. Chili: check
   `nvidia-smi`; `chili/common.sh` adds user-space libraries for driver 595.84.
-- **CUDA 13 `nvcc`** for DeepSpeed's FusedAdam JIT build. RANGE: `range/common.sh` sets
-  `CUDA_HOME=/opt/apps/software/CUDA/13.3.0` and GCC 14 from `/opt/apps` (compute nodes have no
-  g++). Chili: export `CUDA_HOME` to a CUDA 13 toolkit before running; GCC ≤ 15.
+- **A full CUDA 13 toolkit** for DeepSpeed's FusedAdam JIT build (training only), used with its own
+  headers only: CUDA 13's headers refuse an nvcc of another minor version ("CUDA compiler and CUDA
+  toolkit headers are incompatible"). The venv's pip CUDA packages can't be used for this (13.0
+  runtime headers, nvcc 13.2, cccl 13.3). RANGE: `range/common.sh` sets the CUDA 13.3.0 module and
+  unsets CPATH; GCC 14 from `/opt/apps` (compute nodes have no g++). Chili: export `CUDA_HOME` to a
+  CUDA 13.x toolkit; `chili/common.sh` unsets CPATH and warns if nvcc isn't 13.x. GCC ≤ 15.
 - **Hugging Face cache**: RANGE `HF_HOME=/scratch/zf28/huggingface`. Model and dataset revisions
   are **not pinned**; use the same snapshots on both clusters.
 - **NLTK data** in `~/nltk_data` for the IF scorers (`range/prefetch.sh`).

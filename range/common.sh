@@ -63,17 +63,23 @@ fi
 # module's libraries stay off LD_LIBRARY_PATH so torch and vLLM keep their bundled CUDA.
 # The align env's torch is built for CUDA 13 (nlp's for 12.8), and so are its pip headers. Set
 # from the env in use, not inherited: a job gets the submitting shell's environment.
+# CPATH is rebuilt, not inherited. In the align env, nvcc must use only the module's own
+# headers: CUDA 13's headers refuse a compiler of another minor version ("CUDA compiler and
+# CUDA toolkit headers are incompatible"), and the venv's pip CUDA packages mix 13.0 runtime
+# headers with 13.2-13.5 tools.
 if [[ -n ${VIRTUAL_ENV:-} ]]; then
     export CUDA_HOME=/opt/apps/software/CUDA/13.3.0
+    unset CPATH
 else
     export CUDA_HOME=/opt/apps/software/CUDA/12.8.0
+    CPATH=
+    for include_dir in "$CONDA_PREFIX"/lib/python*/site-packages/nvidia/*/include; do
+        [[ -d $include_dir ]] && CPATH="$include_dir${CPATH:+:$CPATH}"
+    done
+    export CPATH
 fi
 export PATH="$CUDA_HOME/bin:$PATH"
 export CC=/opt/apps/software/GCCcore/14.2.0/bin/gcc CXX=/opt/apps/software/GCCcore/14.2.0/bin/g++
-for include_dir in "${VIRTUAL_ENV:-$CONDA_PREFIX}"/lib/python*/site-packages/nvidia/*/include; do
-    [[ -d $include_dir && ":${CPATH:-}:" != *":$include_dir:"* ]] &&
-        export CPATH="$include_dir${CPATH:+:$CPATH}"
-done
 # The Hugging Face cache (models, datasets, token) is on scratch: /home has a 50 GB quota.
 # ~/.cache/huggingface is a symlink to it as well.
 export HF_HOME=${HF_HOME:-/scratch/zf28/huggingface}

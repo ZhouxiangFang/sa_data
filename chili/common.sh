@@ -28,12 +28,20 @@ if [[ -n $ALIGN_VENV && ${VIRTUAL_ENV:-} != "$ALIGN_VENV" ]]; then
     source "$ALIGN_VENV/bin/activate" || { echo "No align env at $ALIGN_VENV (ENVIRONMENT.md)" >&2; exit 1; }
     export TORCH_EXTENSIONS_DIR=${TORCH_EXTENSIONS_DIR:-$ALIGN_VENV/torch_extensions}
 fi
-# DeepSpeed compiles its CUDA ops against the pip-installed NVIDIA headers: those of an
-# activated venv (e.g. torch 2.14's CUDA 13 ones), otherwise nlp's.
-for include_dir in "${VIRTUAL_ENV:-$CONDA_PREFIX}"/lib/python*/site-packages/nvidia/*/include; do
-    [[ -d $include_dir && ":${CPATH:-}:" != *":$include_dir:"* ]] &&
-        export CPATH="$include_dir${CPATH:+:$CPATH}"
-done
+# DeepSpeed compiles its CUDA ops (FusedAdam) with nvcc from CUDA_HOME. In the align env that must
+# be a full CUDA 13 toolkit used with its own headers only: CUDA 13's headers refuse a compiler of
+# another minor version, and the venv's pip CUDA packages mix 13.0 headers with 13.2-13.5 tools.
+# nlp (CUDA 12.8) compiles against its pip-installed NVIDIA headers.
+if [[ -n ${VIRTUAL_ENV:-} ]]; then
+    unset CPATH
+    [[ -x ${CUDA_HOME:-}/bin/nvcc && $("$CUDA_HOME/bin/nvcc" --version) == *"release 13."* ]] ||
+        echo "Warning: set CUDA_HOME to a CUDA 13 toolkit for DeepSpeed's FusedAdam build" >&2
+else
+    for include_dir in "$CONDA_PREFIX"/lib/python*/site-packages/nvidia/*/include; do
+        [[ -d $include_dir && ":${CPATH:-}:" != *":$include_dir:"* ]] &&
+            export CPATH="$include_dir${CPATH:+:$CPATH}"
+    done
+fi
 # Driver 595.84 needs matching user-space libraries; a no-op with other drivers.
 if grep -q '595\.84' /proc/driver/nvidia/version 2>/dev/null; then
     export LD_LIBRARY_PATH="/home/zf28/align/.nvidia-595.84/compute-lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
