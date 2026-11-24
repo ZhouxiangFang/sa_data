@@ -38,7 +38,7 @@ class OverrefusalTests(unittest.TestCase):
         })
         with patch.object(helper, "load_dataset") as load:
             load.return_value.to_pandas.return_value = source
-            result = helper.load_safety_dataset("XSTest", "test")
+            result = helper.load_test_set("xstest")
         load.assert_called_once_with("Paul/XSTest", split="train")
         self.assertEqual(result["prompt"].tolist(), ["safe prompt"])
         self.assertEqual(result["subcategory"].tolist(), ["homonyms"])
@@ -49,14 +49,14 @@ class OverrefusalTests(unittest.TestCase):
             load.return_value.to_pandas.return_value = pd.DataFrame({
                 "prompt": ["safe prompt"], "category": ["privacy"],
             })
-            result = helper.load_safety_dataset("or-bench-hard", "test")
+            result = helper.load_test_set("or-bench-hard")
         load.assert_called_once_with(
             "bench-llm/or-bench", "or-bench-hard-1k", split="train"
         )
         self.assertEqual(result["subcategory"].tolist(), ["privacy"])
         self.assertEqual(result["prompt_harm_label"].tolist(), ["safe"])
         with self.assertRaises(ValueError):
-            helper.load_safety_dataset("or-bench-hard", "train")
+            helper.load_test_set("or-bench")
 
     def test_refusal_and_harmfulness_are_independent(self):
         guard = Mock()
@@ -68,11 +68,11 @@ class OverrefusalTests(unittest.TestCase):
         )]
         with patch.dict(sys.modules, {"vllm": SimpleNamespace(SamplingParams=Mock())}):
             refusals = eval_safe.evaluate_safety(
-                "wildguard", guard, ["prompt"] * 4, ["answer"] * 4, overrefusal=True
+                guard, ["prompt"] * 4, ["answer"] * 4, overrefusal=True
             )
             guard.generate.assert_called_once()
             harmful = eval_safe.evaluate_safety(
-                "wildguard", guard, ["prompt"] * 4, ["answer"] * 4
+                guard, ["prompt"] * 4, ["answer"] * 4
             )
         self.assertEqual(refusals, ([1, 0, None, None], 2))
         self.assertEqual(harmful, ([0, 1, 0, 0], 0))
@@ -142,25 +142,19 @@ class OverrefusalTests(unittest.TestCase):
             prompt_type=["harmful", "harmful", "benign", "unknown"],
             subcategory=["a", "b", "benign", "b"],
         )
-        for all_prompts, total, harmful, subcategories in (
-            (False, 2, 1, ["overall", "a", "b"]),
-            (True, 4, 2, ["overall", "b", "a", "benign"]),
-        ):
-            with (self.subTest(all_prompts=all_prompts), tempfile.TemporaryDirectory() as directory,
-                  contextlib.redirect_stdout(io.StringIO())):
-                eval_safe.save_results({"wildguardmix": dataset}, directory, "model",
-                                       all_prompts=all_prompts)
-                root = Path(directory)
-                overall = pd.read_csv(root / "model_overall.csv").set_index("dataset")
-                self.assertEqual(overall.loc["wildguardmix", "total"], total)
-                self.assertEqual(overall.loc["wildguardmix", "harmful"], harmful)
-                breakdown = pd.read_csv(root / "model_wildguardmix.csv")
-                self.assertEqual(breakdown["subcategory"].tolist(), subcategories)
-                # Benign and unlabeled prompts are still saved with their type.
-                saved = pd.read_csv(root / "model_wildguardmix_responses.csv")
-                self.assertEqual(saved["prompt_type"].tolist(),
-                                 ["harmful", "harmful", "benign", "unknown"])
-                self.assertEqual(saved["is_unsafe"].tolist(), [1, 0, 0, 1])
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            eval_safe.save_results({"wildguardmix": dataset}, directory, "model")
+            root = Path(directory)
+            overall = pd.read_csv(root / "model_overall.csv").set_index("dataset")
+            self.assertEqual(overall.loc["wildguardmix", "total"], 2)
+            self.assertEqual(overall.loc["wildguardmix", "harmful"], 1)
+            breakdown = pd.read_csv(root / "model_wildguardmix.csv")
+            self.assertEqual(breakdown["subcategory"].tolist(), ["overall", "a", "b"])
+            # Benign and unlabeled prompts are still saved with their type.
+            saved = pd.read_csv(root / "model_wildguardmix_responses.csv")
+            self.assertEqual(saved["prompt_type"].tolist(),
+                             ["harmful", "harmful", "benign", "unknown"])
+            self.assertEqual(saved["is_unsafe"].tolist(), [1, 0, 0, 1])
 
 
 class EvalMainTests(unittest.TestCase):
@@ -192,8 +186,8 @@ class EvalMainTests(unittest.TestCase):
                          return_value={"IFBench": [example], "IFEval": [example, example]}),
             patch.object(eval_if, "check_response", return_value=[True]),
             patch.object(evaluation, "check_tokenizer"),  # the engines are mocks
-            patch.object(eval_safe, "load_safety_dataset",
-                         side_effect=lambda name, split: responses([0, 0])),
+            patch.object(eval_safe, "load_test_set",
+                         side_effect=lambda name: responses([0, 0])),
             patch.object(eval_safe, "generate_responses",
                          side_effect=lambda llm, tok, queries, **kw: ["answer"] * len(queries)
                          ) as generate,
@@ -209,7 +203,7 @@ class EvalMainTests(unittest.TestCase):
 
     def test_one_model_load_serves_if_and_safety(self):
         with tempfile.TemporaryDirectory() as directory:
-            checkpoint = Path(directory) / "ckpts" / "olmo2_git20k_1800_aegis_hate_seed43"
+            checkpoint = Path(directory) / "ckpts" / "olmo2_git20k_1800_wildguardmix_toxic_seed43"
             checkpoint.mkdir(parents=True)
             llm, model, guard, generate = self.run_main(
                 directory, "--model", str(checkpoint), "--datasets", "ailuminate", "xstest")
@@ -223,10 +217,10 @@ class EvalMainTests(unittest.TestCase):
             model.reset_prefix_cache.assert_called_once()
             self.assertEqual(generate.call_count, 2)  # one call per test set
             self.assertEqual(guard.generate.call_count, 2)
-            for path in evaluation.result_files(directory, "olmo2_git20k_1800_aegis_hate_seed43"):
+            for path in evaluation.result_files(directory, checkpoint.name):
                 self.assertTrue(Path(path).exists(), path)
-            summary = pd.read_csv(Path(directory) / "seed43/if_eval/olmo2_git20k_1800_aegis"
-                                  / "aegis_hate_if_summary.csv")
+            summary = pd.read_csv(Path(directory) / "seed43/if_eval/olmo2_git20k_1800_wildguardmix"
+                                  / "wildguardmix_toxic_if_summary.csv")
             self.assertEqual(summary["benchmark"].tolist(), ["IFBench", "IFEval", "Average"])
             self.assertEqual(summary["num_prompts"].tolist(), [1, 2, 3])
 
@@ -269,21 +263,16 @@ class EvalMainTests(unittest.TestCase):
         self.assertEqual(scores[0], scores[1])
         self.assertEqual(scores[0], scores[2])
 
-    def test_overrefusal_only_permit_run_skips_if(self):
-        with tempfile.TemporaryDirectory() as directory:
-            llm, model, guard, generate = self.run_main(
-                directory, "--model", "qwen2.5-ins", "--permit",
-                "--datasets", "xstest", "or-bench-hard", "xstest")
-            self.assertEqual(llm.call_count, 2)
-            model.generate.assert_not_called()  # IF is skipped with --permit
-            self.assertEqual(generate.call_count, 2)
-            self.assertEqual(generate.call_args.args[2],
-                             [eval_safe.PERMIT_PROMPT + "prompt 0", eval_safe.PERMIT_PROMPT + "prompt 1"])
-            root = Path(directory) / "qwen2.5-ins_permit"
-            saved = pd.read_csv(root / "qwen2.5-ins_permit_overrefusal.csv")
-            self.assertEqual(saved["overrefusal_score_pct"].tolist(), [100, 100, 100])
-            self.assertFalse(list(root.glob("*_overall.csv")))
-            self.assertFalse((Path(directory) / "if_eval").exists())
+    def test_result_folders(self):
+        self.assertEqual(
+            evaluation.result_dirs("R", "olmo2_git20k_1800_wildguardmix_material_harm_seed86"),
+            ("R/seed86/olmo2_git20k_1800_wildguardmix/wildguardmix_material_harm",
+             "R/seed86/if_eval/olmo2_git20k_1800_wildguardmix", "wildguardmix_material_harm"))
+        # Instruct and git20k models are not trained runs.
+        self.assertEqual(evaluation.result_dirs("R", "olmo2-ins"),
+                         ("R/olmo2-ins", "R/if_eval", "olmo2-ins"))
+        self.assertEqual(evaluation.resolve_model("llama3.1_git20k"),
+                         ("FocusV857/llama3.1_git20k", "llama3.1_git20k"))
 
 
 if __name__ == "__main__":

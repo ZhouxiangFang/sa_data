@@ -4,8 +4,8 @@
 #SBATCH --ntasks=1
 # One align.py job of a training array (range/train.sh submits it):
 #   train.sbatch JOBS_TSV OUTPUT_DIR [align.py options]
-# Task i trains line i+1 of JOBS_TSV (train_jobs.py output: model, dataset, group,
-# checkpoint, status) with DeepSpeed on every GPU of the allocation.
+# Task i trains line i+1 of JOBS_TSV (train_jobs.py output: model, group, checkpoint, status)
+# with DeepSpeed on every GPU of the allocation.
 set -uo pipefail
 source "${RANGE_DIR:?submit with range/train.sh}/common.sh"
 python -c 'import deepspeed, torch, transformers; print("DeepSpeed", deepspeed.__version__, "torch",
@@ -13,7 +13,7 @@ python -c 'import deepspeed, torch, transformers; print("DeepSpeed", deepspeed._
 
 jobs_tsv=$1 output_dir=$2
 shift 2
-IFS=$'\t' read -r model dataset abbr checkpoint _ < <(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$jobs_tsv")
+IFS=$'\t' read -r model abbr checkpoint _ < <(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$jobs_tsv")
 [[ -n ${checkpoint:-} ]] || { echo "No line $((SLURM_ARRAY_TASK_ID + 1)) in $jobs_tsv" >&2; exit 2; }
 echo "$(date '+%F %T') $(basename "$checkpoint") on $(hostname), GPUs ${CUDA_VISIBLE_DEVICES:-?}"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader
@@ -32,7 +32,7 @@ nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader,noun
     > "$mem_log" 2>/dev/null &
 sampler=$!
 deepspeed --master_port="$master_port" "$SA_DIR/align.py" \
-    --model "$model" --alignment_dataset "$dataset" --abbr "$abbr" \
+    --model "$model" --abbr "$abbr" \
     --output_dir "$output_dir" --overwrite_output_dir "$@"
 status=$?
 kill "$sampler" 2>/dev/null

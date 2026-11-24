@@ -1,20 +1,22 @@
-"""Evaluate one model on instruction following and safety, loading it once.
+"""Evaluate one model on instruction following, safety and overrefusal, loading it once.
 
-    python eval.py --model /scratch/zf28/ckpts/seed43/default/llama3.1_git20k_1800_aegis_hate_seed43
-    python eval.py --model qwen2.5-ins --skip_if --datasets gretel --merge
+    python eval.py --model /scratch/zf28/ckpts/seed43/default/llama3.1_git20k_1800_wildguardmix_toxic_seed43
+    python eval.py --model qwen2.5_git20k --limit 5
 
 One vLLM engine generates the IFBench/IFEval responses (eval_if.py) and then,
 with its prefix cache cleared so they match a run of their own, the responses
 to the safety and overrefusal test sets (eval_safe.py), one greedy generate call
 per benchmark or test set. The model is then released and WildGuard judges the
 safety responses. vLLM runs in batch-invariant mode, so a rerun reproduces the results.
+Safety: harmful-response rate on the harmful prompts of five test sets; overrefusal: refusal
+rate on XSTest's safe prompts and OR-Bench-Hard-1k; IF: IFBench and IFEval (prompt-level loose
+accuracy is the primary metric).
 
-A trained checkpoint <model>_<n>_<dataset>_<abbr>_seed<seed> (align.py) writes to
-  <output_dir>/seed<seed>/<model>_<n>_<dataset>/<dataset>_<abbr>/    safety
-  <output_dir>/seed<seed>/if_eval/<model>_<n>_<dataset>/             IF
-(seed 42 when the name has no seed); any other model to <output_dir>/<model>/ and
-<output_dir>/if_eval/. The default output_dir is results/ beside sa_data; use
-ablations/<setting> for any training setting other than the default 1:1:1 mixture.
+A trained checkpoint <model>_<n>_wildguardmix_<abbr>_seed<seed> (align.py) writes to
+  <output_dir>/seed<seed>/<model>_<n>_wildguardmix/wildguardmix_<abbr>/   safety
+  <output_dir>/seed<seed>/if_eval/<model>_<n>_wildguardmix/               IF
+and any other model to <output_dir>/<model>/ and <output_dir>/if_eval/. The default
+output_dir is results/ beside sa_data; range/run.sh uses ablations/<setting> for other settings.
 """
 
 import argparse
@@ -26,7 +28,7 @@ from pathlib import Path
 
 import eval_if
 import eval_safe
-from helper import LEGACY_SEED, model_mapping, seed_dir
+from helper import model_mapping, seed_dir
 
 logging.getLogger("vllm").setLevel(logging.WARNING)
 # Greedy decoding alone is not repeatable in vLLM: outputs depend on how requests are
@@ -46,9 +48,7 @@ TOKENIZER_PROBE = "Hello,  i.e. two  spaces\n  indented line\n\tTab and   three 
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 CHECKPOINT_NAME = re.compile(
-    r"(?P<model>.+)_(?P<count>[1-9][0-9]*)_(?P<category>(?:wildguardmix|aegis|gretel)_.+?)"
-    r"(?:_seed(?P<seed>[1-9][0-9]*))?(?P<variant>_permit)?"
-)
+    r"(?P<model>.+)_(?P<count>[1-9][0-9]*)_(?P<group>wildguardmix_.+)_seed(?P<seed>[1-9][0-9]*)")
 
 
 def resolve_model(model):
@@ -65,11 +65,10 @@ def result_dirs(output_dir, name):
     match = CHECKPOINT_NAME.fullmatch(name)
     if not match:
         return os.path.join(output_dir, name), os.path.join(output_dir, "if_eval"), name
-    root = os.path.join(output_dir, seed_dir(match["seed"] or LEGACY_SEED))
-    variant = match["variant"] or ""
-    run = f"{match['model']}_{match['count']}_{match['category'].split('_', 1)[0]}{variant}"
-    return (os.path.join(root, run, match["category"]), os.path.join(root, "if_eval", run),
-            match["category"] + variant)
+    root = os.path.join(output_dir, seed_dir(match["seed"]))
+    run = f"{match['model']}_{match['count']}_wildguardmix"
+    return (os.path.join(root, run, match["group"]), os.path.join(root, "if_eval", run),
+            match["group"])
 
 
 def result_files(output_dir, name):
@@ -163,23 +162,12 @@ def parse_args(argv=None):
     parser.add_argument("--datasets", nargs="+", choices=eval_safe.TEST_SETS,
                         default=eval_safe.TEST_SETS,
                         help="Safety and overrefusal test sets (default: all).")
-    parser.add_argument("--guard", default="wildguard", help="Guard model name, repo ID or path.")
     parser.add_argument("--skip_if", action="store_true", help="Skip IFBench and IFEval.")
-    parser.add_argument("--skip_safety", action="store_true", help="Skip the safety test sets.")
-    parser.add_argument("--permit", action="store_true",
-                        help="Let the model decide whether to comply with each safety request "
-                             "(results get a _permit suffix; IF is skipped, as its prompts "
-                             "do not change).")
-    parser.add_argument("--score_all_prompts", action="store_true",
-                        help="Count every safety test prompt in the harmful score, not only "
-                             "harmful ones (benign ones are always generated, judged and saved).")
-    parser.add_argument("--merge", action="store_true",
-                        help="Keep other test sets' rows in an existing overall/overrefusal CSV "
-                             "and recompute its Avg instead of overwriting the file.")
+    parser.add_argument("--skip_safety", action="store_true",
+                        help="Skip the safety and overrefusal test sets.")
     parser.add_argument("--limit", type=int,
                         help="Use only the first N prompts of every benchmark (quick test).")
     args = parser.parse_args(argv)
-    args.skip_if |= args.permit
     if args.skip_if and args.skip_safety:
         parser.error("--skip_if and --skip_safety leave nothing to evaluate")
     if args.limit is not None and args.limit <= 0:
@@ -190,9 +178,7 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     model_id, name = resolve_model(args.model)
-    guard_id = model_mapping.get(args.guard.lower(), args.guard)
-    _, if_dir, if_prefix = result_dirs(args.output_dir, name)
-    safety_dir, _, prefix = result_dirs(args.output_dir, name + "_permit" * args.permit)
+    safety_dir, if_dir, prefix = result_dirs(args.output_dir, name)
     print(f"Model: {model_id}")
     if not args.skip_if:
         print(f"IF results: {if_dir}")
@@ -204,22 +190,21 @@ def main(argv=None):
     llm = load_llm(model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     if not args.skip_if:
-        eval_if.run(llm, tokenizer, args.model, model_id, if_dir, if_prefix, limit=args.limit)
+        eval_if.run(llm, tokenizer, args.model, model_id, if_dir, prefix, limit=args.limit)
         if args.skip_safety:
             return
         llm.reset_prefix_cache()
 
     datasets = eval_safe.load_test_sets(args.datasets, args.limit)
-    eval_safe.generate(llm, tokenizer, datasets, permit=args.permit)
+    eval_safe.generate(llm, tokenizer, datasets)
     print("\nReleasing the model for the guard...")
     release(llm)
     del llm
 
-    guard = load_llm(guard_id)
-    eval_safe.judge(guard_id, guard, datasets)
+    guard = load_llm(model_mapping["wildguard"])
+    eval_safe.judge(guard, datasets)
     del guard
-    eval_safe.save_results(datasets, safety_dir, prefix, merge=args.merge,
-                           all_prompts=args.score_all_prompts)
+    eval_safe.save_results(datasets, safety_dir, prefix)
 
 
 if __name__ == "__main__":

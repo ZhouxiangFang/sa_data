@@ -10,25 +10,24 @@
 #   MAX_TRAIN=8 MAX_EVAL=16        Jobs of one array that may run at once (8 training
 #                                  jobs use 16 of the 64 H200s)
 #   TRAIN_TIME/EVAL_TIME=04:00:00  Wall time per job (partition maximum: 1 day)
-#   EFFECTIVE_BATCH=32             Examples per optimizer update, as on chili (4 GPUs x 1 x 8). Keep
-#                                  RANGE and chili on the same batch and lr: at equal settings their
-#                                  results agree to within training noise, so seeds can be pooled.
+#   EFFECTIVE_BATCH=32             Examples per optimizer update
 #   MICRO_BATCH=4                  Per-GPU micro-batch; accumulation steps are derived (4 on 2 GPUs).
 #                                  Same updates as micro-batch 1, about 3x faster.
 #   LEARNING_RATE=1e-5             Peak learning rate (align.py: cosine schedule, 10% warmup). In the
-#                                  Nov 2026 lr x batch ablation (ablations/lrbs), 1e-5 vs 5e-6 left
-#                                  harmful unchanged, cut over-refusal 3.4 points, cost 2 IFEval points.
-#   DS_CONFIG=range/ds_zero2.json  ZeRO-2. Needs DeepSpeed >= 0.19.6 (in nlp since Nov 9, 2026): 0.17.6
-#                                  to 0.19.5 compute wrong gradients with accumulation, and train.sh
-#                                  refuses those unless ALLOW_ZERO2=1. sa_data/ds_config.json (chili's
-#                                  ZeRO-3) gives the same updates.
+#                                  Nov 2026 lr x batch ablation, 1e-5 vs 5e-6 left harmful unchanged,
+#                                  cut over-refusal 3.4 points and cost 2 IFEval points.
+#   DS_CONFIG=range/ds_zero2.json  ZeRO-2. Needs DeepSpeed >= 0.19.6: 0.17.6 to 0.19.5 compute wrong
+#                                  gradients with accumulation, and train.sh refuses those.
 #   PARTITION=commons ACCOUNT=     Slurm partition / account (account: the default one)
+#   KEEP_CKPTS=0                   1: train.sh --eval keeps each checkpoint after evaluating it
+#                                  (default: deletes it; an 8B checkpoint is ~15 GB on /scratch)
+#   CKPT_ROOT=/scratch/zf28/ckpts  Checkpoints: CKPT_ROOT/seed<seed>/<setting>/
 
 RANGE_DIR=${RANGE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
 SA_DIR=$(dirname -- "$RANGE_DIR")
 ROOT=$(dirname -- "$SA_DIR")
 export RANGE_DIR SA_DIR ROOT
-source "$SA_DIR/settings.sh"
+CKPT_ROOT=${CKPT_ROOT:-/scratch/zf28/ckpts}
 LOG_DIR=${LOG_DIR:-$ROOT/log/slurm}
 mkdir -p -- "$LOG_DIR"
 
@@ -41,6 +40,7 @@ EVAL_CPUS=${EVAL_CPUS:-8} EVAL_MEM=${EVAL_MEM:-64G} EVAL_TIME=${EVAL_TIME:-04:00
 MAX_TRAIN=${MAX_TRAIN:-8} MAX_EVAL=${MAX_EVAL:-16}
 EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32} MICRO_BATCH=${MICRO_BATCH:-4} LEARNING_RATE=${LEARNING_RATE:-1e-5}
 DS_CONFIG=${DS_CONFIG:-$RANGE_DIR/ds_zero2.json}
+KEEP_CKPTS=${KEEP_CKPTS:-0}
 
 if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     set +u  # the activation scripts reference unset variables
@@ -90,4 +90,40 @@ submit() {
     id=${id%%;*}
     [[ -n ${JOB_IDS_FILE:-} ]] && echo "$id" >> "$JOB_IDS_FILE"
     echo "$id"
+}
+
+# Names one launch's logs and job lists; host and PID keep launches in the same second apart.
+STAMP=$(date +%Y%m%d_%H%M%S)_${HOSTNAME%%.*}_$$
+
+# add_values ARRAY VALUE...: appends comma- or space-separated values to the named array.
+add_values() {
+    local -n target=$1
+    local value
+    local -a parts
+    shift
+    for value; do
+        IFS=, read -ra parts <<< "$value"
+        target+=("${parts[@]}")
+    done
+}
+
+# setting_setup: from seed, response_label_filter (safe or refusal) and num_train (default 1800),
+# sets the folders of a setting. Returns 2 on a bad filter.
+#   setting    default or refusal, plus _<harmful count> for another size (default_500, refusal_500)
+#   harmful    harmful examples per run (a third, rounded as helper.mixture_counts)
+#   results    results/ for the default setting, else ablations/<setting>
+#   diversity  diversity/ for the default setting, else diversity/<setting>
+#   ckpt_dir   CKPT_ROOT/seed<seed>/<setting>
+setting_setup() {
+    case $response_label_filter in
+        safe) setting=default ;;
+        refusal) setting=refusal ;;
+        *) echo "--response_label_filter is safe or refusal, not $response_label_filter" >&2; return 2 ;;
+    esac
+    num_train=${num_train:-1800}
+    harmful=$(( (2 * num_train + 3) / 6 ))  # int(num_train / 3 + 0.5)
+    (( num_train == 1800 )) || setting+=_$harmful
+    results=$ROOT/results diversity=$ROOT/diversity
+    [[ $setting == default ]] || results=$ROOT/ablations/$setting diversity=$ROOT/diversity/$setting
+    ckpt_dir=$CKPT_ROOT/seed$seed/$setting
 }

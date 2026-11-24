@@ -3,7 +3,7 @@
 # /scratch/zf28/huggingface) before jobs start: vLLM's download lock is in the node's /tmp, so
 # jobs on different nodes would otherwise download the same files into the shared cache together.
 #   range/prefetch.sh [--models_only] [REPO_ID...]
-# Default models: the git20k models, WildGuard and the embedders. Weights are fetched the way
+# Default models: the git20k models, their official instruct models, WildGuard and the embedders. Weights are fetched the way
 # vLLM loads them: safetensors only when the repo has them, never Llama's original/ copy.
 # Unless --models_only: every dataset the code loads, the test sets and IF benchmarks built
 # through eval_safe/eval_if (so the datasets cache is built once), and IFBench's NLTK data.
@@ -14,7 +14,9 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
 models_only=0
 [[ ${1:-} == --models_only ]] && { models_only=1; shift; }
 models=(FocusV857/llama3.1_git20k FocusV857/mistral_git20k FocusV857/olmo2_git20k
-        FocusV857/qwen2.5_git20k allenai/wildguard BAAI/bge-m3 Qwen/Qwen3-Embedding-0.6B)
+        FocusV857/qwen2.5_git20k meta-llama/Meta-Llama-3.1-8B-Instruct
+        mistralai/Mistral-7B-Instruct-v0.3 allenai/OLMo-2-1124-7B-Instruct Qwen/Qwen2.5-7B-Instruct
+        allenai/wildguard BAAI/bge-m3 Qwen/Qwen3-Embedding-0.6B)
 (( $# )) && models=("$@")
 datasets=(allenai/wildguardmix allenai/wildjailbreak nvidia/Aegis-AI-Content-Safety-Dataset-2.0
           gretelai/gretel-safety-alignment-en-v1 Paul/XSTest bench-llm/or-bench google/IFEval)
