@@ -10,9 +10,11 @@ A run fine-tunes one git20k model on num_train examples (default 1,800), a third
 Each part is drawn by the run seed and saved the first time any stage needs it (training or
 diversity scoring), and read from there afterwards, so every model of a seed and the diversity
 scores of that seed use the very same examples (run_files):
-  data/stage1/seed<seed>/           stage 1's harmful samples
-  data/common/seed<seed>/           the benign and general thirds of every run (both stages)
-  data/stage2_selected/seed<seed>/  stage 2's harmful subsets (select_data.py)
+  samples/stage1/seed<seed>/           stage 1's harmful samples
+  samples/common/seed<seed>/           the benign and general thirds of every run (both stages)
+  samples/stage2_selected/seed<seed>/  stage 2's harmful subsets (select_data.py)
+data/ holds only the inputs copied by hand between servers: git_data_20k.csv, AILuminate.csv
+and subcategory_stats.json.
 """
 
 import hashlib
@@ -26,8 +28,9 @@ import pandas as pd
 
 MODULE_DIR = Path(__file__).resolve().parent
 ROOT = MODULE_DIR.parent
-DATA_DIR = ROOT / "data"
+DATA_DIR = ROOT / "data"  # inputs copied by hand between servers; runs never write here
 GENERAL_DATASET = DATA_DIR / "git_data_20k.csv"
+SAMPLES_DIR = ROOT / "samples"  # each seed's training data (run_files), written by the runs
 # Scores (small CSVs): baselines/ (the instruct and git20k models), correlations/<setting>/
 # (stage 1) and selection/<setting>/ (stage 2). Responses and per-subcategory breakdowns go to
 # the same tree on /scratch (/home has a 50 GB quota), figures to the same tree under figs/.
@@ -371,7 +374,7 @@ def stage1_sample_path(samples_dir, seed, abbr, count, response_label_filter="sa
 
 
 def harmful_sample(df, abbr, count, seed, tokenizer, response_label_filter="safe",
-                   max_length=DEFAULT_MAX_LENGTH, samples_dir=DATA_DIR):
+                   max_length=DEFAULT_MAX_LENGTH, samples_dir=SAMPLES_DIR):
     """(examples, sample file or None, overlong) of a stage 1 run's harmful part: count rows of
     harmful_pool(df, abbr), drawn by the seed (evenly: sample_evenly over training_groups),
     saved as stage1_sample_path (samples_dir None: not saved)."""
@@ -392,7 +395,7 @@ def harmful_sample(df, abbr, count, seed, tokenizer, response_label_filter="safe
 
 def training_examples(abbr, seed, tokenizer, num_train=DEFAULT_NUM_TRAIN,
                       response_label_filter="safe", max_length=DEFAULT_MAX_LENGTH,
-                      general_dataset=GENERAL_DATASET, samples_dir=DATA_DIR,
+                      general_dataset=GENERAL_DATASET, samples_dir=SAMPLES_DIR,
                       train_df=None, benign_pool=None, general_pool=None, selected=None,
                       mixed=False):
     """(the shuffled harmful + benign + general mixture of one run, info).
@@ -450,7 +453,7 @@ def add_training_arguments(parser):
 
 
 def run_files(abbr, seed, num_train=DEFAULT_NUM_TRAIN, response_label_filter="safe",
-              max_length=DEFAULT_MAX_LENGTH, selected=None, mixed=False, samples_dir=DATA_DIR,
+              max_length=DEFAULT_MAX_LENGTH, selected=None, mixed=False, samples_dir=SAMPLES_DIR,
               general_dataset=GENERAL_DATASET):
     """{part: file} of a run's training data, the files training_examples reads or writes
     (sample files None when samples_dir is None):
@@ -492,10 +495,10 @@ def checkpoint_fingerprint(checkpoint):
 
 def selection_csv(seed, dataset, method, count, response_label_filter="safe", mixed=False):
     """select_data.py's subset:
-    data/stage2_selected/seed<seed>/<dataset>[_refusal][_mixed]/<method>_<count>.csv"""
+    samples/stage2_selected/seed<seed>/<dataset>[_refusal][_mixed]/<method>_<count>.csv"""
     tag = pool_tag(response_label_filter)
     folder = dataset + (f"_{tag}" if tag else "") + ("_mixed" if mixed else "")
-    return DATA_DIR / "stage2_selected" / seed_dir(seed) / folder / f"{method}_{count}.csv"
+    return SAMPLES_DIR / "stage2_selected" / seed_dir(seed) / folder / f"{method}_{count}.csv"
 
 
 def selection_methods(seed, dataset, count, response_label_filter="safe", mixed=False):

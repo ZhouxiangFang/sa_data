@@ -182,7 +182,7 @@ class PoolTests(unittest.TestCase):
 
         benign = pd.DataFrame({"prompt": [f"b{i}" for i in range(9)], "response": ["ok"] * 9})
         with tempfile.TemporaryDirectory() as directory, \
-                mock.patch.object(helper, "DATA_DIR", Path(directory)):
+                mock.patch.object(helper, "SAMPLES_DIR", Path(directory)):
             path = helper.selection_csv(43, "nemotron", "semantic_vendi", 3)
             self.assertEqual(path, Path(directory)
                              / "stage2_selected/seed43/nemotron/semantic_vendi_3.csv")

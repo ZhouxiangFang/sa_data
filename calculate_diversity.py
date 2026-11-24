@@ -5,7 +5,7 @@
         --results_dir ../results/correlations/refusal_500
 
 Scores the very examples each run trained on: helper.harmful_sample reads the seed's sample file
-(data/stage1/seed<seed>/wildguardmix[_refusal]/<abbr>_<n>.jsonl) or draws and saves it
+(samples/stage1/seed<seed>/wildguardmix[_refusal]/<abbr>_<n>.jsonl) or draws and saves it
 exactly as training would. One row per training group (every subcategory with at least
 --num_train eligible rows, and the random and evenly baselines) and seed. --num_train is the
 harmful count of the runs (600 for the default 1,800-example mixture).
@@ -47,7 +47,7 @@ from scipy.stats import hypergeom
 from sklearn import preprocessing
 from sklearn.cluster import KMeans
 
-from helper import (BASELINE_ABBRS, DATA_DIR, DATASET, DEFAULT_SEED, STAGE1_DIR,
+from helper import (BASELINE_ABBRS, DATASET, DEFAULT_SEED, SAMPLES_DIR, STAGE1_DIR,
                     add_pool_argument, eligible_rows, harmful_pool, harmful_sample,
                     load_train, model_mapping, sample_digest, seed_dir, subcategory_stats,
                     training_groups)
@@ -242,8 +242,8 @@ def main():
     parser.add_argument("--model", default="qwen2.5_git20k",
                         help="Tokenizer that checks prompt lengths, as in training")
     parser.add_argument("--embedding_models", nargs="+", default=list(EMBEDDING_MODEL_IDS))
-    parser.add_argument("--samples_dir", type=Path, default=DATA_DIR,
-                        help="Folder of the stage1/ samples (default: data/)")
+    parser.add_argument("--samples_dir", type=Path, default=SAMPLES_DIR,
+                        help="Folder of the stage1/ samples (default: samples/)")
     parser.add_argument("--results_dir", type=Path,
                         help="The setting's scores folder (default: results/correlations/default)")
     parser.add_argument("--num_proc", type=int, default=8, help="POS-tagging processes")

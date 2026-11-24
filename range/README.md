@@ -36,7 +36,7 @@ Vanilla and adversarial rows are never mixed: each subset keeps their natural sh
 stratum is selected on its own (a metric's greedy step draws a fresh pool of 5,000 unselected rows
 of the stratum and scores the metric on that stratum's selected rows only). A CPU follow-up job then reruns
 `run.sh ... --skip select` to train and evaluate every subset. Subsets:
-`data/stage2_selected/seed<seed>/<dataset>[_refusal]/`.
+`samples/stage2_selected/seed<seed>/<dataset>[_refusal]/`.
 Tags and embeddings are cached in `/scratch/zf28/selection_cache/<dataset>/`.
 
 Defaults: training on 2 × H200 with ZeRO-2 (`ds_zero2.json`, DeepSpeed ≥ 0.19.6: 0.17.6–0.19.5

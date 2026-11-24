@@ -11,8 +11,8 @@ WildJailbreak vanilla_benign pairs and data/git_data_20k.csv instructions, read 
 sample files (helper.training_examples; the log prints each file's SHA-256). --abbr random or
 evenly trains a baseline over every subcategory large enough to train on. Stage 2: with
 --selected DATASET the harmful part is the subset select_data.py selected from DATASET with
-method --abbr (data/stage2_selected/seed<seed>/<dataset>[_refusal]/<abbr>_<harmful count>.csv). The
-checkpoint is <output_dir>/<model>_<num_train>_<dataset>_<abbr>_seed<seed>, with run.json: the
+method --abbr (samples/stage2_selected/seed<seed>/<dataset>[_refusal]/<abbr>_<harmful count>.csv).
+The checkpoint is <output_dir>/<model>_<num_train>_<dataset>_<abbr>_seed<seed>, with run.json: the
 run's fingerprint (helper.run_fingerprint: base model, seed, training settings, data files'
 contents), which train_jobs.py checks. Each optimizer update uses --effective_batch_size
 examples; accumulation = that / (GPUs x micro-batch).
