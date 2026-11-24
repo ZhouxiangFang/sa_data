@@ -50,7 +50,7 @@ Ablation (--mixed_diversity, metrics only): each metric is computed on the whole
 strata together; each step's pool still comes from one stratum (the one furthest below its
 share). Its subsets go to <dataset>[_refusal]_mixed/.
 
-Output: data/selected/seed<seed>/<dataset>[_refusal]/<method>_<size>.csv (helper.selection_csv),
+Output: data/stage2_selected/seed<seed>/<dataset>[_refusal]/<method>_<size>.csv (helper.selection_csv),
 stratum by stratum in selection order: pool row, stratum, order (within the stratum; 0: initial
 rows), score (the stratum's metric after the row was added, or the baseline's own score),
 prompt, response and the dataset's own fields: WildGuardMix subcategory and

@@ -184,7 +184,8 @@ class PoolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(helper, "DATA_DIR", Path(directory)):
             path = helper.selection_csv(43, "nemotron", "semantic_vendi", 3)
-            self.assertEqual(path, Path(directory) / "selected/seed43/nemotron/semantic_vendi_3.csv")
+            self.assertEqual(path, Path(directory)
+                             / "stage2_selected/seed43/nemotron/semantic_vendi_3.csv")
             path.parent.mkdir(parents=True)
             pd.DataFrame({"row": [5, 1, 1], "prompt": ["x", "None", "None"],
                           "response": ["no"] * 3}).to_csv(path, index=False)

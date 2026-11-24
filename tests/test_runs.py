@@ -97,7 +97,8 @@ class PoolTests(unittest.TestCase):
                     # Diversity draws and saves first; training then reads the same file.
                     drawn, path, _ = helper.harmful_sample(
                         self.df, "random", 4, seed, FakeTokenizer(), flt, samples_dir=samples)
-                    self.assertEqual(path, samples / f"seed{seed}" / folder / "random_4.jsonl")
+                    self.assertEqual(path,
+                                     samples / "stage1" / f"seed{seed}" / folder / "random_4.jsonl")
                     mixture, info = helper.training_examples(
                         "random", seed, FakeTokenizer(), 12, flt, samples_dir=samples,
                         train_df=self.df.iloc[::-1], benign_pool=benign, general_pool=general)
@@ -112,10 +113,12 @@ class PoolTests(unittest.TestCase):
                         "random", seed, FakeTokenizer(), 12, flt, samples_dir=None,
                         train_df=self.df, benign_pool=benign, general_pool=general)
                     self.assertTrue(fresh.equals(mixture))
-            self.assertTrue((samples / "seed86" / "general" / "git_data_20k_4.jsonl").exists())
-            self.assertTrue((samples / "seed86" / "wildjailbreak" / "vanilla_benign_4.jsonl").exists())
-            first = helper.read_sample(samples / "seed43" / "wildguardmix" / "random_4.jsonl")
-            second = helper.read_sample(samples / "seed86" / "wildguardmix" / "random_4.jsonl")
+            common = samples / "common" / "seed86"
+            self.assertTrue((common / "general" / "git_data_20k_4.jsonl").exists())
+            self.assertTrue((common / "wildjailbreak" / "vanilla_benign_4.jsonl").exists())
+            stage1 = samples / "stage1"
+            first = helper.read_sample(stage1 / "seed43" / "wildguardmix" / "random_4.jsonl")
+            second = helper.read_sample(stage1 / "seed86" / "wildguardmix" / "random_4.jsonl")
             self.assertNotEqual(first["prompt"].tolist(), second["prompt"].tolist())
 
     def test_fingerprints_follow_the_data_and_settings_and_mark_stale_runs(self):

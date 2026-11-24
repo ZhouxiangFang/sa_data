@@ -73,8 +73,9 @@ its runs used ZeRO-3 with 4 × A6000 × 1 × 8 and agreed within training noise.
 
 ## Determinism
 
-- **Training data**: one sample file per seed and setting (`data/train_samples/seed<S>/...`),
-  reused by every model and by the diversity scores; `align.py` logs each file's SHA-256.
+- **Training data**: one file per seed and setting (`data/stage1/`, `data/common/`,
+  `data/stage2_selected/`), reused by every model and by the diversity scores; `align.py` logs
+  each file's SHA-256 and its fingerprint (`run.json`).
 - **Training**: `seed` and `data_seed` = run seed. Not bitwise repeatable (TF32, no
   `full_determinism`): a same-seed rerun moves scores by up to about 1 point per test set.
 - **Generation**: greedy, vLLM seed 42, `VLLM_BATCH_INVARIANT=1` with FLASH_ATTN (eval.py; it

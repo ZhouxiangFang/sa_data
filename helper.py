@@ -7,9 +7,12 @@ A run fine-tunes one git20k model on num_train examples (default 1,800), a third
            the random / evenly baselines over every subcategory large enough to train on
   benign   WildJailbreak vanilla_benign pairs
   general  data/git_data_20k.csv instructions
-Each part is drawn by the run seed and saved under data/train_samples/seed<seed>/ the first time
-any stage needs it (training or diversity scoring), and read from there afterwards, so every
-model of a seed and the diversity scores of that seed use the very same examples.
+Each part is drawn by the run seed and saved the first time any stage needs it (training or
+diversity scoring), and read from there afterwards, so every model of a seed and the diversity
+scores of that seed use the very same examples (run_files):
+  data/stage1/seed<seed>/           stage 1's harmful samples
+  data/common/seed<seed>/           the benign and general thirds of every run (both stages)
+  data/stage2_selected/seed<seed>/  stage 2's harmful subsets (select_data.py)
 """
 
 import hashlib
@@ -24,7 +27,6 @@ import pandas as pd
 MODULE_DIR = Path(__file__).resolve().parent
 ROOT = MODULE_DIR.parent
 DATA_DIR = ROOT / "data"
-TRAIN_SAMPLES_DIR = DATA_DIR / "train_samples"
 GENERAL_DATASET = DATA_DIR / "git_data_20k.csv"
 # Scores (small CSVs): baselines/ (the instruct and git20k models), correlations/<setting>/
 # (stage 1) and selection/<setting>/ (stage 2). Responses and per-subcategory breakdowns go to
@@ -360,11 +362,19 @@ def read_or_draw(path, pool, count, draw, tokenizer, max_length, source):
     return sample[["prompt", "response"]], 0
 
 
+def stage1_sample_path(samples_dir, seed, abbr, count, response_label_filter="safe",
+                       max_length=DEFAULT_MAX_LENGTH):
+    """<samples_dir>/stage1/seed<seed>/wildguardmix[_refusal]/<abbr>_<count>.jsonl"""
+    tag = pool_tag(response_label_filter)
+    return sample_path(Path(samples_dir) / "stage1", seed, DATASET + (f"_{tag}" if tag else ""),
+                       abbr, count, max_length)
+
+
 def harmful_sample(df, abbr, count, seed, tokenizer, response_label_filter="safe",
-                   max_length=DEFAULT_MAX_LENGTH, samples_dir=TRAIN_SAMPLES_DIR):
-    """(examples, sample file or None, overlong) of a run's harmful part: count rows of
-    harmful_pool(df, abbr), drawn by the seed (evenly: sample_evenly over training_groups).
-    File: <samples_dir>/seed<seed>/wildguardmix[_refusal]/<abbr>_<count>.jsonl."""
+                   max_length=DEFAULT_MAX_LENGTH, samples_dir=DATA_DIR):
+    """(examples, sample file or None, overlong) of a stage 1 run's harmful part: count rows of
+    harmful_pool(df, abbr), drawn by the seed (evenly: sample_evenly over training_groups),
+    saved as stage1_sample_path (samples_dir None: not saved)."""
     pool = harmful_pool(df, abbr, count, response_label_filter)
     source = f"{DATASET} subcategory {abbr!r}"
 
@@ -374,16 +384,15 @@ def harmful_sample(df, abbr, count, seed, tokenizer, response_label_filter="safe
             return sample_evenly(pool, count, groups, source, seed, tokenizer, max_length)
         return sample_pairs(pool, count, source, seed, tokenizer, max_length)
 
-    tag = pool_tag(response_label_filter)
-    path = (sample_path(samples_dir, seed, DATASET + (f"_{tag}" if tag else ""), abbr, count,
-                        max_length) if samples_dir is not None else None)
+    path = (stage1_sample_path(samples_dir, seed, abbr, count, response_label_filter, max_length)
+            if samples_dir is not None else None)
     sample, overlong = read_or_draw(path, pool, count, draw, tokenizer, max_length, source)
     return sample, path, overlong
 
 
 def training_examples(abbr, seed, tokenizer, num_train=DEFAULT_NUM_TRAIN,
                       response_label_filter="safe", max_length=DEFAULT_MAX_LENGTH,
-                      general_dataset=GENERAL_DATASET, samples_dir=TRAIN_SAMPLES_DIR,
+                      general_dataset=GENERAL_DATASET, samples_dir=DATA_DIR,
                       train_df=None, benign_pool=None, general_pool=None, selected=None,
                       mixed=False):
     """(the shuffled harmful + benign + general mixture of one run, info).
@@ -391,35 +400,34 @@ def training_examples(abbr, seed, tokenizer, num_train=DEFAULT_NUM_TRAIN,
     The harmful part is subcategory (or baseline) abbr of WildGuardMix, or with selected (a
     dataset name, stage 2) the subset select_data.py selected with method abbr (mixed: its
     --mixed_diversity ablation).
-    info: "files" {part: sample file}, "available" {part: pool size}, "overlong" prompts
+    info: "files" {part: file} (run_files), "available" {part: pool size}, "overlong" prompts
     skipped while drawing. The pools are loaded unless given.
     """
     harmful_count, benign_count, general_count = mixture_counts(num_train)
+    files = run_files(abbr, seed, num_train, response_label_filter, max_length, selected, mixed,
+                      samples_dir, general_dataset)
     benign_pool = load_wildjailbreak_benign() if benign_pool is None else benign_pool
     general_pool = (clean_pairs(pd.read_csv(general_dataset)) if general_pool is None
                     else general_pool)
     if selected:
-        path = selection_csv(seed, selected, abbr, harmful_count, response_label_filter, mixed)
-        harmful, overlong = load_selection(path, harmful_count, tokenizer, max_length), 0
+        harmful, overlong = load_selection(files["harmful"], harmful_count, tokenizer,
+                                           max_length), 0
         available = harmful_count
     else:
         train_df = load_train() if train_df is None else train_df
-        harmful, path, overlong = harmful_sample(train_df, abbr, harmful_count, seed, tokenizer,
-                                                 response_label_filter, max_length, samples_dir)
+        harmful, _, overlong = harmful_sample(train_df, abbr, harmful_count, seed, tokenizer,
+                                              response_label_filter, max_length, samples_dir)
         available = len(harmful_pool(train_df, abbr, harmful_count, response_label_filter))
-    parts, files = [harmful], {"harmful": path}
-    for part, pool, count, folder, name in (
-            ("benign", benign_pool, benign_count, "wildjailbreak", "vanilla_benign"),
-            ("general", general_pool, general_count, "general", Path(general_dataset).stem)):
-        source = f"{part} ({folder}/{name})"
-        path = (sample_path(samples_dir, seed, folder, name, count, max_length)
-                if samples_dir is not None else None)
+    parts = [harmful]
+    for part, pool, count, name in (
+            ("benign", benign_pool, benign_count, "WildJailbreak vanilla_benign"),
+            ("general", general_pool, general_count, Path(general_dataset).stem)):
+        source = f"{part} ({name})"
         sample, skipped = read_or_draw(
-            path, pool, count,
+            files[part], pool, count,
             lambda: sample_pairs(pool, count, source, seed, tokenizer, max_length),
             tokenizer, max_length, source)
         parts.append(sample)
-        files[part] = path
         overlong += skipped
     mixture = pd.concat(parts, ignore_index=True)
     mixture = mixture.sample(frac=1, random_state=seed).reset_index(drop=True)
@@ -442,20 +450,27 @@ def add_training_arguments(parser):
 
 
 def run_files(abbr, seed, num_train=DEFAULT_NUM_TRAIN, response_label_filter="safe",
-              max_length=DEFAULT_MAX_LENGTH, selected=None, mixed=False,
-              samples_dir=TRAIN_SAMPLES_DIR, general_dataset=GENERAL_DATASET):
-    """{part: file} of a run's training data, the files training_examples reads or writes."""
+              max_length=DEFAULT_MAX_LENGTH, selected=None, mixed=False, samples_dir=DATA_DIR,
+              general_dataset=GENERAL_DATASET):
+    """{part: file} of a run's training data, the files training_examples reads or writes
+    (sample files None when samples_dir is None):
+      harmful  stage 1: stage1_sample_path; stage 2: selection_csv
+      benign   <samples_dir>/common/seed<seed>/wildjailbreak/vanilla_benign_<count>.jsonl
+      general  <samples_dir>/common/seed<seed>/general/<general dataset>_<count>.jsonl"""
     harmful_count, benign_count, general_count = mixture_counts(num_train)
-    tag = pool_tag(response_label_filter)
-    harmful = (selection_csv(seed, selected, abbr, harmful_count, response_label_filter, mixed)
-               if selected else
-               sample_path(samples_dir, seed, DATASET + (f"_{tag}" if tag else ""), abbr,
-                           harmful_count, max_length))
-    return {"harmful": harmful,
-            "benign": sample_path(samples_dir, seed, "wildjailbreak", "vanilla_benign",
-                                  benign_count, max_length),
-            "general": sample_path(samples_dir, seed, "general", Path(general_dataset).stem,
-                                   general_count, max_length)}
+    if selected:
+        harmful = selection_csv(seed, selected, abbr, harmful_count, response_label_filter, mixed)
+    elif samples_dir is not None:
+        harmful = stage1_sample_path(samples_dir, seed, abbr, harmful_count,
+                                     response_label_filter, max_length)
+    else:
+        harmful = None
+    common = None if samples_dir is None else Path(samples_dir) / "common"
+    return {"harmful": harmful, **{
+        part: common and sample_path(common, seed, folder, name, count, max_length)
+        for part, folder, name, count in (
+            ("benign", "wildjailbreak", "vanilla_benign", benign_count),
+            ("general", "general", Path(general_dataset).stem, general_count))}}
 
 
 def run_fingerprint(model, seed, files, settings):
@@ -477,10 +492,10 @@ def checkpoint_fingerprint(checkpoint):
 
 def selection_csv(seed, dataset, method, count, response_label_filter="safe", mixed=False):
     """select_data.py's subset:
-    data/selected/seed<seed>/<dataset>[_refusal][_mixed]/<method>_<count>.csv"""
+    data/stage2_selected/seed<seed>/<dataset>[_refusal][_mixed]/<method>_<count>.csv"""
     tag = pool_tag(response_label_filter)
     folder = dataset + (f"_{tag}" if tag else "") + ("_mixed" if mixed else "")
-    return DATA_DIR / "selected" / seed_dir(seed) / folder / f"{method}_{count}.csv"
+    return DATA_DIR / "stage2_selected" / seed_dir(seed) / folder / f"{method}_{count}.csv"
 
 
 def selection_methods(seed, dataset, count, response_label_filter="safe", mixed=False):
