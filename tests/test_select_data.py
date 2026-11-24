@@ -153,7 +153,8 @@ class PoolTests(unittest.TestCase):
         rows = pd.DataFrame({"prompt": ["a", "a", "Test  Prompt", "b" * 50, "c"],
                              "response": ["r", "r", "r", "r", "r"],
                              "stratum": ["vanilla", "vanilla", "vanilla", "adversarial",
-                                         "adversarial"]})
+                                         "adversarial"],
+                             "category": ["x", "y", "z", "w", "v"]})
 
         class Tokenizer:
             def apply_chat_template(self, conversations, tokenize, add_generation_prompt):
@@ -167,6 +168,7 @@ class PoolTests(unittest.TestCase):
                 mock.patch.object(sd, "load_test_set", lambda name: tests):
             pool = sd.load_pool("alert_dpo", "safe", Tokenizer(), 10)
             self.assertEqual(pool["prompt"].tolist(), ["a", "a", "c"])
+            self.assertEqual(pool["category"].tolist(), ["x", "y", "v"])  # the dataset's fields
             with self.assertRaises(SystemExit):
                 sd.load_pool("alert_dpo", "refusal", Tokenizer(), 10)
 

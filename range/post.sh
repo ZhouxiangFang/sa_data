@@ -20,9 +20,7 @@ done
 setting_setup || exit 2
 cd -- "$SA_DIR" || exit
 status=0
-python plot_bars_overall.py --results_dir "$results" --seeds "$seed" --num_train "$num_train" \
-    --dataset "${selected:-wildguardmix}" || status=1
+python plot_bars_overall.py --results_dir "$results" --seeds "$seed" || status=1
 [[ -n $selected ]] && exit "$status"
-python correlate_diversity.py --results_dir "$results" --diversity_dir "$diversity" \
-    --num_train "$num_train" || status=1
+python correlate_diversity.py --results_dir "$results" || status=1
 exit "$status"

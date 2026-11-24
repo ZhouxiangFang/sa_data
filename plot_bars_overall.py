@@ -1,19 +1,21 @@
 """Bar charts of the harmful, overrefusal and IF scores of the starting models and the runs.
 
     python plot_bars_overall.py --seeds 43 86 129
-    python plot_bars_overall.py --results_dir ../ablations/refusal --seeds 43
+    python plot_bars_overall.py --results_dir ../results/correlations/refusal --seeds 43
+    python plot_bars_overall.py --results_dir ../results/selection/wildjailbreak --seeds 43
 
 For each model and their average: the official instruct model and the git20k starting model
-(from --baseline_dir, evaluated by range/run.sh's base stage), then every trained group (from
-<results_dir>/seed<S>/; stage 2: --dataset, the selection methods), the random and evenly
-baselines first and the other groups by harmful score, most harmful first (--ascending: all groups ranked together, least harmful first). Bars:
-harmful (the Avg row: mean over the five harm test sets), overrefusal (mean of XSTest and
-OR-Bench-Hard) and IF (mean IFBench / IFEval prompt-level loose accuracy). Several seeds are
-averaged; the average gives each model equal weight. The same figures per harm test set go to
-<test>/ subfolders.
-Writes to <results_dir>/figs/seed<S>/ (several seeds: seeds<S1>-<S2>.../): <model>.png,
-average.png, <test>/*.png and scores.csv (every plotted number, and each seed's); and the
-self-trained vs official instruct comparison to <baseline_dir>/figs/instruct_vs_git20k.png.
+(from --baseline_dir, evaluated by range/run.sh's base stage), then every trained group of the
+setting (<results_dir>/seed<S>/<model>/<group>.csv; stage 2: the selection methods), the random
+and evenly baselines first and the other groups by harmful score, most harmful first
+(--ascending: all groups ranked together, least harmful first). Bars: harmful (the Avg row: mean
+over the five harm test sets), overrefusal (mean of XSTest and OR-Bench-Hard) and IF (mean
+IFBench / IFEval prompt-level loose accuracy). Several seeds are averaged; the average gives each
+model equal weight. The same figures per harm test set go to <test>/ subfolders.
+Writes to the setting's figs/ folder (helper.figs_dir, e.g. figs/correlations/default/),
+seed<S>/ (several seeds: seeds<S1>-<S2>.../): <model>.png, average.png, <test>/*.png and
+scores.csv (every plotted number, and each seed's); and the self-trained vs official instruct
+comparison to figs/baselines/instruct_vs_git20k.png and .csv.
 """
 
 import argparse
@@ -26,9 +28,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from eval import result_dirs
-from helper import (BASELINE_ABBRS, DATASET, DEFAULT_NUM_TRAIN, DEFAULT_SEED, GIT20K_MODELS,
-                    ROOT, SELECTION_DATASETS, checkpoint_name, safety_test_datasets, seed_dir)
+from eval import evaluated, read_scores, result_paths, run_csv
+from helper import (BASELINE_ABBRS, BASELINES_DIR, DEFAULT_SEED, GIT20K_MODELS, STAGE1_DIR,
+                    figs_dir, safety_test_datasets, seed_dir)
 
 # Column: (legend label, color: categorical slots 2, 1, 3 of the reference palette).
 BARS = {
@@ -39,32 +41,26 @@ BARS = {
 INSTRUCT, START = "official instruct", "git20k start"
 
 
-def run_scores(output_dir, name):
+def run_scores(path):
     """Scores (%) of one evaluated model: harmful (Avg and per test set), overrefusal, IF."""
-    safety_dir, if_dir, prefix = result_dirs(output_dir, name)
-    harmful = pd.read_csv(Path(safety_dir) / f"{prefix}_overall.csv").set_index("dataset")
-    overrefusal = pd.read_csv(Path(safety_dir) / f"{prefix}_overrefusal.csv").set_index("dataset")
-    loose = pd.read_csv(Path(if_dir) / f"{prefix}_if_summary.csv").set_index("benchmark")
-    scores = {"harmful": harmful.loc["Avg", "harmful_score_pct"],
-              **{test: harmful.loc[test, "harmful_score_pct"] for test in safety_test_datasets},
-              "overrefusal": overrefusal.loc["Avg", "overrefusal_score_pct"],
-              "ifbench": 100 * loose.loc["IFBench", "prompt_loose"],
-              "ifeval": 100 * loose.loc["IFEval", "prompt_loose"]}
-    return {**scores, "if": (scores["ifbench"] + scores["ifeval"]) / 2}
+    scores = read_scores(path)
+    return {"harmful": scores["harmful", "Avg"],
+            **{test: scores["harmful", test] for test in safety_test_datasets},
+            "overrefusal": scores["overrefusal", "Avg"],
+            "ifbench": scores["if_prompt_loose", "IFBench"],
+            "ifeval": scores["if_prompt_loose", "IFEval"],
+            "if": scores["if_prompt_loose", "Avg"]}
 
 
-def trained_groups(results_dir, model, num_train, seed, dataset):
-    """Groups with an overall CSV in <results_dir>/seed<seed>/<model>_<num_train>_<dataset>/."""
-    run = Path(results_dir) / seed_dir(seed) / f"{model}_{num_train}_{dataset}"
-    prefix = f"{dataset}_"
-    return {path.parent.name.removeprefix(prefix)
-            for path in run.glob(f"{prefix}*/{prefix}*_overall.csv")}
+def trained_groups(results_dir, model, seed):
+    """Groups with a complete scores CSV in <results_dir>/seed<seed>/<model>/."""
+    return {path.stem for path in (Path(results_dir) / seed_dir(seed) / model).glob("*.csv")
+            if evaluated(path)}
 
 
-def load_scores(results_dir, baseline_dir, models, num_train, seeds, dataset=DATASET):
+def load_scores(results_dir, baseline_dir, models, seeds):
     """One row per model, version (official instruct, git20k start or group) and seed."""
-    found = [trained_groups(results_dir, model, num_train, seed, dataset)
-             for model in models for seed in seeds]
+    found = [trained_groups(results_dir, model, seed) for model in models for seed in seeds]
     groups = set.intersection(*found)
     if set.union(*found) - groups:
         print(f"Left out, not evaluated for every model and seed: "
@@ -76,13 +72,13 @@ def load_scores(results_dir, baseline_dir, models, num_train, seeds, dataset=DAT
         base = model.removesuffix("_git20k")
         baselines = {INSTRUCT: f"{base}-ins", START: model}
         for version, name in baselines.items():
-            rows += [{"model": base, "version": version, "seed": seed,
-                      **run_scores(baseline_dir, name)} for seed in seeds]
+            scores = run_scores(result_paths(baseline_dir, name)[0])
+            rows += [{"model": base, "version": version, "seed": seed, **scores}
+                     for seed in seeds]
         for seed in seeds:
             for abbr in groups:
-                name = checkpoint_name(model, num_train, abbr, seed, dataset)
                 rows.append({"model": base, "version": abbr, "seed": seed,
-                             **run_scores(results_dir, name)})
+                             **run_scores(run_csv(results_dir, model, abbr, seed))})
     return pd.DataFrame(rows)
 
 
@@ -132,25 +128,24 @@ def plot(scores, harmful, title, path, ascending=False):
 
 def plot_instruct(baseline_dir, models):
     """Self-trained (git20k) vs official instruct models: IFEval and IFBench prompt-level loose
-    accuracy per model and their mean, to <baseline_dir>/figs/instruct_vs_git20k.png, and every
-    IF score with the harmful and overrefusal Avg to the .csv beside it."""
+    accuracy per model and their mean, to figs_dir(baseline_dir)/instruct_vs_git20k.png, and
+    every IF score with the harmful and overrefusal Avg to the .csv beside it."""
     rows = []
     for model in models:
         base = model.removesuffix("_git20k")
         for version, name in ((INSTRUCT, f"{base}-ins"), ("self-trained (git20k)", model)):
-            _, if_dir, prefix = result_dirs(baseline_dir, name)
-            summary = pd.read_csv(Path(if_dir) / f"{prefix}_if_summary.csv").set_index("benchmark")
-            scores = run_scores(baseline_dir, name)
+            scores = read_scores(result_paths(baseline_dir, name)[0])
             rows.append({"model": base, "version": version,
-                         **{f"{benchmark}_{score}": 100 * summary.loc[benchmark, score]
+                         **{f"{benchmark}_{score}": scores[f"if_{score}", benchmark]
                             for benchmark in ("IFEval", "IFBench")
                             for score in ("prompt_loose", "prompt_strict", "instruction_loose",
                                           "instruction_strict")},
-                         "harmful": scores["harmful"], "overrefusal": scores["overrefusal"]})
+                         "harmful": scores["harmful", "Avg"],
+                         "overrefusal": scores["overrefusal", "Avg"]})
     table = pd.DataFrame(rows)
     table = pd.concat([table, table.groupby("version", as_index=False, sort=False)
                        .mean(numeric_only=True).assign(model="Average")], ignore_index=True)
-    output_dir = Path(baseline_dir) / "figs"
+    output_dir = figs_dir(baseline_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     table.to_csv(output_dir / "instruct_vs_git20k.csv", index=False, float_format="%.2f")
     names = list(dict.fromkeys(table["model"]))
@@ -178,23 +173,20 @@ def plot_instruct(baseline_dir, models):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--results_dir", type=Path, default=ROOT / "results")
-    parser.add_argument("--dataset", choices=SELECTION_DATASETS, default=DATASET,
-                        help="Training dataset of the runs (stage 2: the selection dataset)")
-    parser.add_argument("--baseline_dir", type=Path, default=ROOT / "results",
+    parser.add_argument("--results_dir", type=Path, default=STAGE1_DIR,
+                        help="The setting's scores folder (default: results/correlations/default)")
+    parser.add_argument("--baseline_dir", type=Path, default=BASELINES_DIR,
                         help="eval.py --output_dir of the instruct and git20k models")
     parser.add_argument("--seeds", type=int, nargs="+", default=[DEFAULT_SEED])
-    parser.add_argument("--num_train", type=int, default=DEFAULT_NUM_TRAIN)
     parser.add_argument("--models", nargs="+", default=list(GIT20K_MODELS))
     parser.add_argument("--ascending", action="store_true")
     parser.add_argument("--output_dir", type=Path)
     args = parser.parse_args()
     seeds = sorted(set(args.seeds))
-    output_dir = args.output_dir or args.results_dir / "figs" / (
+    output_dir = args.output_dir or figs_dir(args.results_dir) / (
         seed_dir(seeds[0]) if len(seeds) == 1 else "seeds" + "-".join(map(str, seeds)))
     plot_instruct(args.baseline_dir, args.models)
-    per_seed = load_scores(args.results_dir, args.baseline_dir, args.models, args.num_train,
-                           seeds, args.dataset)
+    per_seed = load_scores(args.results_dir, args.baseline_dir, args.models, seeds)
     columns = [column for column in per_seed if column not in ("model", "version", "seed")]
     means = per_seed.groupby(["model", "version"], sort=False)[columns].mean()
     average = means.groupby(level="version", sort=False).mean()

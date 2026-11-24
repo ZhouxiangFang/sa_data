@@ -26,6 +26,14 @@ ROOT = MODULE_DIR.parent
 DATA_DIR = ROOT / "data"
 TRAIN_SAMPLES_DIR = DATA_DIR / "train_samples"
 GENERAL_DATASET = DATA_DIR / "git_data_20k.csv"
+# Scores (small CSVs): baselines/ (the instruct and git20k models), correlations/<setting>/
+# (stage 1) and selection/<setting>/ (stage 2). Responses and per-subcategory breakdowns go to
+# the same tree on /scratch (/home has a 50 GB quota), figures to the same tree under figs/.
+RESULTS_DIR = ROOT / "results"
+BASELINES_DIR = RESULTS_DIR / "baselines"
+STAGE1_DIR = RESULTS_DIR / "correlations" / "default"
+RESPONSES_DIR = Path("/scratch/zf28/results")
+FIGS_DIR = ROOT / "figs"
 
 DATASET = "wildguardmix"  # stage 1's training dataset
 # Stage 2: the datasets select_data.py selects harmful subsets from.
@@ -71,10 +79,40 @@ def seed_dir(seed):
     return f"seed{int(seed)}"
 
 
-def insert_seed_dir(path, seed):
-    """Per-seed counterpart of a folder: results/if_eval -> results/seed43/if_eval."""
-    path = Path(os.path.normpath(path))
-    return path.parent / seed_dir(seed) / path.name
+def _under_results(path):
+    """path relative to results/, or None for a folder elsewhere."""
+    try:
+        return Path(path).resolve().relative_to(RESULTS_DIR.resolve())
+    except ValueError:
+        return None
+
+
+def responses_dir(results_dir):
+    """Where the responses of results_dir's models go: the same path under RESPONSES_DIR for a
+    folder in results/, else results_dir itself (an ad-hoc eval.py --output_dir)."""
+    relative = _under_results(results_dir)
+    return Path(results_dir) if relative is None else RESPONSES_DIR / relative
+
+
+def figs_dir(results_dir):
+    """Where the figures of results_dir go: the same path under figs/ for a folder in
+    results/, else <results_dir>/figs."""
+    relative = _under_results(results_dir)
+    return Path(results_dir) / "figs" if relative is None else FIGS_DIR / relative
+
+
+def percentage(part, total):
+    return round(part / total * 100, 4) if total else float("nan")
+
+
+def with_average(rows):
+    """Score rows of one metric (eval.py's scores CSV) plus their Avg row: counts summed,
+    scores averaged unweighted over the test sets that have one."""
+    scores = [row["score"] for row in rows if pd.notna(row["score"])]
+    average = {key: sum(row[key] for row in rows)
+               for key in ("n", "count", "na_responses") if key in rows[0]}
+    return rows + [{"metric": rows[0]["metric"], "test_set": "Avg", **average,
+                    "score": sum(scores) / len(scores) if scores else float("nan")}]
 
 
 def pool_tag(response_label_filter):
@@ -289,7 +327,14 @@ def write_sample(path, sample):
 
 
 def sample_digest(path):
-    """Short SHA-256 of a sample file (training logs and diversity CSVs)."""
+    """Short SHA-256 of a data file (training logs, diversity CSVs, run fingerprints); cached
+    while the file is unchanged."""
+    stat = Path(path).stat()
+    return _digest(str(path), stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=None)
+def _digest(path, mtime_ns, size):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]
 
 
@@ -380,6 +425,54 @@ def training_examples(abbr, seed, tokenizer, num_train=DEFAULT_NUM_TRAIN,
     mixture = mixture.sample(frac=1, random_state=seed).reset_index(drop=True)
     available = {"harmful": available, "benign": len(benign_pool), "general": len(general_pool)}
     return mixture, {"files": files, "available": available, "overlong": overlong}
+
+
+# align.py's settings that change the trained weights; hardware choices (GPUs, micro-batch,
+# DeepSpeed config) are left out. With the base model, the seed and the data files, they make a
+# run's fingerprint.
+TRAINING_SETTINGS = ("epochs", "learning_rate", "effective_batch_size", "max_length")
+RUN_FILE = "run.json"  # a checkpoint's fingerprint and what it was computed from (align.py)
+
+
+def add_training_arguments(parser):
+    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--effective_batch_size", type=int, default=32)
+    parser.add_argument("--max_length", type=int, default=DEFAULT_MAX_LENGTH)
+
+
+def run_files(abbr, seed, num_train=DEFAULT_NUM_TRAIN, response_label_filter="safe",
+              max_length=DEFAULT_MAX_LENGTH, selected=None, mixed=False,
+              samples_dir=TRAIN_SAMPLES_DIR, general_dataset=GENERAL_DATASET):
+    """{part: file} of a run's training data, the files training_examples reads or writes."""
+    harmful_count, benign_count, general_count = mixture_counts(num_train)
+    tag = pool_tag(response_label_filter)
+    harmful = (selection_csv(seed, selected, abbr, harmful_count, response_label_filter, mixed)
+               if selected else
+               sample_path(samples_dir, seed, DATASET + (f"_{tag}" if tag else ""), abbr,
+                           harmful_count, max_length))
+    return {"harmful": harmful,
+            "benign": sample_path(samples_dir, seed, "wildjailbreak", "vanilla_benign",
+                                  benign_count, max_length),
+            "general": sample_path(samples_dir, seed, "general", Path(general_dataset).stem,
+                                   general_count, max_length)}
+
+
+def run_fingerprint(model, seed, files, settings):
+    """Short hash of what decides a run's weights: base model, seed, settings
+    (TRAINING_SETTINGS) and the contents of its data files; None while a file is missing."""
+    if not all(Path(path).is_file() for path in files.values()):
+        return None
+    key = {"model": model_mapping.get(model, model), "seed": int(seed),
+           **{name: settings[name] for name in TRAINING_SETTINGS},
+           **{part: sample_digest(path) for part, path in files.items()}}
+    return hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def checkpoint_fingerprint(checkpoint):
+    """The fingerprint align.py saved with a checkpoint, or None."""
+    path = Path(checkpoint) / RUN_FILE
+    return json.loads(path.read_text())["fingerprint"] if path.is_file() else None
 
 
 def selection_csv(seed, dataset, method, count, response_label_filter="safe", mixed=False):

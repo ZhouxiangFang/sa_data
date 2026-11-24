@@ -12,11 +12,14 @@ sample files (helper.training_examples; the log prints each file's SHA-256). --a
 evenly trains a baseline over every subcategory large enough to train on. Stage 2: with
 --selected DATASET the harmful part is the subset select_data.py selected from DATASET with
 method --abbr (data/selected/seed<seed>/<dataset>[_refusal]/<abbr>_<harmful count>.csv). The
-checkpoint is <output_dir>/<model>_<num_train>_<dataset>_<abbr>_seed<seed>. Each optimizer update uses
---effective_batch_size examples; accumulation = that / (GPUs x micro-batch).
+checkpoint is <output_dir>/<model>_<num_train>_<dataset>_<abbr>_seed<seed>, with run.json: the
+run's fingerprint (helper.run_fingerprint: base model, seed, training settings, data files'
+contents), which train_jobs.py checks. Each optimizer update uses --effective_batch_size
+examples; accumulation = that / (GPUs x micro-batch).
 """
 
 import argparse
+import json
 import math
 import os
 from pathlib import Path
@@ -27,8 +30,9 @@ from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
-from helper import (DATASET, DEFAULT_MAX_LENGTH, DEFAULT_NUM_TRAIN, DEFAULT_SEED,
-                    SELECTION_DATASETS, add_pool_argument, checkpoint_name, mixture_counts, model_mapping,
+from helper import (DATASET, DEFAULT_NUM_TRAIN, DEFAULT_SEED, RUN_FILE, SELECTION_DATASETS,
+                    TRAINING_SETTINGS, add_pool_argument, add_training_arguments,
+                    checkpoint_name, mixture_counts, model_mapping, run_fingerprint,
                     sample_digest, training_examples)
 
 MODULE_DIR = Path(__file__).resolve().parent
@@ -55,11 +59,8 @@ def parse_args():
     parser.add_argument("--output_dir", type=Path, required=True,
                         help="Folder of the checkpoint folder")
     parser.add_argument("--overwrite_output_dir", action="store_true")
-    parser.add_argument("--epochs", type=int, default=2)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    add_training_arguments(parser)  # epochs, learning_rate, effective_batch_size, max_length
     parser.add_argument("--per_device_train_batch_size", type=int, default=1)
-    parser.add_argument("--effective_batch_size", type=int, default=32)
-    parser.add_argument("--max_length", type=int, default=DEFAULT_MAX_LENGTH)
     parser.add_argument("--deepspeed", type=Path, default=MODULE_DIR / "range" / "ds_zero2.json")
     parser.add_argument("--local_rank", type=int, default=-1)
     args = parser.parse_args()
@@ -98,6 +99,11 @@ def main():
     if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite_output_dir:
         raise FileExistsError(f"Output directory is not empty: {output_dir}")
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    settings = {name: getattr(args, name) for name in TRAINING_SETTINGS}
+    run = {"fingerprint": run_fingerprint(args.model, args.seed, info["files"], settings),
+           "model": model_id, "seed": args.seed, **settings,
+           "files": {part: {"path": str(path), "sha256": sample_digest(path)}
+                     for part, path in info["files"].items()}}
     if main_process:
         print("Configuration:", *(f"  {key}: {value}" for key, value in vars(args).items()),
               sep="\n")
@@ -107,7 +113,8 @@ def main():
                   f"{path} sha256 {sample_digest(path)}")
         print(f"Harmful part: {dataset} {args.abbr}, {args.response_label_filter} responses; "
               f"overlong prompts skipped while drawing: {info['overlong']:,}")
-        print(f"Model: {model_id}\nOutput directory: {output_dir}")
+        print(f"Model: {model_id}\nOutput directory: {output_dir}\n"
+              f"Fingerprint: {run['fingerprint']}")
         updates = math.ceil(len(train_df) / args.effective_batch_size) * args.epochs
         print(f"Effective batch {args.effective_batch_size} ({world_size} GPUs x "
               f"{args.per_device_train_batch_size} x {args.gradient_accumulation_steps} "
@@ -162,6 +169,8 @@ def main():
     trainer.save_model(str(output_dir))  # gathers sharded weights; writes on the main process
     trainer.accelerator.wait_for_everyone()
     if trainer.accelerator.is_main_process:
+        # train_jobs.py compares the fingerprint with the planned run's.
+        (output_dir / RUN_FILE).write_text(json.dumps(run, indent=1) + "\n")
         # Written last: train_jobs.py takes the tokenizer as the mark of a complete save.
         tokenizer.save_pretrained(output_dir)
         print(f"Saved {output_dir}")

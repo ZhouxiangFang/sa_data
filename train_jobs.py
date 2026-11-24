@@ -1,37 +1,41 @@
 """List one seed's training jobs (model x training group) and which are left to do.
 
     python train_jobs.py --seed 43 --ckpt_dir /scratch/zf28/ckpts/seed43/default \
-        --results_dir ../results
+        --results_dir ../results/correlations/default [-- align.py options]
 
 One tab-separated line per job: model, group, checkpoint, status:
   train   still to train
   saved   checkpoint saved, not yet evaluated
-  done    evaluated: eval.py's summaries are in --results_dir (the checkpoint may be gone)
-Groups: every WildGuardMix subcategory with enough eligible rows for the harmful third of
---num_train (helper.training_groups), then the random and evenly baselines; with
---selected DATASET (stage 2), every subset select_data.py saved for the seed.
+  done    evaluated: eval.py's scores CSV in --results_dir is complete (the checkpoint may be
+          gone)
+  stale   a checkpoint or scores exist from other training data or settings: their fingerprint
+          (helper.run_fingerprint) is not this run's
+The run's training settings (helper.TRAINING_SETTINGS) are read from the align.py options after
+--; the others there are ignored. Groups: every WildGuardMix subcategory with enough eligible
+rows for the harmful third of --num_train (helper.training_groups), then the random and evenly
+baselines; with --selected DATASET (stage 2), every subset select_data.py saved for the seed.
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
+from eval import evaluated, result_paths
 from helper import (BASELINE_ABBRS, DATASET, DEFAULT_NUM_TRAIN, DEFAULT_SEED, GIT20K_MODELS,
-                    SELECTION_DATASETS, add_pool_argument, checkpoint_name, load_train,
-                    mixture_counts, selection_methods, training_groups)
+                    SELECTION_DATASETS, add_pool_argument, add_training_arguments,
+                    checkpoint_fingerprint, checkpoint_name, load_train, mixture_counts,
+                    run_files, run_fingerprint, selection_methods, training_groups)
 
 
-def status(checkpoint, results_dir):
-    if results_dir is not None:
-        from eval import result_files
-
-        if all(os.path.exists(path) for path in result_files(results_dir, checkpoint.name)):
-            return "done"
+def status(checkpoint, scores, fingerprint):
+    """train, saved, done or stale (see the module doc); scores: the scores CSV, or None."""
     # align.py writes the tokenizer last, so it marks a complete save.
-    if (checkpoint / "config.json").is_file() and (checkpoint / "tokenizer_config.json").is_file():
+    saved = all((checkpoint / name).is_file() for name in ("config.json", "tokenizer_config.json"))
+    if fingerprint and scores and evaluated(scores, fingerprint):
+        return "done"
+    if fingerprint and saved and checkpoint_fingerprint(checkpoint) == fingerprint:
         return "saved"
-    return "train"
+    return "stale" if saved or (scores and scores.exists()) else "train"
 
 
 def main():
@@ -49,7 +53,12 @@ def main():
     parser.add_argument("--results_dir", type=Path,
                         help="eval.py --output_dir; jobs evaluated there are done")
     add_pool_argument(parser)
-    args = parser.parse_args()
+    argv = sys.argv[1:]
+    split = argv.index("--") if "--" in argv else len(argv)
+    args = parser.parse_args(argv[:split])
+    training = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    add_training_arguments(training)
+    settings = vars(training.parse_known_args(argv[split + 1:])[0])
     harmful_count = mixture_counts(args.num_train)[0]
     if args.selected:
         groups = selection_methods(args.seed, args.selected, harmful_count,
@@ -63,11 +72,18 @@ def main():
             sys.exit(f"Not a training group with {harmful_count:,} examples: {' '.join(unknown)}"
                      f" (groups: {' '.join(groups)})")
         groups = [abbr for abbr in groups if abbr in args.abbrs]
+    files = {abbr: run_files(abbr, args.seed, args.num_train, args.response_label_filter,
+                             settings["max_length"], args.selected, args.mixed_diversity)
+             for abbr in groups}
+    fingerprints = {(model, abbr): run_fingerprint(model, args.seed, files[abbr], settings)
+                    for model in args.models for abbr in groups}
     for model in args.models:
         for abbr in groups:
             checkpoint = args.ckpt_dir / checkpoint_name(model, args.num_train, abbr, args.seed,
                                                          args.selected or DATASET)
-            print(model, abbr, checkpoint, status(checkpoint, args.results_dir), sep="\t")
+            scores = args.results_dir and result_paths(args.results_dir, checkpoint.name)[0]
+            print(model, abbr, checkpoint, status(checkpoint, scores, fingerprints[model, abbr]),
+                  sep="\t")
 
 
 if __name__ == "__main__":

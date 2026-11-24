@@ -1,5 +1,7 @@
-"""plot_bars_overall.py reads eval.py's files for the runs and the instruct models."""
+"""plot_bars_overall.py reads eval.py's scores CSVs of the runs and the instruct models."""
 
+import contextlib
+import io
 import sys
 import tempfile
 import unittest
@@ -15,20 +17,16 @@ import plot_bars_overall as pbo
 
 
 def write_results(root, name, harmful):
-    safety_dir, if_dir, prefix = (Path(path) if i < 2 else path
-                                  for i, path in enumerate(evaluation.result_dirs(root, name)))
-    safety_dir.mkdir(parents=True, exist_ok=True)
-    if_dir.mkdir(parents=True, exist_ok=True)
-    tests = helper.safety_test_datasets + ["Avg"]
-    pd.DataFrame({"dataset": tests, "harmful_score_pct": [harmful] * len(tests)}).to_csv(
-        safety_dir / f"{prefix}_overall.csv", index=False)
-    pd.DataFrame({"dataset": ["xstest", "or-bench-hard", "Avg"],
-                  "overrefusal_score_pct": [10.0, 20.0, 15.0]}).to_csv(
-        safety_dir / f"{prefix}_overrefusal.csv", index=False)
-    pd.DataFrame({"benchmark": ["IFBench", "IFEval", "Average"],
-                  **{score: [0.3, 0.6, 0.45] for score in ("prompt_strict", "instruction_strict",
-                                                           "prompt_loose", "instruction_loose")}}
-                 ).to_csv(if_dir / f"{prefix}_if_summary.csv", index=False)
+    rows = [{"metric": "harmful", "test_set": test, "score": harmful}
+            for test in helper.safety_test_datasets + ["Avg"]]
+    rows += [{"metric": "overrefusal", "test_set": test, "score": score}
+             for test, score in (("xstest", 10.0), ("or-bench-hard", 20.0), ("Avg", 15.0))]
+    rows += [{"metric": f"if_{score}", "test_set": test, "score": value}
+             for score in ("prompt_strict", "instruction_strict", "prompt_loose",
+                           "instruction_loose")
+             for test, value in (("IFBench", 30.0), ("IFEval", 60.0), ("Avg", 45.0))]
+    with contextlib.redirect_stdout(io.StringIO()):
+        evaluation.save_scores(evaluation.result_paths(root, name)[0], rows)
 
 
 class PlotTests(unittest.TestCase):

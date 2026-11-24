@@ -1,6 +1,7 @@
 """Evaluate one model on instruction following, safety and overrefusal, loading it once.
 
-    python eval.py --model /scratch/zf28/ckpts/seed43/default/llama3.1_git20k_1800_wildguardmix_toxic_seed43
+    python eval.py --output_dir ../results/correlations/default \
+        --model /scratch/zf28/ckpts/seed43/default/llama3.1_git20k_1800_wildguardmix_toxic_seed43
     python eval.py --model qwen2.5_git20k --limit 5
 
 One vLLM engine generates the IFBench/IFEval responses (eval_if.py) and then,
@@ -12,11 +13,19 @@ Safety: harmful-response rate on the harmful prompts of five test sets; overrefu
 rate on XSTest's safe prompts and OR-Bench-Hard-1k; IF: IFBench and IFEval (prompt-level loose
 accuracy is the primary metric).
 
-A trained checkpoint <model>_<n>_<dataset>_<abbr>_seed<seed> (align.py) writes to
-  <output_dir>/seed<seed>/<model>_<n>_<dataset>/<dataset>_<abbr>/   safety
-  <output_dir>/seed<seed>/if_eval/<model>_<n>_<dataset>/             IF
-and any other model to <output_dir>/<model>/ and <output_dir>/if_eval/. The default
-output_dir is results/ beside sa_data; range/run.sh uses ablations/<setting> for other settings.
+Each model gets one scores CSV holding every score of its evaluation: columns metric, test_set,
+n, count, na_responses, score (%) and fingerprint (the checkpoint's, from align.py's run.json;
+empty for other models), metrics harmful, overrefusal and if_{prompt,instruction}_{loose,strict},
+and for each metric an Avg row (the unweighted mean of its test sets). A model's responses and
+per-subcategory breakdowns go to its responses folder:
+  checkpoint <model>_<n>_<dataset>_<abbr>_seed<seed> (align.py):
+      <output_dir>/seed<seed>/<model>/<abbr>.csv  and  <responses>/seed<seed>/<model>/<abbr>/
+  any other model (the instruct and git20k baselines):
+      <output_dir>/<model>.csv  and  <responses>/<model>/
+<responses> is output_dir's path under /scratch/zf28/results when output_dir is in results/,
+else output_dir itself (helper.responses_dir). --output_dir defaults to results/baselines; a
+checkpoint needs its setting's folder, results/correlations/<setting> (stage 1) or
+results/selection/<setting> (stage 2), as range/common.sh's setting_setup sets it.
 """
 
 import argparse
@@ -28,7 +37,10 @@ from pathlib import Path
 
 import eval_if
 import eval_safe
-from helper import SELECTION_DATASETS, model_mapping, seed_dir
+import pandas as pd
+
+from helper import (BASELINES_DIR, SELECTION_DATASETS, checkpoint_fingerprint, model_mapping,
+                    responses_dir, seed_dir)
 
 logging.getLogger("vllm").setLevel(logging.WARNING)
 # Greedy decoding alone is not repeatable in vLLM: outputs depend on how requests are
@@ -46,10 +58,14 @@ ATTENTION_BACKEND = "FLASH_ATTN"
 # which ships only a tokenizer.model: no leading-space marker, double spaces merged).
 TOKENIZER_PROBE = "Hello,  i.e. two  spaces\n  indented line\n\tTab and   three spaces.  End"
 
-RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 CHECKPOINT_NAME = re.compile(
-    rf"(?P<model>.+)_(?P<count>[1-9][0-9]*)_(?P<group>(?P<dataset>{'|'.join(SELECTION_DATASETS)})"
-    r"_.+)_seed(?P<seed>[1-9][0-9]*)")
+    rf"(?P<model>.+)_(?P<count>[1-9][0-9]*)_(?P<dataset>{'|'.join(SELECTION_DATASETS)})"
+    r"_(?P<abbr>.+)_seed(?P<seed>[1-9][0-9]*)")
+SCORE_COLUMNS = ["metric", "test_set", "n", "count", "na_responses", "score", "fingerprint"]
+METRIC_ORDER = ["harmful", "overrefusal",
+                *(f"if_{name}" for name in eval_if.SCORE_NAMES)]
+# The rows a complete evaluation writes; train_jobs.py and the figures look for them.
+SUMMARY_ROWS = [("harmful", "Avg"), ("overrefusal", "Avg"), ("if_prompt_loose", "Avg")]
 
 
 def resolve_model(model):
@@ -60,23 +76,59 @@ def resolve_model(model):
     return model_mapping.get(model.lower(), model), model.replace("/", "_")
 
 
-def result_dirs(output_dir, name):
-    """(safety folder, IF folder, file prefix) of a model's results; see the module doc."""
+def run_csv(output_dir, model, abbr, seed):
+    """Scores CSV of a trained run."""
+    return Path(output_dir) / seed_dir(seed) / model / f"{abbr}.csv"
+
+
+def result_paths(output_dir, name):
+    """(scores CSV, responses folder) of a model; see the module doc."""
     name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
     match = CHECKPOINT_NAME.fullmatch(name)
     if not match:
-        return os.path.join(output_dir, name), os.path.join(output_dir, "if_eval"), name
-    root = os.path.join(output_dir, seed_dir(match["seed"]))
-    run = f"{match['model']}_{match['count']}_{match['dataset']}"
-    return (os.path.join(root, run, match["group"]), os.path.join(root, "if_eval", run),
-            match["group"])
+        return Path(output_dir) / f"{name}.csv", responses_dir(output_dir) / name
+    return (run_csv(output_dir, match["model"], match["abbr"], match["seed"]),
+            responses_dir(output_dir) / seed_dir(match["seed"]) / match["model"] / match["abbr"])
 
 
-def result_files(output_dir, name):
-    """The summary CSVs a full evaluation writes: safety overall and IF summary."""
-    safety_dir, if_dir, prefix = result_dirs(output_dir, name)
-    return (os.path.join(safety_dir, f"{prefix}_overall.csv"),
-            os.path.join(if_dir, f"{prefix}_if_summary.csv"))
+def read_table(path):
+    """A scores CSV (fingerprints as text: one of digits only would read as a number)."""
+    return pd.read_csv(path, dtype={"fingerprint": str})
+
+
+def read_scores(path):
+    """A scores CSV as a Series of scores (%) indexed by (metric, test_set)."""
+    return read_table(path).set_index(["metric", "test_set"])["score"]
+
+
+def evaluated(path, fingerprint=None):
+    """Whether a scores CSV has the harmful, overrefusal and IF averages (with fingerprint:
+    every row of the checkpoint with that fingerprint)."""
+    if not Path(path).is_file():
+        return False
+    table = read_table(path)
+    return (set(SUMMARY_ROWS) <= set(zip(table["metric"], table["test_set"]))
+            and (fingerprint is None or (table["fingerprint"] == fingerprint).all()))
+
+
+def save_scores(path, rows, fingerprint=None):
+    """Write a model's score rows with its checkpoint's fingerprint, keeping the earlier rows
+    of the same checkpoint for metrics this evaluation skipped (--skip_if, --skip_safety)."""
+    scores = pd.DataFrame(rows, columns=SCORE_COLUMNS).assign(fingerprint=fingerprint)
+    path = Path(path)
+    if path.exists():
+        earlier = read_table(path)
+        keep = (~earlier["metric"].isin(scores["metric"])
+                & (earlier["fingerprint"].fillna("") == (fingerprint or "")))
+        scores = pd.concat([scores, earlier[keep]], ignore_index=True)
+    order = {metric: i for i, metric in enumerate(METRIC_ORDER)}
+    scores = scores.sort_values("metric", key=lambda column: column.map(order), kind="stable")
+    for column in ("n", "count", "na_responses"):  # IF rows have no na_responses
+        scores[column] = scores[column].astype("Int64")
+    scores["score"] = scores["score"].map(lambda value: f"{float(value):.4f}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    scores.to_csv(path, index=False)
+    print(f"Saved: {path}")
 
 
 def release(llm, timeout=120):
@@ -158,8 +210,9 @@ def parse_args(argv=None):
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required=True,
                         help="Checkpoint path, model shortcut (helper.model_mapping) or repo ID.")
-    parser.add_argument("--output_dir", type=Path, default=RESULTS_DIR,
-                        help="Result root (default: results/ beside sa_data).")
+    parser.add_argument("--output_dir", type=Path,
+                        help="Scores folder (default: results/baselines; a checkpoint needs "
+                             "its setting's folder, see the module doc).")
     parser.add_argument("--datasets", nargs="+", choices=eval_safe.TEST_SETS,
                         default=eval_safe.TEST_SETS,
                         help="Safety and overrefusal test sets (default: all).")
@@ -179,20 +232,25 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     model_id, name = resolve_model(args.model)
-    safety_dir, if_dir, prefix = result_dirs(args.output_dir, name)
-    print(f"Model: {model_id}")
-    if not args.skip_if:
-        print(f"IF results: {if_dir}")
-    if not args.skip_safety:
-        print(f"Safety results: {safety_dir}")
+    if args.output_dir is None:
+        if CHECKPOINT_NAME.fullmatch(name):
+            raise SystemExit("A checkpoint needs --output_dir: results/correlations/<setting> "
+                             "(stage 1) or results/selection/<setting> (stage 2)")
+        args.output_dir = BASELINES_DIR
+    scores_csv, responses = result_paths(args.output_dir, name)
+    fingerprint = checkpoint_fingerprint(model_id) if os.path.isdir(model_id) else None
+    print(f"Model: {model_id} (fingerprint {fingerprint})\nScores: {scores_csv}\n"
+          f"Responses: {responses}")
 
     from transformers import AutoTokenizer
 
     llm = load_llm(model_id)
     tokenizer = AutoTokenizer.from_pretrained(model_id)
+    rows = []
     if not args.skip_if:
-        eval_if.run(llm, tokenizer, args.model, model_id, if_dir, prefix, limit=args.limit)
+        rows += eval_if.run(llm, tokenizer, responses, limit=args.limit)
         if args.skip_safety:
+            save_scores(scores_csv, rows, fingerprint)
             return
         llm.reset_prefix_cache()
 
@@ -205,7 +263,7 @@ def main(argv=None):
     guard = load_llm(model_mapping["wildguard"])
     eval_safe.judge(guard, datasets)
     del guard
-    eval_safe.save_results(datasets, safety_dir, prefix)
+    save_scores(scores_csv, eval_safe.save_results(datasets, responses) + rows, fingerprint)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,13 @@
 #   PARTITION=commons ACCOUNT=     Slurm partition / account (account: the default one)
 #   DELETE_CKPTS=0                 1: train.sh --eval deletes each checkpoint once it is evaluated
 #                                  (default: keeps it; an 8B checkpoint is ~15 GB on /scratch)
+#   OVERWRITE_STALE=0              1: train.sh retrains runs whose checkpoint or scores come from
+#                                  other training data or settings (default: refuses to submit)
 #   CKPT_ROOT=/scratch/zf28/ckpts  Checkpoints: CKPT_ROOT/seed<seed>/<setting>/
+#
+# Outputs: scores (small CSVs) in results/: baselines/ (instruct and git20k models),
+# correlations/<setting>/ (stage 1) and selection/<setting>/ (stage 2); the responses in the same
+# tree under /scratch/zf28/results; figures in the same tree under figs/; logs in log/slurm/.
 
 RANGE_DIR=${RANGE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
 SA_DIR=$(dirname -- "$RANGE_DIR")
@@ -41,6 +47,7 @@ MAX_TRAIN=${MAX_TRAIN:-8} MAX_EVAL=${MAX_EVAL:-16}
 EFFECTIVE_BATCH=${EFFECTIVE_BATCH:-32} MICRO_BATCH=${MICRO_BATCH:-4} LEARNING_RATE=${LEARNING_RATE:-1e-5}
 DS_CONFIG=${DS_CONFIG:-$RANGE_DIR/ds_zero2.json}
 DELETE_CKPTS=${DELETE_CKPTS:-0}
+OVERWRITE_STALE=${OVERWRITE_STALE:-0}
 
 if [[ "${CONDA_DEFAULT_ENV:-}" != nlp ]]; then
     set +u  # the activation scripts reference unset variables
@@ -113,8 +120,8 @@ add_values() {
 #   setting    default or refusal (stage 2: selected_<dataset>[_refusal][_mixed]), plus
 #              _<harmful count> for another size (default_500, selected_wildjailbreak_500)
 #   harmful    harmful examples per run (a third, rounded as helper.mixture_counts)
-#   results    results/ for the default setting, else ablations/<setting>
-#   diversity  diversity/ for the default setting, else diversity/<setting>
+#   results    the setting's scores folder: results/correlations/<setting> (stage 1, with the
+#              diversity scores in diversity/) or results/selection/<setting without selected_>
 #   ckpt_dir   CKPT_ROOT/seed<seed>/<setting>
 setting_setup() {
     case $response_label_filter in
@@ -133,7 +140,14 @@ setting_setup() {
     num_train=${num_train:-1800}
     harmful=$(( (2 * num_train + 3) / 6 ))  # int(num_train / 3 + 0.5)
     (( num_train == 1800 )) || setting+=_$harmful
-    results=$ROOT/results diversity=$ROOT/diversity
-    [[ $setting == default ]] || results=$ROOT/ablations/$setting diversity=$ROOT/diversity/$setting
+    results=$ROOT/results/correlations/$setting
+    [[ -n ${selected:-} ]] && results=$ROOT/results/selection/${setting#selected_}
     ckpt_dir=$CKPT_ROOT/seed$seed/$setting
+}
+
+# evaluated SCORES_CSV: eval.py's scores file of a model holds a complete evaluation (the
+# harmful, overrefusal and IF averages; eval.evaluated in Python).
+evaluated() {
+    [[ -f $1 ]] && grep -q '^harmful,Avg,' "$1" && grep -q '^overrefusal,Avg,' "$1" &&
+        grep -q '^if_prompt_loose,Avg,' "$1"
 }

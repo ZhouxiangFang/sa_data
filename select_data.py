@@ -53,8 +53,11 @@ share). Its subsets go to <dataset>[_refusal]_mixed/.
 Output: data/selected/seed<seed>/<dataset>[_refusal]/<method>_<size>.csv (helper.selection_csv),
 stratum by stratum in selection order: pool row, stratum, order (within the stratum; 0: initial
 rows), score (the stratum's metric after the row was added, or the baseline's own score),
-prompt and response. Existing CSVs are
-kept unless --overwrite.
+prompt, response and the dataset's own fields: WildGuardMix subcategory and
+response_refusal_label; WildJailbreak vanilla (the request an adversarial prompt rewrites; the
+release has no tactics); ALERT-DPO id, category and attack_type; Nemotron uuid, prompt_source,
+categories, subcategories, adversarial_persona and response_policy. Existing CSVs are kept
+unless --overwrite.
 """
 
 import argparse
@@ -91,22 +94,26 @@ NEMOTRON_REFUSALS = ("refusal_with_explanation_redirection", "refusal_no_redirec
 
 
 # ------------------------------------------------------------------------------- datasets
-# Each loader returns prompt, response and stratum (vanilla / adversarial) per row.
+# Each loader returns prompt, response and stratum (vanilla / adversarial) per row, then the
+# dataset's own fields for later analysis, saved with every selected row.
 
 def load_wildguardmix(response_label_filter):
     rows = eligible_rows(load_train(), response_label_filter)
     adversarial = rows["adversarial"].astype(str).str.lower().map({"true": True, "false": False})
-    return rows.assign(stratum=np.where(adversarial, "adversarial", "vanilla"))
+    return rows.assign(stratum=np.where(adversarial, "adversarial", "vanilla"))[
+        ["prompt", "response", "stratum", "subcategory", "response_refusal_label"]]
 
 
 def load_wildjailbreak():
+    """vanilla: the plain request an adversarial prompt rewrites (the release has no tactics)."""
     df = load_dataset("allenai/wildjailbreak", "train", split="train", delimiter="\t",
                       keep_default_na=False).to_pandas()
     df = df[df["data_type"].isin(["vanilla_harmful", "adversarial_harmful"])]
     adversarial = df["data_type"] == "adversarial_harmful"
     return pd.DataFrame({"prompt": np.where(adversarial, df["adversarial"], df["vanilla"]),
                          "response": df["completion"],
-                         "stratum": np.where(adversarial, "adversarial", "vanilla")})
+                         "stratum": np.where(adversarial, "adversarial", "vanilla"),
+                         "vanilla": np.where(adversarial, df["vanilla"], "")})
 
 
 def load_alert_dpo():
@@ -114,7 +121,8 @@ def load_alert_dpo():
              .assign(stratum=stratum)
              for config, stratum in (("alert_dpo", "vanilla"),
                                      ("alert_dpo_adversarial", "adversarial"))]
-    return pd.concat(parts, ignore_index=True).rename(columns={"chosen": "response"})
+    return pd.concat(parts, ignore_index=True).rename(columns={"chosen": "response"})[
+        ["prompt", "response", "stratum", "id", "category", "attack_type"]]
 
 
 def load_nemotron():
@@ -128,8 +136,13 @@ def load_nemotron():
             row = json.loads(line)
             if row["translation_languages"] is None and row["response_policy"] in NEMOTRON_REFUSALS:
                 user, assistant = row["messages"]
+                meta = row["metadata"]
                 rows.append({"prompt": user["content"], "response": assistant["content"],
-                             "stratum": NEMOTRON_STRATA[row["metadata"]["source_l1"]]})
+                             "stratum": NEMOTRON_STRATA[meta["source_l1"]],
+                             "uuid": row["uuid"], "prompt_source": meta["source_l1"],
+                             **{key: meta.get(key) for key in (
+                                 "categories", "subcategories", "adversarial_persona")},
+                             "response_policy": row["response_policy"]})
     return pd.DataFrame(rows)
 
 
@@ -148,7 +161,7 @@ def load_pool(dataset, response_label_filter, tokenizer, max_length):
         raise SystemExit(f"--response_label_filter refusal needs refusal labels; {dataset} has none")
     loader = LOADERS[dataset]
     pool = loader(response_label_filter) if dataset == "wildguardmix" else loader()
-    pool = clean_pairs(pool[["prompt", "response", "stratum"]])
+    pool = clean_pairs(pool)
     counts = [len(pool)]
     tests = {normalized(prompt) for name in safety_test_datasets + overrefusal_test_datasets
              for prompt in load_test_set(name)["prompt"]}
@@ -1027,7 +1040,7 @@ def main():
             order=orders, score=scores)
         path = paths[method]
         path.parent.mkdir(parents=True, exist_ok=True)
-        subset[["row", "stratum", "order", "score", "prompt", "response"]].to_csv(
+        subset[["row", "stratum", "order", "score", *pool.columns.drop("stratum")]].to_csv(
             path.with_name(path.name + ".tmp"), index=False)
         path.with_name(path.name + ".tmp").replace(path)
         print(f"{method}: {time.time() - start:.0f}s; saved {path}", flush=True)

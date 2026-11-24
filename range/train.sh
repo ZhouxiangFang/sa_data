@@ -23,10 +23,13 @@ Usage: range/train.sh [options] [-- align.py options]
   --eval_only            Only evaluate the saved checkpoints (implies --eval)
   --dry_run              Print the plan and sbatch commands without submitting
 
-Checkpoints go to CKPT_ROOT/seed<seed>/<setting>/ and results to results/ (default setting) or
-ablations/<setting>/ (setting_setup in range/common.sh). Jobs whose checkpoint is saved or
-evaluated are skipped, so rerunning resumes. Each training job uses TRAIN_NGPUS (2) x TRAIN_GPU
-(h200), EFFECTIVE_BATCH (32), MICRO_BATCH (4), LEARNING_RATE (1e-5) and DS_CONFIG (ZeRO-2).
+Checkpoints go to CKPT_ROOT/seed<seed>/<setting>/ and scores to results/correlations/<setting>/
+(stage 1) or results/selection/<dataset>.../ (stage 2), responses to the same tree under
+/scratch/zf28/results (setting_setup in range/common.sh). Jobs whose checkpoint is saved or
+evaluated are skipped, so rerunning resumes; a checkpoint or scores from other training data or
+settings (a stale fingerprint, train_jobs.py) stop the submission unless OVERWRITE_STALE=1
+retrains them. Each training job uses TRAIN_NGPUS (2) x TRAIN_GPU (h200), EFFECTIVE_BATCH (32),
+MICRO_BATCH (4), LEARNING_RATE (1e-5) and DS_CONFIG (ZeRO-2).
 Logs: log/slurm/align_<job>_<task>.log and eval_<job>_<task>.log; the plan of a submission is
 log/slurm/jobs_<stamp>.tsv (line i+1 = task i). DEPENDENCY (e.g. afterany:<job>) delays the
 training array until that job ends.
@@ -93,20 +96,32 @@ align_args=(--deepspeed "$(realpath "$DS_CONFIG")" --per_device_train_batch_size
 plan=(--ckpt_dir "$ckpt_dir" --results_dir "$results" "${settings[@]}")
 (( ${#models[@]} )) && plan+=(--models "${models[@]}")
 (( ${#abbrs[@]} )) && plan+=(--abbrs "${abbrs[@]}")
-jobs_tsv=$(python "$SA_DIR/train_jobs.py" "${plan[@]}" 2> >(grep -v NVML >&2)) || exit $?
+jobs_tsv=$(python "$SA_DIR/train_jobs.py" "${plan[@]}" -- "${align_args[@]}" \
+    2> >(grep -v NVML >&2)) || exit $?
 
 train_tsv=$LOG_DIR/jobs_${STAMP}.tsv saved_tsv=$LOG_DIR/jobs_${STAMP}_saved.tsv
-declare -A count=([train]=0 [saved]=0 [done]=0)
-train_lines=() saved_lines=()
+declare -A count=([train]=0 [saved]=0 [done]=0 [stale]=0)
+train_lines=() saved_lines=() stale_lines=()
 while IFS= read -r line; do
     [[ -n $line ]] || continue
     status=${line##*$'\t'}
     (( ++count[$status] ))
     [[ $status == train ]] && train_lines+=("$line")
     [[ $status == saved ]] && saved_lines+=("$line")
+    [[ $status == stale ]] && stale_lines+=("$line")
 done <<< "$jobs_tsv"
 echo "Seed $seed, $setting setting: ${count[train]} to train, ${count[saved]} saved," \
-     "${count[done]} evaluated. Checkpoints: $ckpt_dir"
+     "${count[done]} evaluated, ${count[stale]} stale. Checkpoints: $ckpt_dir"
+if (( ${#stale_lines[@]} )); then
+    printf '  stale: %s\n' "${stale_lines[@]}" >&2
+    if (( ! OVERWRITE_STALE )); then
+        echo "These runs have a checkpoint or scores from other training data or settings" \
+             "(another fingerprint, train_jobs.py). OVERWRITE_STALE=1 retrains them, replacing" \
+             "their checkpoints and scores; or use another setting/CKPT_ROOT." >&2
+        exit 2
+    fi
+    train_lines+=("${stale_lines[@]}")
+fi
 (( eval_only )) && train_lines=()
 
 # sbatch_or_echo SBATCH_ARGS...: submits, or with --dry_run prints the command.

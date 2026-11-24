@@ -12,7 +12,8 @@ Usage: range/eval.sh MODEL... [--delete] [-- eval.py options]
   --delete   Delete each trained checkpoint (a local folder named ..._seed<seed>) once
              its evaluation succeeds
 
-eval.py options, e.g. --output_dir ../ablations/<setting> (default: results/), --limit 5.
+eval.py options, e.g. --output_dir ../results/correlations/<setting> (default:
+results/baselines/, for models that are not trained checkpoints), --limit 5.
 Logs: log/slurm/eval_<job>_<task>.log; the model list is log/slurm/models_<time>.txt.
 EVAL_GPU, EVAL_TIME, MAX_EVAL etc.: see range/common.sh. DEPENDENCY (e.g. afterok:<job>)
 holds the array until another job has finished.

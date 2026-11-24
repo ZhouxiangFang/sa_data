@@ -20,7 +20,7 @@ together (metrics only).
              SELECT_TIME=1-00:00:00), then a CPU job that reruns this command with
              --skip select once the selection succeeds (training is planned from the subsets)
   base       eval.py on the git20k starting models and their official instruct models, into
-             results/ (only those not evaluated yet; the figures' reference bars)
+             results/baselines/ (only those not evaluated yet; the figures' reference bars)
   train      training array, TRAIN_NGPUS x TRAIN_GPU (2 x h200) per job, and an eval array,
              1 x EVAL_GPU per job: task i starts when training task i succeeds (checkpoints are
              kept; DELETE_CKPTS=1 deletes each once evaluated)
@@ -30,9 +30,12 @@ together (metrics only).
              for this seed and, in stage 1, correlate_diversity.py over every seed scored so far
 --response_label_filter refusal keeps only harmful examples whose response is a refusal
 (WildGuardMix); --num_train sets the examples per run (default 1800, a third harmful). Each
-setting has its own folders: ablations/<setting>/, diversity/<setting>/, CKPT_ROOT/seed<seed>/
-<setting>/ (setting_setup in range/common.sh). Rerunning resumes: training skips jobs whose
-checkpoint or results exist, and selection keeps the subsets already saved. Watch: squeue --me
+setting has its own folders: results/correlations/<setting>/ (stage 1) or
+results/selection/<dataset>.../ (stage 2) for the scores, the same tree under
+/scratch/zf28/results for the responses and under figs/ for the figures, and
+CKPT_ROOT/seed<seed>/<setting>/ (setting_setup in range/common.sh). Rerunning resumes: training
+skips jobs whose checkpoint or scores exist, and selection keeps the subsets already saved.
+Watch: squeue --me
 EOF
 }
 
@@ -92,8 +95,7 @@ fi
 if ! skipped base; then
     missing=()
     for model in "${models[@]}" "${models[@]/%_git20k/-ins}"; do
-        [[ -f $ROOT/results/$model/${model}_overall.csv &&
-           -f $ROOT/results/if_eval/${model}_if_summary.csv ]] || missing+=("$model")
+        evaluated "$ROOT/results/baselines/$model.csv" || missing+=("$model")
     done
     if (( ${#missing[@]} == 0 )); then
         echo "Base models already evaluated"
@@ -117,7 +119,7 @@ fi
 if ! skipped diversity; then
     submit_or_echo "diversity_s$seed" python calculate_diversity.py --seeds "$seed" \
         --num_train "$harmful" --response_label_filter "$response_label_filter" \
-        --output_dir "$diversity"
+        --results_dir "$results"
 fi
 
 if ! skipped post; then

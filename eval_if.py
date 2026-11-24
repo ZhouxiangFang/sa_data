@@ -4,9 +4,12 @@ Install the evaluator directly from GitHub:
     python -m pip install "ifbench @ git+https://github.com/allenai/IFBench.git"
 """
 
-import csv
 import json
 import os
+
+import pandas as pd
+
+from helper import percentage, with_average
 
 SCORE_NAMES = ["prompt_strict", "instruction_strict", "prompt_loose", "instruction_loose"]
 MAX_TOKENS = 4096
@@ -90,8 +93,9 @@ def check_response(example, response, loose=False):
     return results
 
 
-def evaluate(benchmark, examples, responses, model_name, model_id):
-    """Strict and loose prompt/instruction accuracy, the same on every call for the same responses.
+def evaluate(benchmark, examples, responses):
+    """Score rows of one benchmark (eval.py's scores CSV, if_<score> metrics in %), the same
+    on every call for the same responses.
 
     Scoring has two random sources, both seeded here per benchmark: checkers draw any
     argument their kwargs leave unset from `random`, and langdetect (the response-language
@@ -108,63 +112,37 @@ def evaluate(benchmark, examples, responses, model_name, model_id):
     for example, response in zip(examples, responses):
         strict.append(check_response(example, response))
         loose.append(check_response(example, response, loose=True))
-    num_prompts = len(examples)
-    num_instructions = sum(map(len, strict))
-    return {
-        "model": model_name,
-        "model_id": model_id,
-        "benchmark": benchmark,
-        "num_prompts": num_prompts,
-        "num_instructions": num_instructions,
-        "prompt_strict": sum(map(all, strict)) / num_prompts,
-        "instruction_strict": sum(map(sum, strict)) / num_instructions,
-        "prompt_loose": sum(map(all, loose)) / num_prompts,
-        "instruction_loose": sum(map(sum, loose)) / num_instructions,
-    }
+    rows = []
+    for mode, results in (("strict", strict), ("loose", loose)):
+        rows += [{"metric": f"if_prompt_{mode}", "test_set": benchmark, "n": len(results),
+                  "count": sum(map(all, results))},
+                 {"metric": f"if_instruction_{mode}", "test_set": benchmark,
+                  "n": sum(map(len, results)), "count": sum(map(sum, results))}]
+    for row in rows:
+        row["score"] = percentage(row["count"], row["n"])
+    return rows
 
 
-def add_average(rows):
-    """Append the unweighted average of the benchmarks."""
-    rows.append({
-        "model": rows[0]["model"],
-        "model_id": rows[0]["model_id"],
-        "benchmark": "Average",
-        "num_prompts": sum(row["num_prompts"] for row in rows),
-        "num_instructions": sum(row["num_instructions"] for row in rows),
-        **{name: sum(row[name] for row in rows) / len(rows) for name in SCORE_NAMES},
-    })
-
-
-def write_csv(path, columns, rows):
-    with open(path, "w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=columns)
-        writer.writeheader()
-        writer.writerows(rows)
-    print(f"Saved: {path}")
-
-
-def run(llm, tokenizer, model_name, model_id, output_dir, prefix, limit=None):
-    """Generate, score and save <prefix>_if_{summary,responses}.csv in output_dir."""
-    rows, response_rows = [], []
+def run(llm, tokenizer, output_dir, limit=None):
+    """Generate and score IFBench and IFEval; save benchmark, prompt and generated_response
+    (in the benchmarks' order) to <output_dir>/if_responses.csv and return the score rows:
+    each benchmark's and their unweighted mean (Avg)."""
+    rows, tables = [], []
     for benchmark, examples in load_benchmarks(limit).items():
         print(f"\nEvaluating {benchmark} ({len(examples)} prompts)")
         responses = generate(llm, tokenizer, examples)
-        response_rows.extend(
-            {"prompt": example["prompt"], "responses": response, "prompt_source": benchmark}
-            for example, response in zip(examples, responses)
-        )
-        rows.append(evaluate(benchmark, examples, responses, model_name, model_id))
-    add_average(rows)
-
+        rows += evaluate(benchmark, examples, responses)
+        tables.append(pd.DataFrame({"benchmark": benchmark,
+                                    "prompt": [example["prompt"] for example in examples],
+                                    "generated_response": responses}))
+    rows = [row for name in SCORE_NAMES
+            for row in with_average([row for row in rows if row["metric"] == f"if_{name}"])]
     print("\nPrompt-level loose accuracy (the primary IFBench metric):")
     for row in rows:
-        print(f"  {row['benchmark']:<8} {row['prompt_loose'] * 100:6.2f}%")
+        if row["metric"] == "if_prompt_loose":
+            print(f"  {row['test_set']:<8} {row['score']:6.2f}%")
     os.makedirs(output_dir, exist_ok=True)
-    write_csv(
-        os.path.join(output_dir, f"{prefix}_if_summary.csv"),
-        ["model", "model_id", "benchmark", "num_prompts", "num_instructions", *SCORE_NAMES],
-        ({**row, **{name: f"{row[name]:.4f}" for name in SCORE_NAMES}} for row in rows),
-    )
-    write_csv(os.path.join(output_dir, f"{prefix}_if_responses.csv"),
-              ["prompt", "responses", "prompt_source"], response_rows)
+    path = os.path.join(output_dir, "if_responses.csv")
+    pd.concat(tables, ignore_index=True).to_csv(path, index=False)
+    print(f"Saved: {path}")
     return rows

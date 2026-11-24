@@ -2,7 +2,7 @@
 
     python calculate_diversity.py --seeds 43 86 129
     python calculate_diversity.py --seeds 43 --response_label_filter refusal --num_train 500 \
-        --output_dir ../diversity/refusal_500
+        --results_dir ../results/correlations/refusal_500
 
 Scores the very examples each run trained on: helper.harmful_sample reads the seed's sample file
 (data/train_samples/seed<seed>/wildguardmix[_refusal]/<abbr>_<n>.jsonl) or draws and saves it
@@ -25,10 +25,12 @@ fine-grained tags (en_core_web_sm), joined by spaces for embedding. Embeddings a
 Tags and embeddings cover the whole eligible pool, so no value depends on which seeds or groups
 are scored together.
 
-Per embedding model (default BAAI/bge-m3 and Qwen/Qwen3-Embedding-0.6B):
-  <output_dir>/seed<seed>/<embedder>/csv/wildguardmix_diversity_<n>.csv   one row per group
-  <output_dir>/<embedder>/csv/wildguardmix_diversity_<n>.csv   mean over every seed scored so
-                                                                far (its seeds column lists them)
+Per embedding model (default BAAI/bge-m3 and Qwen/Qwen3-Embedding-0.6B), in the setting's
+scores folder (--results_dir, default results/correlations/default; another --num_train or
+--response_label_filter needs its own, as range/common.sh's setting_setup names it):
+  <results_dir>/diversity/<embedder>/seed<seed>.csv   one row per group
+  <results_dir>/diversity/<embedder>/mean.csv         mean over every seed scored so far (its
+                                                      seeds column lists them)
 The lexical and POS n-gram metrics use no embedding and are the same in every embedder's CSV.
 """
 
@@ -45,10 +47,10 @@ from scipy.stats import hypergeom
 from sklearn import preprocessing
 from sklearn.cluster import KMeans
 
-from helper import (BASELINE_ABBRS, DATASET, DEFAULT_SEED, ROOT, TRAIN_SAMPLES_DIR,
+from helper import (BASELINE_ABBRS, DATASET, DEFAULT_SEED, STAGE1_DIR, TRAIN_SAMPLES_DIR,
                     add_pool_argument, eligible_rows, harmful_pool, harmful_sample,
-                    insert_seed_dir, load_train, model_mapping, sample_digest,
-                    subcategory_stats, training_groups)
+                    load_train, model_mapping, sample_digest, seed_dir, subcategory_stats,
+                    training_groups)
 
 EMBEDDING_MODEL_IDS = ("BAAI/bge-m3", "Qwen/Qwen3-Embedding-0.6B")
 EXAMPLES_PER_CLUSTER = 50  # NovelSum's k-means granularity: 12 clusters for 600 prompts
@@ -68,12 +70,10 @@ def embedding_name(model_id):
     return model_id.rstrip("/").split("/")[-1].lower()
 
 
-def diversity_csv(root, embedder, num_train, seed=None):
-    """The mean CSV of an embedder, or with seed that seed's CSV."""
-    folder = Path(root) / embedder
-    if seed is not None:
-        folder = insert_seed_dir(folder, seed)
-    return folder / "csv" / f"{DATASET}_diversity_{num_train}.csv"
+def diversity_csv(results_dir, embedder, seed=None):
+    """The mean CSV of an embedder in a setting's scores folder, or with seed that seed's CSV."""
+    return (Path(results_dir) / "diversity" / embedder
+            / (f"{seed_dir(seed)}.csv" if seed is not None else "mean.csv"))
 
 
 def hdd(seqs, draws=HDD_DRAWS):
@@ -243,9 +243,14 @@ def main():
                         help="Tokenizer that checks prompt lengths, as in training")
     parser.add_argument("--embedding_models", nargs="+", default=list(EMBEDDING_MODEL_IDS))
     parser.add_argument("--samples_dir", type=Path, default=TRAIN_SAMPLES_DIR)
-    parser.add_argument("--output_dir", type=Path, default=ROOT / "diversity")
+    parser.add_argument("--results_dir", type=Path,
+                        help="The setting's scores folder (default: results/correlations/default)")
     parser.add_argument("--num_proc", type=int, default=8, help="POS-tagging processes")
     args = parser.parse_args()
+    if args.results_dir is None:
+        if args.num_train != 600 or args.response_label_filter != "safe":
+            parser.error("another --num_train or --response_label_filter needs --results_dir")
+        args.results_dir = STAGE1_DIR
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_mapping.get(args.model, args.model))
@@ -288,13 +293,13 @@ def main():
         result = result[[*result.columns.drop(list(METRICS)), *METRICS]].round(6)
         name = embedding_name(model_id)
         for seed, seed_rows in result.groupby("seed", sort=False):
-            path = diversity_csv(args.output_dir, name, args.num_train, seed)
+            path = diversity_csv(args.results_dir, name, seed)
             path.parent.mkdir(parents=True, exist_ok=True)
             seed_rows.to_csv(path, index=False)
             print(f"Saved {path}")
         # The mean covers every seed scored so far, so seeds can be scored one job at a time.
-        mean_csv = diversity_csv(args.output_dir, name, args.num_train)
-        seed_csvs = sorted(args.output_dir.glob(f"seed*/{name}/csv/{mean_csv.name}"))
+        mean_csv = diversity_csv(args.results_dir, name)
+        seed_csvs = sorted(mean_csv.parent.glob("seed*.csv"))
         means = seed_means(pd.concat([pd.read_csv(path) for path in seed_csvs],
                                      ignore_index=True))
         mean_csv.parent.mkdir(parents=True, exist_ok=True)

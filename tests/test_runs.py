@@ -1,5 +1,9 @@
 """Training and diversity draw the same examples; correlations pair each run with its sample."""
 
+import contextlib
+import io
+import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -13,7 +17,9 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import calculate_diversity as cd
 import correlate_diversity as corr
+import eval as evaluation
 import helper
+import train_jobs
 
 STATS = {name: {"abbr": name} for name in ("a", "b", "c", "benign")}
 
@@ -96,6 +102,8 @@ class PoolTests(unittest.TestCase):
                         "random", seed, FakeTokenizer(), 12, flt, samples_dir=samples,
                         train_df=self.df.iloc[::-1], benign_pool=benign, general_pool=general)
                     self.assertEqual(info["files"]["harmful"], path)
+                    self.assertEqual(info["files"], helper.run_files(
+                        "random", seed, 12, flt, samples_dir=samples))
                     harmful = mixture[mixture["prompt"].str.endswith("please")]
                     self.assertEqual(sorted(harmful["prompt"]), sorted(drawn["prompt"]))
                     self.assertEqual(len(mixture), 12)
@@ -109,6 +117,42 @@ class PoolTests(unittest.TestCase):
             first = helper.read_sample(samples / "seed43" / "wildguardmix" / "random_4.jsonl")
             second = helper.read_sample(samples / "seed86" / "wildguardmix" / "random_4.jsonl")
             self.assertNotEqual(first["prompt"].tolist(), second["prompt"].tolist())
+
+    def test_fingerprints_follow_the_data_and_settings_and_mark_stale_runs(self):
+        settings = {"epochs": 2, "learning_rate": 1e-5, "effective_batch_size": 32,
+                    "max_length": 4096}
+        complete = [{"metric": metric, "test_set": "Avg", "score": 1.0}
+                    for metric in ("harmful", "overrefusal", "if_prompt_loose")]
+        with tempfile.TemporaryDirectory() as directory, \
+                contextlib.redirect_stdout(io.StringIO()):
+            root = Path(directory)
+            files = helper.run_files("b", 43, 12, samples_dir=root)
+            self.assertIsNone(helper.run_fingerprint("m", 43, files, settings))  # not drawn yet
+            for path in files.values():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(path.name)
+            fingerprint = helper.run_fingerprint("m", 43, files, settings)
+            self.assertEqual(fingerprint, helper.run_fingerprint("m", 43, files, dict(settings)))
+            self.assertNotEqual(fingerprint, helper.run_fingerprint(
+                "m", 43, files, {**settings, "learning_rate": 5e-6}))
+            self.assertNotEqual(fingerprint, helper.run_fingerprint("m", 86, files, settings))
+            files["harmful"].write_text("other subset")
+            self.assertNotEqual(fingerprint, helper.run_fingerprint("m", 43, files, settings))
+
+            checkpoint, scores = root / "ckpt", root / "scores.csv"
+            self.assertEqual(train_jobs.status(checkpoint, scores, fingerprint), "train")
+            checkpoint.mkdir()
+            for name in ("config.json", "tokenizer_config.json"):
+                (checkpoint / name).write_text("{}")
+            (checkpoint / helper.RUN_FILE).write_text(json.dumps({"fingerprint": fingerprint}))
+            self.assertEqual(train_jobs.status(checkpoint, scores, fingerprint), "saved")
+            self.assertEqual(train_jobs.status(checkpoint, scores, "other"), "stale")
+            self.assertEqual(train_jobs.status(checkpoint, scores, None), "stale")
+            evaluation.save_scores(scores, complete, fingerprint)
+            self.assertEqual(train_jobs.status(checkpoint, scores, fingerprint), "done")
+            shutil.rmtree(checkpoint)  # deleted after evaluation: still done
+            self.assertEqual(train_jobs.status(checkpoint, scores, fingerprint), "done")
+            self.assertEqual(train_jobs.status(checkpoint, scores, "other"), "stale")
 
     def test_a_sample_file_must_match_the_pool_and_tokenizer(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -130,8 +174,9 @@ class PoolTests(unittest.TestCase):
                          "llama3.1_git20k_1800_wildguardmix_toxic_seed43")
         self.assertEqual(helper.mixture_counts(1800), (600, 600, 600))
         self.assertEqual(helper.mixture_counts(1500), (500, 500, 500))
-        self.assertEqual(cd.diversity_csv("D", "bge-m3", 600, 86),
-                         Path("D/seed86/bge-m3/csv/wildguardmix_diversity_600.csv"))
+        self.assertEqual(cd.diversity_csv("D", "bge-m3", 86),
+                         Path("D/diversity/bge-m3/seed86.csv"))
+        self.assertEqual(cd.diversity_csv("D", "bge-m3"), Path("D/diversity/bge-m3/mean.csv"))
 
 
 class CorrelationTests(unittest.TestCase):
@@ -152,13 +197,13 @@ class CorrelationTests(unittest.TestCase):
                     for seed in (43, 86):
                         if model == "m2_git20k" and abbr == "c" and seed == 86:
                             continue  # not evaluated
-                        run = root / f"seed{seed}" / f"{model}_1800_wildguardmix" / f"wildguardmix_{abbr}"
-                        run.mkdir(parents=True)
-                        pd.DataFrame({"dataset": ["aegis", "Avg"],
-                                      "harmful_score_pct": [0.0, score + shift + (seed == 86) * 2]}
-                                     ).to_csv(run / f"wildguardmix_{abbr}_overall.csv", index=False)
-            runs = corr.load_runs(root, 1800, ["m1_git20k", "m2_git20k"], ["a", "b", "c"],
-                                  [43, 86])
+                        harmful = score + shift + (seed == 86) * 2
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            evaluation.save_scores(
+                                evaluation.run_csv(root, model, abbr, seed),
+                                [{"metric": "harmful", "test_set": "aegis", "score": 0.0},
+                                 {"metric": "harmful", "test_set": "Avg", "score": harmful}])
+            runs = corr.load_runs(root, ["m1_git20k", "m2_git20k"], ["a", "b", "c"], [43, 86])
         self.assertEqual(len(runs), 11)
         by_seed, points = corr.pair(runs, self.diversity())
         point = points.query("model == 'm1' and abbr == 'a'").iloc[0]

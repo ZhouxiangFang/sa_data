@@ -67,39 +67,38 @@ class OverrefusalTests(unittest.TestCase):
             "Harmful response: no",
         )]
         with patch.dict(sys.modules, {"vllm": SimpleNamespace(SamplingParams=Mock())}):
-            refusals = eval_safe.evaluate_safety(
-                guard, ["prompt"] * 4, ["answer"] * 4, overrefusal=True
-            )
-            guard.generate.assert_called_once()
-            harmful = eval_safe.evaluate_safety(
-                guard, ["prompt"] * 4, ["answer"] * 4
-            )
-        self.assertEqual(refusals, ([1, 0, None, None], 2))
-        self.assertEqual(harmful, ([0, 1, 0, 0], 0))
+            labels = eval_safe.evaluate_safety(guard, ["prompt"] * 4, ["answer"] * 4)
+        guard.generate.assert_called_once()
+        self.assertEqual(labels, {"is_harmful_request": [0, 0, None, None],
+                                  "is_refusal": [1, 0, None, None],
+                                  "is_unsafe": [0, 1, 0, 0]})
 
     def test_rates_exclude_missing_labels_and_macro_average(self):
         datasets = {
             "xstest": responses([1, 0, None]),
             "or-bench-hard": responses([1, 1, 1, 0]),
         }
-        result = eval_safe.overall_results(datasets, overrefusal=True).set_index("dataset")
-        self.assertEqual(result.loc["xstest", "total"], 2)
+        result = pd.DataFrame(eval_safe.score_rows(datasets)).set_index("test_set")
+        self.assertEqual(result["metric"].unique().tolist(), ["overrefusal"])
+        self.assertEqual(result.loc["xstest", "n"], 2)
         self.assertEqual(result.loc["xstest", "na_responses"], 1)
-        self.assertEqual(result["overrefusal_score_pct"].tolist(), ["50.0000", "75.0000", "62.5000"])
-        breakdown = eval_safe.subcategory_results("xstest", datasets["xstest"], overrefusal=True)
-        self.assertEqual(breakdown["count"].tolist(), [2, 2])
-        self.assertEqual(breakdown["refusals"].tolist(), [1, 1])
-        self.assertEqual(breakdown["overrefusal_score_pct"].tolist(), ["50.0000", "50.0000"])
+        self.assertEqual(result["score"].tolist(), [50, 75, 62.5])
+        self.assertEqual(result.loc["Avg", ["n", "count", "na_responses"]].tolist(), [6, 4, 1])
+        breakdown = eval_safe.subcategory_results("xstest", datasets["xstest"])
+        self.assertEqual(breakdown["subcategory"].tolist(), ["overall", "category"])
+        self.assertEqual(breakdown["n"].tolist(), [2, 2])
+        self.assertEqual(breakdown["count"].tolist(), [1, 1])
+        self.assertEqual(breakdown["score"].tolist(), [50, 50])
 
     def test_no_valid_labels_is_not_zero_refusal(self):
         for labels in ([None, None], []):
             with self.subTest(labels=labels):
                 dataset = responses(labels)
-                result = eval_safe.overall_results({"xstest": dataset}, overrefusal=True)
-                self.assertTrue(pd.isna(float(result.iloc[0]["overrefusal_score_pct"])))
-                self.assertEqual(result.iloc[0]["na_responses"], len(labels))
-                breakdown = eval_safe.subcategory_results("xstest", dataset, overrefusal=True)
-                self.assertTrue(pd.isna(float(breakdown.iloc[0]["overrefusal_score_pct"])))
+                rows = eval_safe.score_rows({"xstest": dataset})
+                self.assertTrue(pd.isna(rows[0]["score"]) and pd.isna(rows[-1]["score"]))
+                self.assertEqual(rows[0]["na_responses"], len(labels))
+                breakdown = eval_safe.subcategory_results("xstest", dataset)
+                self.assertTrue(pd.isna(breakdown.iloc[0]["score"]))
 
     def test_saved_safety_and_overrefusal_reports_are_separate(self):
         datasets = {
@@ -108,15 +107,16 @@ class OverrefusalTests(unittest.TestCase):
             "or-bench-hard": responses([0]),
         }
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
-            eval_safe.save_results(datasets, directory, "model")
+            rows = pd.DataFrame(eval_safe.save_results(datasets, directory))
             root = Path(directory)
-            safety = pd.read_csv(root / "model_overall.csv")
-            self.assertEqual(safety["dataset"].tolist(), ["ailuminate", "Avg"])
-            self.assertEqual(safety["harmful_score_pct"].tolist(), [50, 50])
-            overrefusal = pd.read_csv(root / "model_overrefusal.csv")
-            self.assertEqual(overrefusal["dataset"].tolist(), ["xstest", "or-bench-hard", "Avg"])
-            self.assertEqual(overrefusal["overrefusal_score_pct"].tolist(), [50, 0, 25])
-            saved = pd.read_csv(root / "model_xstest_responses.csv")
+            safety = rows[rows["metric"] == "harmful"]
+            self.assertEqual(safety["test_set"].tolist(), ["ailuminate", "Avg"])
+            self.assertEqual(safety["score"].tolist(), [50, 50])
+            overrefusal = rows[rows["metric"] == "overrefusal"]
+            self.assertEqual(overrefusal["test_set"].tolist(), ["xstest", "or-bench-hard", "Avg"])
+            self.assertEqual(overrefusal["score"].tolist(), [50, 0, 25])
+            self.assertEqual(overrefusal["na_responses"].tolist(), [1, 0, 1])
+            saved = pd.read_csv(root / "xstest_responses.csv")
             self.assertEqual(saved["is_refusal"].iloc[:2].tolist(), [1, 0])
             self.assertTrue(pd.isna(saved["is_refusal"].iloc[2]))
             self.assertNotIn("is_unsafe", saved)
@@ -143,15 +143,14 @@ class OverrefusalTests(unittest.TestCase):
             subcategory=["a", "b", "benign", "b"],
         )
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
-            eval_safe.save_results({"wildguardmix": dataset}, directory, "model")
+            rows = eval_safe.save_results({"wildguardmix": dataset}, directory)
             root = Path(directory)
-            overall = pd.read_csv(root / "model_overall.csv").set_index("dataset")
-            self.assertEqual(overall.loc["wildguardmix", "total"], 2)
-            self.assertEqual(overall.loc["wildguardmix", "harmful"], 1)
-            breakdown = pd.read_csv(root / "model_wildguardmix.csv")
+            self.assertEqual((rows[0]["test_set"], rows[0]["n"], rows[0]["count"]),
+                             ("wildguardmix", 2, 1))
+            breakdown = pd.read_csv(root / "wildguardmix_subcategories.csv")
             self.assertEqual(breakdown["subcategory"].tolist(), ["overall", "a", "b"])
             # Benign and unlabeled prompts are still saved with their type.
-            saved = pd.read_csv(root / "model_wildguardmix_responses.csv")
+            saved = pd.read_csv(root / "wildguardmix_responses.csv")
             self.assertEqual(saved["prompt_type"].tolist(),
                              ["harmful", "harmful", "benign", "unknown"])
             self.assertEqual(saved["is_unsafe"].tolist(), [1, 0, 0, 1])
@@ -217,12 +216,62 @@ class EvalMainTests(unittest.TestCase):
             model.reset_prefix_cache.assert_called_once()
             self.assertEqual(generate.call_count, 2)  # one call per test set
             self.assertEqual(guard.generate.call_count, 2)
-            for path in evaluation.result_files(directory, checkpoint.name):
-                self.assertTrue(Path(path).exists(), path)
-            summary = pd.read_csv(Path(directory) / "seed43/if_eval/olmo2_git20k_1800_wildguardmix"
-                                  / "wildguardmix_toxic_if_summary.csv")
-            self.assertEqual(summary["benchmark"].tolist(), ["IFBench", "IFEval", "Average"])
-            self.assertEqual(summary["num_prompts"].tolist(), [1, 2, 3])
+            scores_csv, responses = evaluation.result_paths(directory, checkpoint.name)
+            self.assertEqual(scores_csv, Path(directory) / "seed43/olmo2_git20k/toxic.csv")
+            self.assertTrue(evaluation.evaluated(scores_csv))
+            scores = pd.read_csv(scores_csv)
+            loose = scores[scores["metric"] == "if_prompt_loose"]
+            self.assertEqual(loose["test_set"].tolist(), ["IFBench", "IFEval", "Avg"])
+            self.assertEqual(loose["n"].tolist(), [1, 2, 3])
+            self.assertEqual(scores["metric"].unique().tolist(), evaluation.METRIC_ORDER)
+            for name in ("if_responses.csv", "ailuminate_responses.csv",
+                         "xstest_subcategories.csv"):
+                self.assertTrue((responses / name).exists(), name)
+            saved = pd.read_csv(responses / "xstest_responses.csv")
+            self.assertEqual(saved.columns.tolist(),
+                             ["prompt", "subcategory", "prompt_type", "generated_response",
+                              *eval_safe.GUARD_LABELS])
+            self.assertEqual(saved["is_refusal"].tolist(), [1, 1])
+            self.assertTrue(saved["is_harmful_request"].isna().all())  # not in judge_text
+            self.assertEqual(pd.read_csv(responses / "if_responses.csv").columns.tolist(),
+                             ["benchmark", "prompt", "generated_response"])
+
+    def test_a_partial_evaluation_keeps_the_other_scores(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "m.csv"
+            with contextlib.redirect_stdout(io.StringIO()):
+                evaluation.save_scores(path, [
+                    {"metric": "if_prompt_loose", "test_set": "Avg", "n": 3, "count": 1,
+                     "score": 100 / 3},
+                    {"metric": "harmful", "test_set": "Avg", "n": 4, "count": 1,
+                     "na_responses": 0, "score": 25.0}])
+                self.assertFalse(evaluation.evaluated(path))
+                evaluation.save_scores(path, [
+                    {"metric": "harmful", "test_set": "Avg", "n": 4, "count": 2,
+                     "na_responses": 0, "score": 50.0},
+                    {"metric": "overrefusal", "test_set": "Avg", "n": 2, "count": 0,
+                     "na_responses": 1, "score": 0.0}])
+            self.assertTrue(evaluation.evaluated(path))
+            scores = evaluation.read_scores(path)
+            self.assertEqual(scores.index.get_level_values("metric").tolist(),
+                             ["harmful", "overrefusal", "if_prompt_loose"])
+            self.assertEqual(scores["harmful", "Avg"], 50.0)
+            self.assertAlmostEqual(scores["if_prompt_loose", "Avg"], 33.3333)
+            self.assertIn("if_prompt_loose,Avg,3,1,,33.3333,", path.read_text())
+            # A checkpoint with another fingerprint replaces every row; digits stay text.
+            with contextlib.redirect_stdout(io.StringIO()):
+                evaluation.save_scores(path, [{"metric": "harmful", "test_set": "Avg",
+                                               "score": 10.0}], "012345678901")
+            self.assertEqual(evaluation.read_table(path)["fingerprint"].tolist(),
+                             ["012345678901"])
+            self.assertFalse(evaluation.evaluated(path))
+
+    def test_a_checkpoint_needs_its_settings_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "olmo2_git20k_1800_wildguardmix_toxic_seed43"
+            checkpoint.mkdir()
+            with self.assertRaisesRegex(SystemExit, "needs --output_dir"):
+                evaluation.main(["--model", str(checkpoint)])
 
     def test_refuses_a_vllm_that_ignores_batch_invariance(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -258,19 +307,31 @@ class EvalMainTests(unittest.TestCase):
             for state in (1, 2, 3):
                 random.seed(state)
                 DetectorFactory.seed = None
-                scores.append(eval_if.evaluate("IFEval", [example] * 50, ["r"] * 50, "m", "m"))
+                scores.append(eval_if.evaluate("IFEval", [example] * 50, ["r"] * 50))
                 self.assertEqual(DetectorFactory.seed, eval_if.SCORING_SEED)
         self.assertEqual(scores[0], scores[1])
         self.assertEqual(scores[0], scores[2])
 
-    def test_result_folders(self):
+    def test_result_paths(self):
         self.assertEqual(
-            evaluation.result_dirs("R", "olmo2_git20k_1800_wildguardmix_material_harm_seed86"),
-            ("R/seed86/olmo2_git20k_1800_wildguardmix/wildguardmix_material_harm",
-             "R/seed86/if_eval/olmo2_git20k_1800_wildguardmix", "wildguardmix_material_harm"))
+            evaluation.result_paths("R", "olmo2_git20k_1800_wildguardmix_material_harm_seed86"),
+            (Path("R/seed86/olmo2_git20k/material_harm.csv"),
+             Path("R/seed86/olmo2_git20k/material_harm")))
         # Instruct and git20k models are not trained runs.
-        self.assertEqual(evaluation.result_dirs("R", "olmo2-ins"),
-                         ("R/olmo2-ins", "R/if_eval", "olmo2-ins"))
+        self.assertEqual(evaluation.result_paths("R", "olmo2-ins"),
+                         (Path("R/olmo2-ins.csv"), Path("R/olmo2-ins")))
+        # In results/, the responses go to the same path on /scratch and figures to figs/.
+        setting = helper.RESULTS_DIR / "selection" / "wildjailbreak"
+        self.assertEqual(
+            evaluation.result_paths(setting, "qwen3_git20k_1800_wildjailbreak_semantic_vendi_"
+                                             "qwen3-embedding-0.6b_seed43"),
+            (setting / "seed43/qwen3_git20k/semantic_vendi_qwen3-embedding-0.6b.csv",
+             helper.RESPONSES_DIR / "selection/wildjailbreak/seed43/qwen3_git20k"
+             / "semantic_vendi_qwen3-embedding-0.6b"))
+        self.assertEqual(evaluation.result_paths(helper.BASELINES_DIR, "olmo2-ins")[1],
+                         helper.RESPONSES_DIR / "baselines/olmo2-ins")
+        self.assertEqual(helper.figs_dir(helper.STAGE1_DIR),
+                         helper.FIGS_DIR / "correlations/default")
         self.assertEqual(evaluation.resolve_model("llama3.1_git20k"),
                          ("FocusV857/llama3.1_git20k", "llama3.1_git20k"))
 

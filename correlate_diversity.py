@@ -1,12 +1,12 @@
 """Correlate training-data diversity with the trained models' harmful score.
 
     python correlate_diversity.py
-    python correlate_diversity.py --results_dir ../ablations/refusal --diversity_dir ../diversity/refusal
+    python correlate_diversity.py --results_dir ../results/correlations/refusal
 
-A run's harmful score is the Avg row of its <results_dir>/seed<S>/<model>_<num_train>_wildguardmix/
-wildguardmix_<abbr>/wildguardmix_<abbr>_overall.csv: the mean harmful-response rate over the five
-harm test sets (eval.py). Each run is paired with the diversity of its own training sample (same
-group and seed: <diversity_dir>/seed<S>/<embedder>/csv/, from calculate_diversity.py). A point is
+A run's harmful score is the harmful Avg row of its scores CSV,
+<results_dir>/seed<S>/<model>/<abbr>.csv: the mean harmful-response rate over the five harm test
+sets (eval.py). Each run is paired with the diversity of its own training sample (same group and
+seed: <results_dir>/diversity/<embedder>/seed<S>.csv, from calculate_diversity.py). A point is
 one training group (subcategory, random or evenly):
   <model>   that model's harmful score and the diversity, averaged over its seeds
   Average   the models' mean harmful score per group and seed (only where every model has the
@@ -16,13 +16,14 @@ on the seed-mean points (seed "mean") and on each seed's points alone (seed <S>)
 is negated first, so for every metric a negative coefficient means more diverse training data,
 less harmful model.
 
-Writes to <diversity_dir>/summary/:
-  wildguardmix_<n>_correlations.csv  every coefficient with its p-value and point count
-  wildguardmix_<n>_points.csv        the seed-mean points
-  wildguardmix_<n>_<embedder>.png    Average model: harmful score vs each metric (seed means;
-                                     error bars: SD across seeds)
-  wildguardmix_<n>_correlations.png  Average model, per metric and embedder: mean over seeds of
-                                     the per-seed (Pearson + Spearman) / 2, whiskers ±1 SD
+Writes <results_dir>/correlations.csv (every coefficient with its p-value and point count) and,
+to the setting's figs/ folder (helper.figs_dir, e.g. figs/correlations/default/):
+  points.csv                    the seed-mean points the scatter plots show
+  diversity_vs_harmful_<embedder>.png
+                                Average model: harmful score vs each metric (seed means; error
+                                bars: SD across seeds)
+  correlations.png              Average model, per metric and embedder: mean over seeds of the
+                                per-seed (Pearson + Spearman) / 2, whiskers ±1 SD
 """
 
 import argparse
@@ -40,7 +41,8 @@ import pandas as pd
 from scipy.stats import pearsonr, spearmanr
 
 from calculate_diversity import EMBEDDING_MODEL_IDS, METRICS, diversity_csv, embedding_name
-from helper import BASELINE_ABBRS, DATASET, GIT20K_MODELS, ROOT, mixture_counts, seed_dir
+from eval import read_scores, run_csv
+from helper import BASELINE_ABBRS, GIT20K_MODELS, STAGE1_DIR, figs_dir
 
 LABELS = {
     "lexical_hdd↑": "HD-D", "lexical_distinct_2↑": "Distinct-2",
@@ -65,27 +67,30 @@ def sign(metric):
     return -1 if metric.endswith("↓") else 1
 
 
-def load_diversity(diversity_dir, embedder, harmful_count):
+def seed_csvs(results_dir, embedder):
+    """Every scored seed's diversity CSV of one embedder."""
+    return sorted(diversity_csv(results_dir, embedder).parent.glob("seed*.csv"))
+
+
+def load_diversity(results_dir, embedder):
     """Every scored seed's rows of one embedder, with a seed column."""
-    name = diversity_csv(diversity_dir, embedder, harmful_count).name
-    paths = sorted(Path(diversity_dir).glob(f"seed*/{embedder}/csv/{name}"))
-    return pd.concat([pd.read_csv(path) for path in paths], ignore_index=True)
+    return pd.concat([pd.read_csv(path) for path in seed_csvs(results_dir, embedder)],
+                     ignore_index=True)
 
 
-def load_runs(results_dir, num_train, models, abbrs, seeds):
-    """One row per evaluated run: model, abbr, seed, harmful (Avg harmful_score_pct)."""
+def load_runs(results_dir, models, abbrs, seeds):
+    """One row per evaluated run: model, abbr, seed, harmful (the harmful Avg score)."""
     rows = []
     for seed in seeds:
         for model in models:
             for abbr in abbrs:
-                group = f"{DATASET}_{abbr}"
-                path = (Path(results_dir) / seed_dir(seed) / f"{model}_{num_train}_{DATASET}"
-                        / group / f"{group}_overall.csv")
-                if path.exists():
-                    table = pd.read_csv(path).set_index("dataset")
+                path = run_csv(results_dir, model, abbr, seed)
+                if not path.exists():
+                    continue
+                scores = read_scores(path)
+                if ("harmful", "Avg") in scores.index:
                     rows.append({"model": model.removesuffix("_git20k"), "abbr": abbr,
-                                 "seed": seed, "harmful": float(table.loc["Avg",
-                                                                          "harmful_score_pct"])})
+                                 "seed": seed, "harmful": float(scores["harmful", "Avg"])})
     return pd.DataFrame(rows, columns=["model", "abbr", "seed", "harmful"])
 
 
@@ -235,29 +240,22 @@ def plot_seed_bars(table, embedders, title, path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--results_dir", type=Path, default=ROOT / "results")
-    parser.add_argument("--diversity_dir", type=Path, default=ROOT / "diversity")
-    parser.add_argument("--num_train", type=int, default=1800,
-                        help="Examples per run (a third are the harmful sample)")
+    parser.add_argument("--results_dir", type=Path, default=STAGE1_DIR,
+                        help="The setting's scores folder (default: results/correlations/default)")
     parser.add_argument("--models", nargs="+", default=list(GIT20K_MODELS))
     args = parser.parse_args()
-    harmful_count = mixture_counts(args.num_train)[0]
-    output_dir = args.diversity_dir / "summary"
+    output_dir = figs_dir(args.results_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{DATASET}_{harmful_count}"
-    embedders = [embedder for embedder in EMBEDDERS
-                 if (args.diversity_dir / embedder / "csv"
-                     / diversity_csv("", embedder, harmful_count).name).exists()]
+    embedders = [embedder for embedder in EMBEDDERS if seed_csvs(args.results_dir, embedder)]
     if not embedders:
-        parser.error(f"No {stem} diversity CSVs in {args.diversity_dir}; "
+        parser.error(f"No diversity CSVs in {args.results_dir / 'diversity'}; "
                      "run calculate_diversity.py first")
 
     tables, all_points = [], []
     for embedder in embedders:
-        diversity = load_diversity(args.diversity_dir, embedder, harmful_count)
+        diversity = load_diversity(args.results_dir, embedder)
         seeds = sorted(diversity["seed"].unique())
-        runs = load_runs(args.results_dir, args.num_train, args.models,
-                         diversity["abbr"].unique(), seeds)
+        runs = load_runs(args.results_dir, args.models, diversity["abbr"].unique(), seeds)
         if runs.empty:
             parser.error(f"No evaluated runs in {args.results_dir} for seeds {seeds}")
         by_seed, points = pair(runs, diversity)
@@ -275,14 +273,14 @@ def main():
                  f"models ({EMBEDDERS[embedder]} embeddings; points: means over seeds "
                  f"{', '.join(map(str, seeds))})")
         plot_scatter(points, table, textwrap.fill(title, 120),
-                     output_dir / f"{stem}_{embedder}.png")
+                     output_dir / f"diversity_vs_harmful_{embedder}.png")
 
     table = pd.concat(tables, ignore_index=True)
     table = table[["embedder", "model", "metric", "method", "seed", "n_groups", "coefficient",
                    "p_value"]]
-    table.to_csv(output_dir / f"{stem}_correlations.csv", index=False, float_format="%.4f")
-    pd.concat(all_points, ignore_index=True).to_csv(output_dir / f"{stem}_points.csv",
-                                                    index=False, float_format="%.6g")
+    table.to_csv(args.results_dir / "correlations.csv", index=False, float_format="%.4f")
+    pd.concat(all_points, ignore_index=True).to_csv(output_dir / "points.csv", index=False,
+                                                    float_format="%.6g")
     summary = (table[(table["model"] == "Average") & (table["seed"] == "mean")]
                .pivot_table(index="metric", columns=["embedder", "method"], values="coefficient")
                .reindex(list(METRICS)))
@@ -290,8 +288,8 @@ def main():
     print(summary.round(3).to_string())
     plot_seed_bars(table, embedders, "Training-data diversity vs. harmful score (average model). "
                    "Negative = more diverse, less harmful.",
-                   output_dir / f"{stem}_correlations.png")
-    print(f"Saved {output_dir / f'{stem}_correlations.csv'} and {stem}_points.csv")
+                   output_dir / "correlations.png")
+    print(f"Saved {args.results_dir / 'correlations.csv'} and {output_dir / 'points.csv'}")
 
 
 if __name__ == "__main__":
