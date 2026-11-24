@@ -27,7 +27,9 @@ DATA_DIR = ROOT / "data"
 TRAIN_SAMPLES_DIR = DATA_DIR / "train_samples"
 GENERAL_DATASET = DATA_DIR / "git_data_20k.csv"
 
-DATASET = "wildguardmix"  # the training dataset
+DATASET = "wildguardmix"  # stage 1's training dataset
+# Stage 2: the datasets select_data.py selects harmful subsets from.
+SELECTION_DATASETS = ("wildguardmix", "wildjailbreak", "alert_dpo", "nemotron")
 DEFAULT_SEED = 43
 DEFAULT_NUM_TRAIN = 1800
 DEFAULT_MAX_LENGTH = 4096
@@ -95,9 +97,10 @@ def filename_component(value):
     return re.sub(r"[^A-Za-z0-9._-]+", "-", str(value)).strip("-._") or "run"
 
 
-def checkpoint_name(model, num_train, abbr, seed):
-    """<model>_<num_train>_wildguardmix_<abbr>_seed<seed>, the checkpoint folder of a run."""
-    return (f"{filename_component(Path(model).name)}_{num_train}_{DATASET}_"
+def checkpoint_name(model, num_train, abbr, seed, dataset=DATASET):
+    """<model>_<num_train>_<dataset>_<abbr>_seed<seed>, the checkpoint folder of a run (abbr: a
+    subcategory, a baseline, or a selected subset's method)."""
+    return (f"{filename_component(Path(model).name)}_{num_train}_{dataset}_"
             f"{filename_component(abbr)}_seed{int(seed)}")
 
 
@@ -336,19 +339,29 @@ def harmful_sample(df, abbr, count, seed, tokenizer, response_label_filter="safe
 def training_examples(abbr, seed, tokenizer, num_train=DEFAULT_NUM_TRAIN,
                       response_label_filter="safe", max_length=DEFAULT_MAX_LENGTH,
                       general_dataset=GENERAL_DATASET, samples_dir=TRAIN_SAMPLES_DIR,
-                      train_df=None, benign_pool=None, general_pool=None):
+                      train_df=None, benign_pool=None, general_pool=None, selected=None,
+                      mixed=False):
     """(the shuffled harmful + benign + general mixture of one run, info).
 
+    The harmful part is subcategory (or baseline) abbr of WildGuardMix, or with selected (a
+    dataset name, stage 2) the subset select_data.py selected with method abbr (mixed: its
+    --mixed_diversity ablation).
     info: "files" {part: sample file}, "available" {part: pool size}, "overlong" prompts
     skipped while drawing. The pools are loaded unless given.
     """
     harmful_count, benign_count, general_count = mixture_counts(num_train)
-    train_df = load_train() if train_df is None else train_df
     benign_pool = load_wildjailbreak_benign() if benign_pool is None else benign_pool
     general_pool = (clean_pairs(pd.read_csv(general_dataset)) if general_pool is None
                     else general_pool)
-    harmful, path, overlong = harmful_sample(train_df, abbr, harmful_count, seed, tokenizer,
-                                             response_label_filter, max_length, samples_dir)
+    if selected:
+        path = selection_csv(seed, selected, abbr, harmful_count, response_label_filter, mixed)
+        harmful, overlong = load_selection(path, harmful_count, tokenizer, max_length), 0
+        available = harmful_count
+    else:
+        train_df = load_train() if train_df is None else train_df
+        harmful, path, overlong = harmful_sample(train_df, abbr, harmful_count, seed, tokenizer,
+                                                 response_label_filter, max_length, samples_dir)
+        available = len(harmful_pool(train_df, abbr, harmful_count, response_label_filter))
     parts, files = [harmful], {"harmful": path}
     for part, pool, count, folder, name in (
             ("benign", benign_pool, benign_count, "wildjailbreak", "vanilla_benign"),
@@ -365,15 +378,46 @@ def training_examples(abbr, seed, tokenizer, num_train=DEFAULT_NUM_TRAIN,
         overlong += skipped
     mixture = pd.concat(parts, ignore_index=True)
     mixture = mixture.sample(frac=1, random_state=seed).reset_index(drop=True)
-    available = {"harmful": len(harmful_pool(train_df, abbr, harmful_count, response_label_filter)),
-                 "benign": len(benign_pool), "general": len(general_pool)}
+    available = {"harmful": available, "benign": len(benign_pool), "general": len(general_pool)}
     return mixture, {"files": files, "available": available, "overlong": overlong}
+
+
+def selection_csv(seed, dataset, method, count, response_label_filter="safe", mixed=False):
+    """select_data.py's subset:
+    data/selected/seed<seed>/<dataset>[_refusal][_mixed]/<method>_<count>.csv"""
+    tag = pool_tag(response_label_filter)
+    folder = dataset + (f"_{tag}" if tag else "") + ("_mixed" if mixed else "")
+    return DATA_DIR / "selected" / seed_dir(seed) / folder / f"{method}_{count}.csv"
+
+
+def selection_methods(seed, dataset, count, response_label_filter="safe", mixed=False):
+    """Methods with a selected subset of `count` rows for this seed and dataset."""
+    folder = selection_csv(seed, dataset, "", count, response_label_filter, mixed).parent
+    return sorted(path.name[:-len(f"_{count}.csv")] for path in folder.glob(f"*_{count}.csv"))
+
+
+def load_selection(path, count, tokenizer, max_length=DEFAULT_MAX_LENGTH):
+    """The prompt/response rows of a selected subset, checked like a sample file."""
+    if not Path(path).is_file():
+        raise ValueError(f"No selected subset {path}; run select_data.py first")
+    rows = pd.read_csv(path, keep_default_na=False, dtype=str)  # keeps prompts such as "None"
+    if len(rows) != count or not {"prompt", "response"} <= set(rows):
+        raise ValueError(f"{path}: expected {count:,} prompt/response rows, found {len(rows):,}")
+    if max(prompt_lengths(rows["prompt"], tokenizer)) >= max_length:
+        raise ValueError(f"{path} holds a prompt of at least {max_length:,} tokens with this "
+                         "tokenizer")
+    return rows[["prompt", "response"]]
 
 
 # ---------------------------------------------------------------------------------------------
 # Test sets and the WildGuard judge
 
-safety_test_datasets = ["wildguardmix", "aegis", "wildjailbreak", "ailuminate", "gretel"]
+safety_test_datasets = ["wildguardmix", "aegis", "wildjailbreak", "ailuminate", "sorry-bench"]
+# Sorry-Bench (2025-03): the 440 unsafe requests rewritten in its 11 English styles (no base
+# prompts, ciphers or translations), all adversarial.
+SORRY_BENCH_STYLES = ("authority_endorsement", "evidence-based_persuasion", "expert_endorsement",
+                      "logical_appeal", "misrepresentation", "misspellings", "question",
+                      "role_play", "slang", "technical_terms", "uncommon_dialects")
 overrefusal_test_datasets = ["xstest", "or-bench-hard"]
 # Prompt types of test prompts. Every prompt is generated and judged, but the harmful score
 # counts only harmful prompts (eval_safe.py).
@@ -425,13 +469,18 @@ def load_test_set(name):
         df = df.rename(columns={"prompt_text": "prompt", "hazard": "subcategory"})
         df["subcategory"] = (df["subcategory"].map(ailuminate_subcategory_mapping)
                              .fillna(df["subcategory"]))
-    elif name == "gretel":
-        # Validation and test are both held out (the train split is not used).
-        df = load_dataset("gretelai/gretel-safety-alignment-en-v1", "default",
-                          split="validation+test").to_pandas()
-        df = clean_pairs(df[["risk_category", "persona", "tactic", "prompt", "safe_response"]]
-                         .rename(columns={"risk_category": "subcategory",
-                                          "safe_response": "response"}))
+    elif name == "sorry-bench":
+        from huggingface_hub import hf_hub_download
+
+        rows = []
+        for style in SORRY_BENCH_STYLES:
+            path = hf_hub_download("sorry-bench/sorry-bench-202503", f"question_{style}.jsonl",
+                                   repo_type="dataset")
+            with open(path, encoding="utf-8") as handle:
+                rows += [{"prompt": row["turns"][0], "subcategory": row["prompt_style"],
+                          "category": row["category"]}
+                         for row in map(json.loads, handle)]
+        df = pd.DataFrame(rows)
     elif name == "xstest":
         df = load_dataset("Paul/XSTest", split="train").to_pandas()
         # Unsafe contrast prompts are not part of the overrefusal benchmark.
@@ -443,7 +492,7 @@ def load_test_set(name):
     else:
         raise ValueError(f"Unsupported test set: {name}")
     df = df[df["prompt"].notna()]
-    if name in ("wildguardmix", "aegis", "gretel"):
+    if name in ("wildguardmix", "aegis"):
         df = df.assign(sub_abbrs=df["subcategory"].map(lambda value: to_abbr(name, value)))
     return df
 
@@ -452,10 +501,10 @@ def prompt_types(df, name):
     """Label each test prompt harmful, benign or unknown (no prompt label).
 
     WildGuardMix uses prompt_harm_label, Aegis prompt_label, and WildJailbreak its data type
-    (in subcategory). AILuminate and Gretel hold only harmful prompts; XSTest and
+    (in subcategory). AILuminate and Sorry-Bench hold only harmful prompts; XSTest and
     OR-Bench-Hard (as loaded) only benign ones.
     """
-    if name in ("ailuminate", "gretel"):
+    if name in ("ailuminate", "sorry-bench"):
         return pd.Series(HARMFUL_PROMPT, index=df.index)
     if name in overrefusal_test_datasets:
         return pd.Series(BENIGN_PROMPT, index=df.index)

@@ -8,7 +8,8 @@ One tab-separated line per job: model, group, checkpoint, status:
   saved   checkpoint saved, not yet evaluated
   done    evaluated: eval.py's summaries are in --results_dir (the checkpoint may be gone)
 Groups: every WildGuardMix subcategory with enough eligible rows for the harmful third of
---num_train (helper.training_groups), then the random and evenly baselines.
+--num_train (helper.training_groups), then the random and evenly baselines; with
+--selected DATASET (stage 2), every subset select_data.py saved for the seed.
 """
 
 import argparse
@@ -16,9 +17,9 @@ import os
 import sys
 from pathlib import Path
 
-from helper import (BASELINE_ABBRS, DEFAULT_NUM_TRAIN, DEFAULT_SEED, GIT20K_MODELS,
-                    add_pool_argument, checkpoint_name, load_train, mixture_counts,
-                    training_groups)
+from helper import (BASELINE_ABBRS, DATASET, DEFAULT_NUM_TRAIN, DEFAULT_SEED, GIT20K_MODELS,
+                    SELECTION_DATASETS, add_pool_argument, checkpoint_name, load_train,
+                    mixture_counts, selection_methods, training_groups)
 
 
 def status(checkpoint, results_dir):
@@ -38,6 +39,10 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--models", nargs="+", default=list(GIT20K_MODELS))
     parser.add_argument("--abbrs", nargs="+", help="Only these groups")
+    parser.add_argument("--selected", choices=SELECTION_DATASETS,
+                        help="Stage 2: the subsets selected from this dataset")
+    parser.add_argument("--mixed_diversity", action="store_true",
+                        help="With --selected: the mixed-diversity ablation's subsets")
     parser.add_argument("--num_train", type=int, default=DEFAULT_NUM_TRAIN)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--ckpt_dir", type=Path, required=True, help="align.py --output_dir")
@@ -46,8 +51,12 @@ def main():
     add_pool_argument(parser)
     args = parser.parse_args()
     harmful_count = mixture_counts(args.num_train)[0]
-    groups = training_groups(load_train(), harmful_count, args.response_label_filter)
-    groups += list(BASELINE_ABBRS)
+    if args.selected:
+        groups = selection_methods(args.seed, args.selected, harmful_count,
+                                   args.response_label_filter, args.mixed_diversity)
+    else:
+        groups = training_groups(load_train(), harmful_count, args.response_label_filter)
+        groups += list(BASELINE_ABBRS)
     if args.abbrs:
         unknown = sorted(set(args.abbrs) - set(groups))
         if unknown:
@@ -56,7 +65,8 @@ def main():
         groups = [abbr for abbr in groups if abbr in args.abbrs]
     for model in args.models:
         for abbr in groups:
-            checkpoint = args.ckpt_dir / checkpoint_name(model, args.num_train, abbr, args.seed)
+            checkpoint = args.ckpt_dir / checkpoint_name(model, args.num_train, abbr, args.seed,
+                                                         args.selected or DATASET)
             print(model, abbr, checkpoint, status(checkpoint, args.results_dir), sep="\t")
 
 

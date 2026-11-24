@@ -31,14 +31,14 @@ REFUSAL_PATTERN = re.compile(r"response refusal:\s*(\w+)", re.IGNORECASE)
 
 
 def load_test_sets(names, limit=None):
-    """{name: prompt, subcategory, prompt_type (+ sub_abbrs, persona, tactic)} per test set."""
+    """{name: prompt, subcategory, prompt_type (+ sub_abbrs, persona, category)} per test set."""
     datasets = {}
     for name in dict.fromkeys(names):
         print(f"Loading test set: {name}")
         dataset = load_test_set(name)
         dataset = dataset.assign(prompt_type=prompt_types(dataset, name))
         columns = ["prompt", "subcategory", "prompt_type"]
-        columns += [column for column in ("sub_abbrs", "persona", "tactic") if column in dataset]
+        columns += [column for column in ("sub_abbrs", "persona", "category") if column in dataset]
         datasets[name] = dataset[columns].iloc[:limit].reset_index(drop=True)
     return datasets
 
@@ -156,7 +156,7 @@ def subcategory_results(name, dataset, overrefusal=False):
     results[score_column] = (results[count_column] / results["count"] * 100).round(4)
     results["abbr"] = (
         results["subcategory"].apply(lambda value: ", ".join(to_abbr(name, value)))
-        if name in {"wildguardmix", "aegis", "gretel"}
+        if name in {"wildguardmix", "aegis"}
         else results["subcategory"]
     )
 
@@ -232,7 +232,7 @@ def save_results(datasets, output_dir, model_name):
         print(f"Saved: {breakdown_path}")
 
         metadata_columns = [
-            column for column in ("prompt_type", "persona", "tactic") if column in dataset
+            column for column in ("prompt_type", "persona", "category") if column in dataset
         ]
         responses = dataset[
             ["prompt", "subcategory", "generated_response", label_column] + metadata_columns

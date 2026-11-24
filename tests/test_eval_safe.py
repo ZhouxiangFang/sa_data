@@ -128,7 +128,7 @@ class OverrefusalTests(unittest.TestCase):
             "aegis": ({"prompt_label": ["unsafe", "Safe"]}, ["harmful", "benign"]),
             "wildjailbreak": ({"subcategory": ["adversarial_harmful", "adversarial_benign"]},
                               ["harmful", "benign"]),
-            "gretel": ({"prompt": ["a", "b"]}, ["harmful", "harmful"]),
+            "sorry-bench": ({"prompt": ["a", "b"]}, ["harmful", "harmful"]),
             "ailuminate": ({"prompt": ["a"]}, ["harmful"]),
             "xstest": ({"prompt": ["a"]}, ["benign"]),
         }

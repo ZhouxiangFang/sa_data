@@ -1,14 +1,18 @@
-"""Safety-tune one git20k model on one WildGuardMix subcategory (or a baseline) for one seed.
+"""Safety-tune one git20k model on one harmful training set for one seed.
 
     deepspeed --num_gpus 2 align.py --model llama3.1_git20k --abbr cyberattack --seed 43 \
         --output_dir /scratch/zf28/ckpts/seed43/default --per_device_train_batch_size 4
+    deepspeed --num_gpus 2 align.py --model llama3.1_git20k --selected wildjailbreak \
+        --abbr semantic_vendi --seed 43 --output_dir /scratch/zf28/ckpts/seed43/selected_wildjailbreak
 
 The --num_train examples (default 1,800) are a third each: harmful prompts of the subcategory
 with their unharmful WildGuardMix responses (--response_label_filter refusal: refusals only),
 WildJailbreak vanilla_benign pairs and data/git_data_20k.csv instructions, read from the seed's
 sample files (helper.training_examples; the log prints each file's SHA-256). --abbr random or
-evenly trains a baseline over every subcategory large enough to train on. The checkpoint is
-<output_dir>/<model>_<num_train>_wildguardmix_<abbr>_seed<seed>. Each optimizer update uses
+evenly trains a baseline over every subcategory large enough to train on. Stage 2: with
+--selected DATASET the harmful part is the subset select_data.py selected from DATASET with
+method --abbr (data/selected/seed<seed>/<dataset>[_refusal]/<abbr>_<harmful count>.csv). The
+checkpoint is <output_dir>/<model>_<num_train>_<dataset>_<abbr>_seed<seed>. Each optimizer update uses
 --effective_batch_size examples; accumulation = that / (GPUs x micro-batch).
 """
 
@@ -24,7 +28,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
 from helper import (DATASET, DEFAULT_MAX_LENGTH, DEFAULT_NUM_TRAIN, DEFAULT_SEED,
-                    add_pool_argument, checkpoint_name, mixture_counts, model_mapping,
+                    SELECTION_DATASETS, add_pool_argument, checkpoint_name, mixture_counts, model_mapping,
                     sample_digest, training_examples)
 
 MODULE_DIR = Path(__file__).resolve().parent
@@ -38,7 +42,12 @@ def parse_args():
                              "Hugging Face model ID")
     parser.add_argument("--abbr", required=True,
                         help="WildGuardMix subcategory abbreviation (data/subcategory_stats.json), "
-                             "or random / evenly")
+                             "random / evenly, or with --selected the selection method")
+    parser.add_argument("--selected", choices=SELECTION_DATASETS,
+                        help="Stage 2: train on the subset selected from this dataset")
+    parser.add_argument("--mixed_diversity", action="store_true",
+                        help="With --selected: the subset of select_data.py's mixed-diversity "
+                             "ablation")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help="Run seed: the sampled examples and the training order")
     parser.add_argument("--num_train", type=int, default=DEFAULT_NUM_TRAIN)
@@ -81,9 +90,11 @@ def main():
         tokenizer.pad_token = tokenizer.eos_token
 
     train_df, info = training_examples(args.abbr, args.seed, tokenizer, args.num_train,
-                                       args.response_label_filter, args.max_length)
+                                       args.response_label_filter, args.max_length,
+                                       selected=args.selected, mixed=args.mixed_diversity)
+    dataset = args.selected or DATASET
     output_dir = args.output_dir / checkpoint_name(args.model, args.num_train, args.abbr,
-                                                   args.seed)
+                                                   args.seed, dataset)
     if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite_output_dir:
         raise FileExistsError(f"Output directory is not empty: {output_dir}")
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -94,7 +105,7 @@ def main():
         for part, path in info["files"].items():
             print(f"{part}: {counts[part]:,} of {info['available'][part]:,} examples, "
                   f"{path} sha256 {sample_digest(path)}")
-        print(f"Harmful part: {DATASET} {args.abbr}, {args.response_label_filter} responses; "
+        print(f"Harmful part: {dataset} {args.abbr}, {args.response_label_filter} responses; "
               f"overlong prompts skipped while drawing: {info['overlong']:,}")
         print(f"Model: {model_id}\nOutput directory: {output_dir}")
         updates = math.ceil(len(train_df) / args.effective_batch_size) * args.epochs

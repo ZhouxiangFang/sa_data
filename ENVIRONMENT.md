@@ -1,6 +1,6 @@
 # Environment and fixed settings
 
-What a run depends on, and how to rebuild it on RANGE (Slurm, H200/H100) or chili (A6000).
+What a run depends on, and how to rebuild it on RANGE (Slurm, H200/H100).
 
 ## Environment
 
@@ -16,8 +16,7 @@ package, dependencies included, to the versions verified on 2026-11-22.
 | deepspeed | 0.19.6 | 0.17.6–0.19.5 compute wrong ZeRO-2 gradients with accumulation |
 
 Outside pip:
-- **NVIDIA driver ≥ 580** (the CUDA 13.0 libraries come with torch). RANGE: 580.173.02. Chili:
-  `chili/common.sh` adds user-space libraries for driver 595.84.
+- **NVIDIA driver ≥ 580** (the CUDA 13.0 libraries come with torch). RANGE: 580.173.02.
 - **A C compiler** for the small helpers Triton and torch.compile build at run time (RANGE: GCC 14
   from `/opt/apps`, set by `range/common.sh`). No CUDA toolkit: nothing is compiled with nvcc.
 - **NLTK data** in `~/nltk_data` for the IF scorers (`range/prefetch.sh`).
@@ -30,7 +29,7 @@ Outside pip:
   | FocusV857/llama3.1_git20k | `05b0426c0fac` | allenai/wildguardmix | `d29c47f41c8b` |
   | FocusV857/mistral_git20k | `4bfe7aacd29d` | allenai/wildjailbreak | `5ddc12a7894f` |
   | FocusV857/olmo2_git20k | `c2c5e0434584` | nvidia/Aegis-AI-Content-Safety-Dataset-2.0 | `d86bb8bedff5` |
-  | FocusV857/qwen2.5_git20k | `4d223cec223a` | gretelai/gretel-safety-alignment-en-v1 | `7f220b493d70` |
+  | FocusV857/qwen2.5_git20k | `4d223cec223a` | sorry-bench/sorry-bench-202503 | `612a4e1f45db` |
   | meta-llama/Meta-Llama-3.1-8B-Instruct | `0e9e39f249a1` | bench-llm/or-bench | `e36d8b80e818` |
   | mistralai/Mistral-7B-Instruct-v0.3 | `c170c708c41d` | Paul/XSTest | `f600c994b256` |
   | allenai/OLMo-2-1124-7B-Instruct | `470b1fba1ae0` | google/IFEval | `966cd89545d6` |
@@ -64,26 +63,13 @@ $P -m pip check
 | `VLLM_USE_FLASHINFER_SAMPLER` | `0` | greedy decoding bypasses it; avoids a JIT build per job |
 | `DS_CONFIG` | `range/ds_zero2.json` | ZeRO-2 |
 
-**Chili**: `chili/common.sh` activates nlp.
-```bash
-export VLLM_USE_FLASHINFER_SAMPLER=0
-chili/train.sh --models llama3.1_git20k --datasets wildguardmix --abbrs random --seed 43 --output_dir DIR
-chili/eval.sh MODEL_OR_CKPT -- --output_dir DIR
-```
-
 ## Fixed training settings
 
-| | RANGE | chili |
-|---|---|---|
-| GPUs per job | 2 × H200 | 4 × A6000 |
-| ZeRO | 2 (`range/ds_zero2.json`) | 3 (`ds_config.json`) |
-| Micro-batch × accumulation | 4 × 4 | 1 × 8 |
-| Effective batch | 32 | 32 |
-
-Both: torch's fused AdamW (`"torch_adam": true, "fused": true` in the DeepSpeed configs), lr 1e-5,
-cosine schedule, 10% warmup, 2 epochs, weight decay 0.01, max grad norm 1, bf16 (TF32 on), max
-length 4096, completion-only loss, seeds 43 / 86 / 129. Seeds from the two clusters can be pooled
-only if these match.
+2 × H200 per job, ZeRO-2 (`range/ds_zero2.json`), micro-batch 4 × 4 accumulation steps =
+effective batch 32, torch's fused AdamW (`"torch_adam": true, "fused": true`), lr 1e-5, cosine
+schedule, 10% warmup, 2 epochs, weight decay 0.01, max grad norm 1, bf16 (TF32 on), max length
+4096, completion-only loss, seeds 43 / 86 / 129. (Chili's launchers were removed on 2026-11-23;
+its runs used ZeRO-3 with 4 × A6000 × 1 × 8 and agreed within training noise.)
 
 ## Determinism
 

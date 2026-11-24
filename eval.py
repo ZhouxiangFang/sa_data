@@ -12,9 +12,9 @@ Safety: harmful-response rate on the harmful prompts of five test sets; overrefu
 rate on XSTest's safe prompts and OR-Bench-Hard-1k; IF: IFBench and IFEval (prompt-level loose
 accuracy is the primary metric).
 
-A trained checkpoint <model>_<n>_wildguardmix_<abbr>_seed<seed> (align.py) writes to
-  <output_dir>/seed<seed>/<model>_<n>_wildguardmix/wildguardmix_<abbr>/   safety
-  <output_dir>/seed<seed>/if_eval/<model>_<n>_wildguardmix/               IF
+A trained checkpoint <model>_<n>_<dataset>_<abbr>_seed<seed> (align.py) writes to
+  <output_dir>/seed<seed>/<model>_<n>_<dataset>/<dataset>_<abbr>/   safety
+  <output_dir>/seed<seed>/if_eval/<model>_<n>_<dataset>/             IF
 and any other model to <output_dir>/<model>/ and <output_dir>/if_eval/. The default
 output_dir is results/ beside sa_data; range/run.sh uses ablations/<setting> for other settings.
 """
@@ -28,7 +28,7 @@ from pathlib import Path
 
 import eval_if
 import eval_safe
-from helper import model_mapping, seed_dir
+from helper import SELECTION_DATASETS, model_mapping, seed_dir
 
 logging.getLogger("vllm").setLevel(logging.WARNING)
 # Greedy decoding alone is not repeatable in vLLM: outputs depend on how requests are
@@ -48,7 +48,8 @@ TOKENIZER_PROBE = "Hello,  i.e. two  spaces\n  indented line\n\tTab and   three 
 
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 CHECKPOINT_NAME = re.compile(
-    r"(?P<model>.+)_(?P<count>[1-9][0-9]*)_(?P<group>wildguardmix_.+)_seed(?P<seed>[1-9][0-9]*)")
+    rf"(?P<model>.+)_(?P<count>[1-9][0-9]*)_(?P<group>(?P<dataset>{'|'.join(SELECTION_DATASETS)})"
+    r"_.+)_seed(?P<seed>[1-9][0-9]*)")
 
 
 def resolve_model(model):
@@ -66,7 +67,7 @@ def result_dirs(output_dir, name):
     if not match:
         return os.path.join(output_dir, name), os.path.join(output_dir, "if_eval"), name
     root = os.path.join(output_dir, seed_dir(match["seed"]))
-    run = f"{match['model']}_{match['count']}_wildguardmix"
+    run = f"{match['model']}_{match['count']}_{match['dataset']}"
     return (os.path.join(root, run, match["group"]), os.path.join(root, "if_eval", run),
             match["group"])
 

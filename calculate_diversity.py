@@ -212,7 +212,7 @@ def embed(model_id, texts, batch_size=32):
     pooling = [module.get_config_dict() for module in model
                if type(module).__name__ == "Pooling"]
     # Last-token pooling (Qwen3) reads the final position, so pad on the left.
-    if pooling and pooling[0].get("pooling_mode") == "lasttoken":
+    if pooling and pooling[0].get("pooling_mode_lasttoken"):
         model.tokenizer.padding_side = "left"
     vectors = model.encode(texts, batch_size=batch_size, prompt="", convert_to_numpy=True,
                            normalize_embeddings=True, show_progress_bar=True)
@@ -244,7 +244,7 @@ def main():
     parser.add_argument("--embedding_models", nargs="+", default=list(EMBEDDING_MODEL_IDS))
     parser.add_argument("--samples_dir", type=Path, default=TRAIN_SAMPLES_DIR)
     parser.add_argument("--output_dir", type=Path, default=ROOT / "diversity")
-    parser.add_argument("--num_proc", type=int, default=4, help="spaCy processes")
+    parser.add_argument("--num_proc", type=int, default=8, help="POS-tagging processes")
     args = parser.parse_args()
     from transformers import AutoTokenizer
 

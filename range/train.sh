@@ -15,8 +15,11 @@ Usage: range/train.sh [options] [-- align.py options]
   --num_train N          Examples per job (default: 1800, a third harmful)
   --response_label_filter safe|refusal
                          Responses of the harmful examples (default: safe)
-  --eval                 Also evaluate each checkpoint once it is trained, then delete it
-                         (KEEP_CKPTS=1 keeps it); saved checkpoints are evaluated right away
+  --selected DATASET     Stage 2: train on every subset select_data.py selected from DATASET
+                         for the seed (--abbrs then names selection methods)
+  --mixed_diversity      With --selected: the subsets of the mixed-diversity ablation
+  --eval                 Also evaluate each checkpoint once it is trained (DELETE_CKPTS=1 then
+                         deletes it; default: kept); saved checkpoints are evaluated right away
   --eval_only            Only evaluate the saved checkpoints (implies --eval)
   --dry_run              Print the plan and sbatch commands without submitting
 
@@ -30,7 +33,8 @@ training array until that job ends.
 EOF
 }
 
-seed=43 models=() abbrs=() align_args=() response_label_filter=safe num_train=""
+seed=43 models=() abbrs=() align_args=() response_label_filter=safe num_train="" selected=""
+mixed=0
 eval=0 eval_only=0 dry_run=0
 while (( $# )); do
     case $1 in
@@ -39,12 +43,13 @@ while (( $# )); do
             shift
             while (( $# )) && [[ $1 != --* ]]; do add_values "$list" "$1"; shift; done
             ;;
-        --seed|--num_train|--response_label_filter)
+        --seed|--num_train|--response_label_filter|--selected)
             (( $# >= 2 )) || { echo "$1 needs a value" >&2; exit 2; }
             printf -v "${1#--}" '%s' "$2"
             shift 2
             ;;
         --eval) eval=1; shift ;;
+        --mixed_diversity) mixed=1; shift ;;
         --eval_only) eval=1 eval_only=1; shift ;;
         --dry_run) dry_run=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -54,6 +59,8 @@ while (( $# )); do
 done
 setting_setup || exit 2
 settings=(--seed "$seed" --num_train "$num_train" --response_label_filter "$response_label_filter")
+[[ -n $selected ]] && settings+=(--selected "$selected")
+(( mixed )) && settings+=(--mixed_diversity)
 
 if (( EFFECTIVE_BATCH % (TRAIN_NGPUS * MICRO_BATCH) )); then
     echo "EFFECTIVE_BATCH=$EFFECTIVE_BATCH is not a multiple of" \
@@ -113,8 +120,7 @@ sbatch_or_echo() {
 }
 
 (( dry_run )) || mkdir -p -- "$ckpt_dir"
-delete=1
-[[ $KEEP_CKPTS == 1 ]] && delete=0
+delete=$DELETE_CKPTS
 read -ra eval_opts <<< "$(gpu_opts 1)"
 eval_opts+=(--cpus-per-task="$EVAL_CPUS" --mem="$EVAL_MEM" --time="$EVAL_TIME"
             --kill-on-invalid-dep=yes)

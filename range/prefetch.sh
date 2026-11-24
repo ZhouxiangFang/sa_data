@@ -19,7 +19,8 @@ models=(FocusV857/llama3.1_git20k FocusV857/mistral_git20k FocusV857/olmo2_git20
         allenai/wildguard BAAI/bge-m3 Qwen/Qwen3-Embedding-0.6B)
 (( $# )) && models=("$@")
 datasets=(allenai/wildguardmix allenai/wildjailbreak nvidia/Aegis-AI-Content-Safety-Dataset-2.0
-          gretelai/gretel-safety-alignment-en-v1 Paul/XSTest bench-llm/or-bench google/IFEval)
+          sorry-bench/sorry-bench-202503 Paul/XSTest bench-llm/or-bench google/IFEval
+          Babelscape/ALERT_DPO nvidia/Nemotron-SFT-Safety-v2)
 (( models_only )) && datasets=()
 echo "HF_HOME=$HF_HOME"
 
