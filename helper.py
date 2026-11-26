@@ -33,11 +33,11 @@ GENERAL_DATASET = DATA_DIR / "git_data_20k.csv"
 SAMPLES_DIR = ROOT / "samples"  # each seed's training data (run_files), written by the runs
 # Scores (small CSVs): baselines/ (the instruct and git20k models), correlations/<setting>/
 # (stage 1) and selection/<setting>/ (stage 2). Responses and per-subcategory breakdowns go to
-# the same tree on /scratch (/home has a 50 GB quota), figures to the same tree under figs/.
+# the same tree under a responses root (eval.py --responses_root, which range/common.sh sets),
+# figures to the same tree under figs/.
 RESULTS_DIR = ROOT / "results"
 BASELINES_DIR = RESULTS_DIR / "baselines"
 STAGE1_DIR = RESULTS_DIR / "correlations" / "default"
-RESPONSES_DIR = Path("/scratch/zf28/results")
 FIGS_DIR = ROOT / "figs"
 
 DATASET = "wildguardmix"  # stage 1's training dataset
@@ -92,11 +92,14 @@ def _under_results(path):
         return None
 
 
-def responses_dir(results_dir):
-    """Where the responses of results_dir's models go: the same path under RESPONSES_DIR for a
-    folder in results/, else results_dir itself (an ad-hoc eval.py --output_dir)."""
+def responses_dir(results_dir, responses_root=None):
+    """Where the responses of results_dir's models go: the same path under responses_root for a
+    folder in results/, else (no responses_root, or an ad-hoc eval.py --output_dir) results_dir
+    itself."""
     relative = _under_results(results_dir)
-    return Path(results_dir) if relative is None else RESPONSES_DIR / relative
+    if responses_root is None or relative is None:
+        return Path(results_dir)
+    return Path(responses_root) / relative
 
 
 def figs_dir(results_dir):

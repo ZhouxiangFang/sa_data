@@ -320,16 +320,19 @@ class EvalMainTests(unittest.TestCase):
         # Instruct and git20k models are not trained runs.
         self.assertEqual(evaluation.result_paths("R", "olmo2-ins"),
                          (Path("R/olmo2-ins.csv"), Path("R/olmo2-ins")))
-        # In results/, the responses go to the same path on /scratch and figures to figs/.
+        # In results/, the responses go to the same path under --responses_root (without it,
+        # next to the scores) and figures to figs/.
         setting = helper.RESULTS_DIR / "selection" / "wildjailbreak"
+        name = "qwen3_git20k_1800_wildjailbreak_semantic_vendi_qwen3-embedding-0.6b_seed43"
         self.assertEqual(
-            evaluation.result_paths(setting, "qwen3_git20k_1800_wildjailbreak_semantic_vendi_"
-                                             "qwen3-embedding-0.6b_seed43"),
+            evaluation.result_paths(setting, name, Path("S")),
             (setting / "seed43/qwen3_git20k/semantic_vendi_qwen3-embedding-0.6b.csv",
-             helper.RESPONSES_DIR / "selection/wildjailbreak/seed43/qwen3_git20k"
+             Path("S/selection/wildjailbreak/seed43/qwen3_git20k")
              / "semantic_vendi_qwen3-embedding-0.6b"))
-        self.assertEqual(evaluation.result_paths(helper.BASELINES_DIR, "olmo2-ins")[1],
-                         helper.RESPONSES_DIR / "baselines/olmo2-ins")
+        self.assertEqual(evaluation.result_paths(setting, name)[1],
+                         setting / "seed43/qwen3_git20k/semantic_vendi_qwen3-embedding-0.6b")
+        self.assertEqual(evaluation.result_paths(helper.BASELINES_DIR, "olmo2-ins", "S")[1],
+                         Path("S/baselines/olmo2-ins"))
         self.assertEqual(helper.figs_dir(helper.STAGE1_DIR),
                          helper.FIGS_DIR / "correlations/default")
         self.assertEqual(evaluation.resolve_model("llama3.1_git20k"),

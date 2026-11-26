@@ -24,16 +24,22 @@
 #   OVERWRITE_STALE=0              1: train.sh retrains runs whose checkpoint or scores come from
 #                                  other training data or settings (default: refuses to submit)
 #   CKPT_ROOT=/scratch/zf28/ckpts  Checkpoints: CKPT_ROOT/seed<seed>/<setting>/
+#   RESPONSES_ROOT=/scratch/zf28/results
+#                                  eval.py --responses_root: the responses, in results/'s tree
+#   SELECTION_CACHE=/scratch/zf28/selection_cache
+#                                  select_data.py --cache_dir: POS tags and embeddings per dataset
 #
 # Outputs: scores (small CSVs) in results/: baselines/ (instruct and git20k models),
 # correlations/<setting>/ (stage 1) and selection/<setting>/ (stage 2); the responses in the same
-# tree under /scratch/zf28/results; figures in the same tree under figs/; logs in log/slurm/.
+# tree under RESPONSES_ROOT; figures in the same tree under figs/; logs in log/slurm/.
 
 RANGE_DIR=${RANGE_DIR:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)}
 SA_DIR=$(dirname -- "$RANGE_DIR")
 ROOT=$(dirname -- "$SA_DIR")
 export RANGE_DIR SA_DIR ROOT
 CKPT_ROOT=${CKPT_ROOT:-/scratch/zf28/ckpts}
+RESPONSES_ROOT=${RESPONSES_ROOT:-/scratch/zf28/results}
+SELECTION_CACHE=${SELECTION_CACHE:-/scratch/zf28/selection_cache}
 LOG_DIR=${LOG_DIR:-$ROOT/log/slurm}
 mkdir -p -- "$LOG_DIR"
 

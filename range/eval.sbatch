@@ -20,7 +20,7 @@ model=$(awk -F'\t' '{ print (NF >= 3 ? $3 : $1) }' <<< "$line")
 echo "$(date '+%F %T') eval $(basename "$model") on $(hostname), GPU ${CUDA_VISIBLE_DEVICES:-?}"
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader
 
-python "$SA_DIR/eval.py" --model "$model" "$@"
+python "$SA_DIR/eval.py" --model "$model" --responses_root "$RESPONSES_ROOT" "$@"
 status=$?
 if (( status == 0 && delete )) && [[ -d $model && ! -L $model && -f $model/config.json
                                      && $(basename "$model") =~ _seed[0-9]+$ ]]; then

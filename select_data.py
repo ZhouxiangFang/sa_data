@@ -1038,7 +1038,8 @@ def main():
                         help="Size of the pool a metric step draws from one stratum (default: 5,000)")
     parser.add_argument("--model", default="qwen2.5_git20k", help="Tokenizer for --max_length")
     parser.add_argument("--max_length", type=int, default=DEFAULT_MAX_LENGTH)
-    parser.add_argument("--cache_dir", type=Path, default=Path("/scratch/zf28/selection_cache"))
+    parser.add_argument("--cache_dir", type=Path, required=True,
+                        help="Tag and embedding cache (range/common.sh: SELECTION_CACHE)")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--threads", type=int, default=min(32, os.cpu_count() or 1))
     parser.add_argument("--num_proc", type=int, default=8, help="POS-tagging processes")

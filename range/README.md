@@ -41,7 +41,8 @@ types whose prompts are not natural language (ALERT token_manipulation; Nemotron
 typos, and wholly encoded prompts) are dropped, since POS tags (spaCy en_core_web_trf, on the GPU)
 describe natural language. Ablations: `--with_unnatural` (ALERT-DPO, Nemotron) keeps them;
 `--mixed_diversity` scores each metric on both strata together.
-Tags and embeddings are cached in `/scratch/zf28/selection_cache/<tagger>/<dataset>/`.
+Tags and embeddings are cached in `$SELECTION_CACHE/<tagger>/<dataset>/` (common.sh; default
+`/scratch/zf28/selection_cache`).
 
 Defaults: training on 2 × H200 with ZeRO-2 (`ds_zero2.json`, DeepSpeed ≥ 0.19.6: 0.17.6–0.19.5
 compute wrong ZeRO-2 gradients with accumulation, and `train.sh` refuses them), micro-batch 4 × 4
@@ -64,7 +65,8 @@ Outputs (paths from `~/align`; `eval.py` and `range/common.sh` document them):
     `correlations.csv`
   - `selection/<dataset>[_refusal][_with_unnatural][_mixed]/` (stage 2):
     `seed<S>/<model>/<method>.csv`
-- `/scratch/zf28/results/`: the same tree, a folder per model with its responses and
+- `$RESPONSES_ROOT` (common.sh, passed as eval.py `--responses_root`; default
+  `/scratch/zf28/results/`): the same tree, a folder per model with its responses and
   per-subcategory breakdowns. /scratch purges old files.
 - `figs/`: the same tree, the figures (and the numbers they plot).
 - `log/slurm/`: job logs. Checkpoints: `/scratch/zf28/ckpts/seed<S>/<setting>/`.

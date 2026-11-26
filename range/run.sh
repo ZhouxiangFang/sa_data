@@ -84,7 +84,8 @@ job_ids() { echo "Job IDs: $(paste -sd' ' "$JOB_IDS_FILE")  (cancel all: scancel
 
 if ! skipped select; then
     select_opts=(--dataset "$selected" --seed "$seed" --size "$harmful" --response_label_filter
-                 "$response_label_filter" --threads "${SELECT_CPUS:-32}" --num_proc 16)
+                 "$response_label_filter" --threads "${SELECT_CPUS:-32}" --num_proc 16
+                 --cache_dir "$SELECTION_CACHE")
     (( mixed )) && select_opts+=(--mixed_diversity)
     (( with_unnatural )) && select_opts+=(--with_unnatural)
     EVAL_CPUS=${SELECT_CPUS:-32} EVAL_MEM=${SELECT_MEM:-192G} EVAL_TIME=${SELECT_TIME:-1-00:00:00} \

@@ -22,10 +22,11 @@ per-subcategory breakdowns go to its responses folder:
       <output_dir>/seed<seed>/<model>/<abbr>.csv  and  <responses>/seed<seed>/<model>/<abbr>/
   any other model (the instruct and git20k baselines):
       <output_dir>/<model>.csv  and  <responses>/<model>/
-<responses> is output_dir's path under /scratch/zf28/results when output_dir is in results/,
-else output_dir itself (helper.responses_dir). --output_dir defaults to results/baselines; a
-checkpoint needs its setting's folder, results/correlations/<setting> (stage 1) or
-results/selection/<setting> (stage 2), as range/common.sh's setting_setup sets it.
+<responses> is output_dir's path under --responses_root when output_dir is in results/, else
+output_dir itself (helper.responses_dir; range/eval.sbatch passes common.sh's RESPONSES_ROOT).
+--output_dir defaults to results/baselines; a checkpoint needs its setting's folder,
+results/correlations/<setting> (stage 1) or results/selection/<setting> (stage 2), as
+range/common.sh's setting_setup sets it.
 """
 
 import argparse
@@ -81,14 +82,15 @@ def run_csv(output_dir, model, abbr, seed):
     return Path(output_dir) / seed_dir(seed) / model / f"{abbr}.csv"
 
 
-def result_paths(output_dir, name):
+def result_paths(output_dir, name, responses_root=None):
     """(scores CSV, responses folder) of a model; see the module doc."""
     name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
     match = CHECKPOINT_NAME.fullmatch(name)
+    responses = responses_dir(output_dir, responses_root)
     if not match:
-        return Path(output_dir) / f"{name}.csv", responses_dir(output_dir) / name
+        return Path(output_dir) / f"{name}.csv", responses / name
     return (run_csv(output_dir, match["model"], match["abbr"], match["seed"]),
-            responses_dir(output_dir) / seed_dir(match["seed"]) / match["model"] / match["abbr"])
+            responses / seed_dir(match["seed"]) / match["model"] / match["abbr"])
 
 
 def read_table(path):
@@ -213,6 +215,9 @@ def parse_args(argv=None):
     parser.add_argument("--output_dir", type=Path,
                         help="Scores folder (default: results/baselines; a checkpoint needs "
                              "its setting's folder, see the module doc).")
+    parser.add_argument("--responses_root", type=Path,
+                        help="Responses go to output_dir's path under this folder when "
+                             "output_dir is in results/ (default: next to the scores).")
     parser.add_argument("--datasets", nargs="+", choices=eval_safe.TEST_SETS,
                         default=eval_safe.TEST_SETS,
                         help="Safety and overrefusal test sets (default: all).")
@@ -237,7 +242,7 @@ def main(argv=None):
             raise SystemExit("A checkpoint needs --output_dir: results/correlations/<setting> "
                              "(stage 1) or results/selection/<setting> (stage 2)")
         args.output_dir = BASELINES_DIR
-    scores_csv, responses = result_paths(args.output_dir, name)
+    scores_csv, responses = result_paths(args.output_dir, name, args.responses_root)
     fingerprint = checkpoint_fingerprint(model_id) if os.path.isdir(model_id) else None
     print(f"Model: {model_id} (fingerprint {fingerprint})\nScores: {scores_csv}\n"
           f"Responses: {responses}")

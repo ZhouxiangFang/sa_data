@@ -1,9 +1,10 @@
 """Compare eval.py outputs of the same models in two result roots (batch-invariance check).
 
-python compare_evals.py ROOT_A ROOT_B MODEL... [--limit N]
+python compare_evals.py ROOT_A ROOT_B MODEL... [--limit N] [--responses_root DIR]
 
 ROOT_A/B are eval.py --output_dir folders; MODEL is a result name as eval.py derives it: a model
-shortcut or a checkpoint folder name (responses: eval.result_paths).
+shortcut or a checkpoint folder name (responses: eval.result_paths, under --responses_root as
+eval.py was given it).
 
 For each model: share of identical IF responses and safety responses (per test set), share
 of identical WildGuard labels, and the score differences. With --limit, only the first N
@@ -17,9 +18,9 @@ from eval import read_scores, result_paths
 from eval_safe import SCORE_LABELS, metric
 
 
-def responses(root, model):
+def responses(root, model, responses_root=None):
     """{name: responses table} of a model: IF per benchmark, then every safety test set."""
-    _, folder = result_paths(root, model)
+    _, folder = result_paths(root, model, responses_root)
     tables = pd.read_csv(folder / "if_responses.csv", keep_default_na=False)
     out = {f"IF {benchmark}": rows.reset_index(drop=True)
            for benchmark, rows in tables.groupby("benchmark", sort=False)}
@@ -41,10 +42,12 @@ def main():
     parser.add_argument("root_b")
     parser.add_argument("models", nargs="+")
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--responses_root", help="eval.py --responses_root of both runs")
     args = parser.parse_args()
     for model in args.models:
         print(f"\n=== {model}: {args.root_a} vs {args.root_b}")
-        tables_a, tables_b = responses(args.root_a, model), responses(args.root_b, model)
+        tables_a = responses(args.root_a, model, args.responses_root)
+        tables_b = responses(args.root_b, model, args.responses_root)
         for name, a in tables_a.items():
             b = tables_b[name]
             n = min(len(a), len(b)) if args.limit else len(a)
