@@ -6,9 +6,8 @@
 
 For each model and their average: the official instruct model and the git20k starting model
 (from --baseline_dir, evaluated by range/run.sh's base stage), then every trained group of the
-setting (<results_dir>/seed<S>/<model>/<group>.csv; stage 2: the selection methods), the random
-and evenly baselines first and the other groups by harmful score, most harmful first
-(--ascending: all groups ranked together, least harmful first). Bars: harmful (the Avg row: mean
+setting (<results_dir>/seed<S>/<model>/<group>.csv; stage 2: the selection methods) ranked by
+harmful score, least harmful first (the random and evenly baselines in bold). Bars: harmful (the Avg row: mean
 over the five harm test sets), overrefusal (mean of XSTest and OR-Bench-Hard) and IF (mean
 IFBench / IFEval prompt-level loose accuracy). Several seeds are averaged; the average gives each
 model equal weight. The same figures per harm test set go to <test>/ subfolders.
@@ -82,16 +81,11 @@ def load_scores(results_dir, baseline_dir, models, seeds):
     return pd.DataFrame(rows)
 
 
-def plot(scores, harmful, title, path, ascending=False):
-    """scores: one row per version (index). harmful: the column the harmful bars show."""
+def plot(scores, harmful, title, path):
+    """scores: one row per version (index). harmful: the column the harmful bars show (the runs
+    are ranked by it, least harmful first)."""
     trained = scores.drop(index=[INSTRUCT, START])
-    if ascending:
-        groups = [[INSTRUCT, START], list(trained.sort_values(harmful).index)]
-    else:
-        mixes = [abbr for abbr in BASELINE_ABBRS if abbr in trained.index]
-        subcategories = trained.drop(index=mixes)
-        groups = [[INSTRUCT, START], mixes,
-                  list(subcategories.sort_values(harmful, ascending=False).index)]
+    groups = [[INSTRUCT, START], list(trained.sort_values(harmful, kind="stable").index)]
     versions = [version for group in groups for version in group]
     scores = scores.loc[versions]
     x = np.arange(len(versions), dtype=float)
@@ -110,9 +104,8 @@ def plot(scores, harmful, title, path, ascending=False):
     for boundary in boundaries:
         ax.axvline((x[boundary - 1] + x[boundary]) / 2, color="#c8c8c8", linewidth=1)
     ax.set_xticks(x, versions, rotation=40, ha="right", rotation_mode="anchor", fontsize=11)
-    if ascending:
-        for tick, version in zip(ax.get_xticklabels(), versions):
-            tick.set_fontweight("bold" if version in BASELINE_ABBRS else "normal")
+    for tick, version in zip(ax.get_xticklabels(), versions):
+        tick.set_fontweight("bold" if version in BASELINE_ABBRS else "normal")
     ax.set_ylim(0, min(105, np.ceil(scores[[harmful, "overrefusal", "if"]].max().max() / 10)
                        * 10 + 10))
     ax.set_ylabel("Score (%)", fontsize=13)
@@ -179,7 +172,6 @@ def main():
                         help="eval.py --output_dir of the instruct and git20k models")
     parser.add_argument("--seeds", type=int, nargs="+", default=[DEFAULT_SEED])
     parser.add_argument("--models", nargs="+", default=list(GIT20K_MODELS))
-    parser.add_argument("--ascending", action="store_true")
     parser.add_argument("--output_dir", type=Path)
     args = parser.parse_args()
     seeds = sorted(set(args.seeds))
@@ -199,7 +191,7 @@ def main():
         for title, scores in tables.items():
             name = "average" if title.startswith("Average") else title
             heading = f"{title} ({note})" + ("" if test == "harmful" else f": {test} test")
-            plot(scores, test, heading, folder / f"{name}.png", args.ascending)
+            plot(scores, test, heading, folder / f"{name}.png")
     table = pd.concat([means.reset_index(), average.reset_index().assign(model="Average"),
                        per_seed.assign(seed=per_seed["seed"].astype(str))], ignore_index=True)
     table.insert(2, "seed", table.pop("seed").fillna("mean"))
