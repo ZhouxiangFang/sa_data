@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# Submit one seed's alignment jobs (align.py, DeepSpeed) as a Slurm array on Perlmutter, and with
+# --eval an evaluation array whose task i starts when training task i succeeds.
+set -uo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+
+usage() {
+    cat <<'EOF'
+Usage: nersc/train.sh [options] [-- align.py options]
+
+  --seed SEED            Run seed (default: 43)
+  --models MODEL...      Starting models (default: the four git20k models)
+  --abbrs ABBR...        Only these groups (default: every WildGuardMix subcategory with enough
+                         examples, plus the random and evenly baselines)
+  --num_train N          Examples per job (default: 1800, a third harmful)
+  --response_label_filter safe|refusal
+                         Responses of the harmful examples (default: safe)
+  --selected DATASET     Stage 2: train on every subset select_data.py selected from DATASET
+                         for the seed (--abbrs then names selection methods)
+  --mixed_diversity      With --selected: the subsets of the mixed-diversity ablation
+  --eval                 Also evaluate each checkpoint once it is trained (DELETE_CKPTS=1 then
+                         deletes it; default: kept); saved checkpoints are evaluated right away
+  --eval_only            Only evaluate the saved checkpoints (implies --eval)
+  --dry_run              Print the plan and sbatch commands without submitting
+
+Checkpoints go to CKPT_ROOT/seed<seed>/<setting>/ and scores to results/correlations/<setting>/
+(stage 1) or results/selection/<dataset>.../ (stage 2), responses to the same tree under
+$SCRATCH/results (setting_setup in nersc/common.sh). Jobs whose checkpoint is saved or
+evaluated are skipped, so rerunning resumes; a checkpoint or scores from other training data or
+settings (a stale fingerprint, train_jobs.py) stop the submission unless OVERWRITE_STALE=1
+retrains them. Each training job uses TRAIN_NGPUS (4: a whole node) x A100 (GPU_CONSTRAINT,
+40 GB), EFFECTIVE_BATCH (32), MICRO_BATCH (1), LEARNING_RATE (1e-5) and DS_CONFIG (ZeRO-3, the
+optimizer on the CPU on 40 GB GPUs).
+Logs: log/slurm/align_<job>_<task>.log and eval_<job>_<task>.log; the plan of a submission is
+log/slurm/jobs_<stamp>.tsv (line i+1 = task i). DEPENDENCY (e.g. afterany:<job>) delays the
+training array until that job ends.
+EOF
+}
+
+seed=43 models=() abbrs=() align_args=() response_label_filter=safe num_train="" selected=""
+mixed=0
+eval=0 eval_only=0 dry_run=0
+while (( $# )); do
+    case $1 in
+        --models|--abbrs)
+            list=${1#--}
+            shift
+            while (( $# )) && [[ $1 != --* ]]; do add_values "$list" "$1"; shift; done
+            ;;
+        --seed|--num_train|--response_label_filter|--selected)
+            (( $# >= 2 )) || { echo "$1 needs a value" >&2; exit 2; }
+            printf -v "${1#--}" '%s' "$2"
+            shift 2
+            ;;
+        --eval) eval=1; shift ;;
+        --mixed_diversity) mixed=1; shift ;;
+        --eval_only) eval=1 eval_only=1; shift ;;
+        --dry_run) dry_run=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; align_args=("$@"); break ;;
+        *) echo "Unknown option: $1 (align.py options go after --)" >&2; exit 2 ;;
+    esac
+done
+setting_setup || exit 2
+settings=(--seed "$seed" --num_train "$num_train" --response_label_filter "$response_label_filter")
+[[ -n $selected ]] && settings+=(--selected "$selected")
+(( mixed )) && settings+=(--mixed_diversity)
+
+if (( EFFECTIVE_BATCH % (TRAIN_NGPUS * MICRO_BATCH) )); then
+    echo "EFFECTIVE_BATCH=$EFFECTIVE_BATCH is not a multiple of" \
+         "TRAIN_NGPUS x MICRO_BATCH = $((TRAIN_NGPUS * MICRO_BATCH))" >&2
+    exit 2
+fi
+[[ -f $DS_CONFIG ]] || { echo "DeepSpeed config not found: $DS_CONFIG" >&2; exit 2; }
+# ZeRO-2 with gradient accumulation computes wrong gradients on DeepSpeed 0.17.6 to 0.19.5
+# (issues #7718, #8224): on 0.18.0, 8B checkpoints came out bit-identical to the base.
+bad_zero2=$(python - "$DS_CONFIG" <<'EOF'
+import json, sys
+from importlib.metadata import version
+from packaging.version import Version
+stage = json.load(open(sys.argv[1])).get("zero_optimization", {}).get("stage")
+deepspeed = Version(version("deepspeed"))
+if stage == 2 and Version("0.17.6") <= deepspeed < Version("0.19.6"):
+    print(deepspeed)
+EOF
+) || exit 2
+if [[ -n $bad_zero2 ]]; then
+    echo "DeepSpeed $bad_zero2 computes wrong ZeRO-2 gradients with gradient accumulation" \
+         "(0.17.6 to 0.19.5); use DeepSpeed >= 0.19.6 (requirements.txt)." >&2
+    exit 2
+fi
+# Put first, so settings given after -- still win.
+align_args=(--deepspeed "$(realpath "$DS_CONFIG")" --per_device_train_batch_size "$MICRO_BATCH"
+            --effective_batch_size "$EFFECTIVE_BATCH" --learning_rate "$LEARNING_RATE"
+            "${settings[@]}" "${align_args[@]}")
+
+plan=(--ckpt_dir "$ckpt_dir" --results_dir "$results" "${settings[@]}")
+(( ${#models[@]} )) && plan+=(--models "${models[@]}")
+(( ${#abbrs[@]} )) && plan+=(--abbrs "${abbrs[@]}")
+jobs_tsv=$(python "$SA_DIR/train_jobs.py" "${plan[@]}" -- "${align_args[@]}" \
+    2> >(grep -v NVML >&2)) || exit $?
+
+train_tsv=$LOG_DIR/jobs_${STAMP}.tsv saved_tsv=$LOG_DIR/jobs_${STAMP}_saved.tsv
+declare -A count=([train]=0 [saved]=0 [done]=0 [stale]=0)
+train_lines=() saved_lines=() stale_lines=()
+while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    status=${line##*$'\t'}
+    (( ++count[$status] ))
+    [[ $status == train ]] && train_lines+=("$line")
+    [[ $status == saved ]] && saved_lines+=("$line")
+    [[ $status == stale ]] && stale_lines+=("$line")
+done <<< "$jobs_tsv"
+echo "Seed $seed, $setting setting: ${count[train]} to train, ${count[saved]} saved," \
+     "${count[done]} evaluated, ${count[stale]} stale. Checkpoints: $ckpt_dir"
+if (( ${#stale_lines[@]} )); then
+    printf '  stale: %s\n' "${stale_lines[@]}" >&2
+    if (( ! OVERWRITE_STALE )); then
+        echo "These runs have a checkpoint or scores from other training data or settings" \
+             "(another fingerprint, train_jobs.py). OVERWRITE_STALE=1 retrains them, replacing" \
+             "their checkpoints and scores; or use another setting/CKPT_ROOT." >&2
+        exit 2
+    fi
+    train_lines+=("${stale_lines[@]}")
+fi
+(( eval_only )) && train_lines=()
+
+# sbatch_or_echo SBATCH_ARGS...: submits, or with --dry_run prints the command.
+sbatch_or_echo() {
+    if (( dry_run )); then
+        printf 'sbatch' >&2; printf ' %q' "$@" >&2; echo >&2
+        echo DRYRUN
+    else
+        submit "$@"
+    fi
+}
+
+(( dry_run )) || mkdir -p -- "$ckpt_dir"
+delete=$DELETE_CKPTS
+read -ra train_opts <<< "$(gpu_opts "$TRAIN_NGPUS" "$TRAIN_QOS")"
+read -ra eval_opts <<< "$(gpu_opts 1 "$EVAL_QOS")"
+eval_opts+=(--time="$EVAL_TIME" --kill-on-invalid-dep=yes)
+if (( ${#train_lines[@]} )); then
+    printf '%s\n' "${train_lines[@]}" > "$train_tsv"
+    n=${#train_lines[@]}
+    train_id=$(sbatch_or_echo --job-name="align_s$seed" --array="0-$((n - 1))%$MAX_TRAIN" \
+        ${DEPENDENCY:+--dependency="$DEPENDENCY" --kill-on-invalid-dep=yes} \
+        "${train_opts[@]}" --time="$TRAIN_TIME" --output="$LOG_DIR/align_%A_%a.log" \
+        "$NERSC_DIR/train.sbatch" "$train_tsv" "$ckpt_dir" "${align_args[@]}") || exit
+    echo "Training: array $train_id, $n job(s) on $TRAIN_NGPUS x A100, $MAX_TRAIN at a time" \
+         "(plan: $train_tsv)"
+    if (( eval )); then
+        eval_id=$(sbatch_or_echo --job-name="eval_s$seed" --array="0-$((n - 1))%$MAX_EVAL" \
+            --dependency="aftercorr:$train_id" "${eval_opts[@]}" \
+            --output="$LOG_DIR/eval_%A_%a.log" \
+            "$NERSC_DIR/eval.sbatch" "$train_tsv" "$delete" --output_dir "$results") || exit
+        # Training task i releases (or, if it fails, cancels) eval task i itself; see train.sbatch.
+        (( dry_run )) || echo "$eval_id" > "$train_tsv.eval_id"
+        echo "Evaluation: array $eval_id on 1 x A100, each after its training job"
+    fi
+fi
+if (( eval && ${#saved_lines[@]} )); then
+    printf '%s\n' "${saved_lines[@]}" > "$saved_tsv"
+    n=${#saved_lines[@]}
+    eval_id=$(sbatch_or_echo --job-name="eval_s$seed" --array="0-$((n - 1))%$MAX_EVAL" \
+        "${eval_opts[@]}" --output="$LOG_DIR/eval_%A_%a.log" \
+        "$NERSC_DIR/eval.sbatch" "$saved_tsv" "$delete" --output_dir "$results") || exit
+    echo "Evaluation of saved checkpoints: array $eval_id, $n job(s) on 1 x A100"
+fi
