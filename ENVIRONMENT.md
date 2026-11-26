@@ -68,8 +68,8 @@ $P -m pip check
 2 × H200 per job, ZeRO-2 (`range/ds_zero2.json`), micro-batch 4 × 4 accumulation steps =
 effective batch 32, torch's fused AdamW (`"torch_adam": true, "fused": true`), lr 1e-5, cosine
 schedule, 10% warmup, 2 epochs, weight decay 0.01, max grad norm 1, bf16 (TF32 on), max length
-4096, completion-only loss, seeds 43 / 86 / 129. (Chili's launchers were removed on 2026-11-23;
-its runs used ZeRO-3 with 4 × A6000 × 1 × 8 and agreed within training noise.)
+4096, completion-only loss, seeds 43 / 86 / 129. (`chili/`, for chili01's 8 × A6000, runs
+ZeRO-3 with 4 × A6000 × 1 × 8; it agreed within training noise.)
 
 ## Determinism
 

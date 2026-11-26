@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# The CPU stage of a run (chili/run.sh runs it last; range/post.sh on range):
+#   chili/post.sh [--seed SEED] [--num_train N] [--response_label_filter safe|refusal]
+#                 [--selected DATASET [--with_unnatural] [--mixed_diversity]]
+# plot_bars_overall.py for the seed's runs, then (stage 1) correlate_diversity.py over every
+# seed scored.
+set -uo pipefail
+source "$(dirname -- "${BASH_SOURCE[0]}")/common.sh"
+
+seed=43 response_label_filter=safe num_train="" selected="" mixed=0 with_unnatural=0
+while (( $# )); do
+    case $1 in
+        --seed|--response_label_filter|--num_train|--selected)
+            (( $# >= 2 )) || { echo "$1 needs a value" >&2; exit 2; }
+            printf -v "${1#--}" '%s' "$2"; shift 2 ;;
+        --mixed_diversity) mixed=1; shift ;;
+        --with_unnatural) with_unnatural=1; shift ;;
+        *) echo "Unknown option: $1" >&2; exit 2 ;;
+    esac
+done
+setting_setup || exit 2
+cd -- "$SA_DIR" || exit
+status=0
+python plot_bars_overall.py --results_dir "$results" --seeds "$seed" || status=1
+[[ -n $selected ]] && exit "$status"
+python correlate_diversity.py --results_dir "$results" || status=1
+exit "$status"
