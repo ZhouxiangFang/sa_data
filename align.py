@@ -52,6 +52,9 @@ def parse_args():
     parser.add_argument("--mixed_diversity", action="store_true",
                         help="With --selected: the subset of select_data.py's mixed-diversity "
                              "ablation")
+    parser.add_argument("--with_unnatural", action="store_true",
+                        help="With --selected: the subset of select_data.py's --with_unnatural "
+                             "ablation")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
                         help="Run seed: the sampled examples and the training order")
     parser.add_argument("--num_train", type=int, default=DEFAULT_NUM_TRAIN)
@@ -92,7 +95,8 @@ def main():
 
     train_df, info = training_examples(args.abbr, args.seed, tokenizer, args.num_train,
                                        args.response_label_filter, args.max_length,
-                                       selected=args.selected, mixed=args.mixed_diversity)
+                                       selected=args.selected, mixed=args.mixed_diversity,
+                                       with_unnatural=args.with_unnatural)
     dataset = args.selected or DATASET
     output_dir = args.output_dir / checkpoint_name(args.model, args.num_train, args.abbr,
                                                    args.seed, dataset)

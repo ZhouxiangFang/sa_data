@@ -397,18 +397,18 @@ def training_examples(abbr, seed, tokenizer, num_train=DEFAULT_NUM_TRAIN,
                       response_label_filter="safe", max_length=DEFAULT_MAX_LENGTH,
                       general_dataset=GENERAL_DATASET, samples_dir=SAMPLES_DIR,
                       train_df=None, benign_pool=None, general_pool=None, selected=None,
-                      mixed=False):
+                      mixed=False, with_unnatural=False):
     """(the shuffled harmful + benign + general mixture of one run, info).
 
     The harmful part is subcategory (or baseline) abbr of WildGuardMix, or with selected (a
     dataset name, stage 2) the subset select_data.py selected with method abbr (mixed: its
-    --mixed_diversity ablation).
+    --mixed_diversity ablation; with_unnatural: its --with_unnatural ablation).
     info: "files" {part: file} (run_files), "available" {part: pool size}, "overlong" prompts
     skipped while drawing. The pools are loaded unless given.
     """
     harmful_count, benign_count, general_count = mixture_counts(num_train)
     files = run_files(abbr, seed, num_train, response_label_filter, max_length, selected, mixed,
-                      samples_dir, general_dataset)
+                      samples_dir, general_dataset, with_unnatural)
     benign_pool = load_wildjailbreak_benign() if benign_pool is None else benign_pool
     general_pool = (clean_pairs(pd.read_csv(general_dataset)) if general_pool is None
                     else general_pool)
@@ -454,7 +454,7 @@ def add_training_arguments(parser):
 
 def run_files(abbr, seed, num_train=DEFAULT_NUM_TRAIN, response_label_filter="safe",
               max_length=DEFAULT_MAX_LENGTH, selected=None, mixed=False, samples_dir=SAMPLES_DIR,
-              general_dataset=GENERAL_DATASET):
+              general_dataset=GENERAL_DATASET, with_unnatural=False):
     """{part: file} of a run's training data, the files training_examples reads or writes
     (sample files None when samples_dir is None):
       harmful  stage 1: stage1_sample_path; stage 2: selection_csv
@@ -462,7 +462,8 @@ def run_files(abbr, seed, num_train=DEFAULT_NUM_TRAIN, response_label_filter="sa
       general  <samples_dir>/common/seed<seed>/general/<general dataset>_<count>.jsonl"""
     harmful_count, benign_count, general_count = mixture_counts(num_train)
     if selected:
-        harmful = selection_csv(seed, selected, abbr, harmful_count, response_label_filter, mixed)
+        harmful = selection_csv(seed, selected, abbr, harmful_count, response_label_filter, mixed,
+                                with_unnatural)
     elif samples_dir is not None:
         harmful = stage1_sample_path(samples_dir, seed, abbr, harmful_count,
                                      response_label_filter, max_length)
@@ -493,17 +494,22 @@ def checkpoint_fingerprint(checkpoint):
     return json.loads(path.read_text())["fingerprint"] if path.is_file() else None
 
 
-def selection_csv(seed, dataset, method, count, response_label_filter="safe", mixed=False):
-    """select_data.py's subset:
-    samples/stage2_selected/seed<seed>/<dataset>[_refusal][_mixed]/<method>_<count>.csv"""
+def selection_csv(seed, dataset, method, count, response_label_filter="safe", mixed=False,
+                  with_unnatural=False):
+    """select_data.py's subset (with_unnatural: --with_unnatural, mixed: --mixed_diversity):
+    samples/stage2_selected/seed<seed>/<dataset>[_refusal][_with_unnatural][_mixed]/
+    <method>_<count>.csv"""
     tag = pool_tag(response_label_filter)
-    folder = dataset + (f"_{tag}" if tag else "") + ("_mixed" if mixed else "")
+    folder = (dataset + (f"_{tag}" if tag else "") + ("_with_unnatural" if with_unnatural else "")
+              + ("_mixed" if mixed else ""))
     return SAMPLES_DIR / "stage2_selected" / seed_dir(seed) / folder / f"{method}_{count}.csv"
 
 
-def selection_methods(seed, dataset, count, response_label_filter="safe", mixed=False):
+def selection_methods(seed, dataset, count, response_label_filter="safe", mixed=False,
+                      with_unnatural=False):
     """Methods with a selected subset of `count` rows for this seed and dataset."""
-    folder = selection_csv(seed, dataset, "", count, response_label_filter, mixed).parent
+    folder = selection_csv(seed, dataset, "", count, response_label_filter, mixed,
+                           with_unnatural).parent
     return sorted(path.name[:-len(f"_{count}.csv")] for path in folder.glob(f"*_{count}.csv"))
 
 

@@ -18,6 +18,8 @@ Usage: range/train.sh [options] [-- align.py options]
   --selected DATASET     Stage 2: train on every subset select_data.py selected from DATASET
                          for the seed (--abbrs then names selection methods)
   --mixed_diversity      With --selected: the subsets of the mixed-diversity ablation
+  --with_unnatural       With --selected: the subsets of the ablation keeping the unnatural
+                         jailbreak types
   --eval                 Also evaluate each checkpoint once it is trained (DELETE_CKPTS=1 then
                          deletes it; default: kept); saved checkpoints are evaluated right away
   --eval_only            Only evaluate the saved checkpoints (implies --eval)
@@ -37,7 +39,7 @@ EOF
 }
 
 seed=43 models=() abbrs=() align_args=() response_label_filter=safe num_train="" selected=""
-mixed=0
+mixed=0 with_unnatural=0
 eval=0 eval_only=0 dry_run=0
 while (( $# )); do
     case $1 in
@@ -53,6 +55,7 @@ while (( $# )); do
             ;;
         --eval) eval=1; shift ;;
         --mixed_diversity) mixed=1; shift ;;
+        --with_unnatural) with_unnatural=1; shift ;;
         --eval_only) eval=1 eval_only=1; shift ;;
         --dry_run) dry_run=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -64,6 +67,7 @@ setting_setup || exit 2
 settings=(--seed "$seed" --num_train "$num_train" --response_label_filter "$response_label_filter")
 [[ -n $selected ]] && settings+=(--selected "$selected")
 (( mixed )) && settings+=(--mixed_diversity)
+(( with_unnatural )) && settings+=(--with_unnatural)
 
 if (( EFFECTIVE_BATCH % (TRAIN_NGPUS * MICRO_BATCH) )); then
     echo "EFFECTIVE_BATCH=$EFFECTIVE_BATCH is not a multiple of" \

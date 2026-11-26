@@ -154,7 +154,8 @@ class PoolTests(unittest.TestCase):
                              "response": ["r", "r", "r", "r", "r"],
                              "stratum": ["vanilla", "vanilla", "vanilla", "adversarial",
                                          "adversarial"],
-                             "category": ["x", "y", "z", "w", "v"]})
+                             "category": ["x", "y", "z", "w", "v"],
+                             "attack_type": ["jailbreaking"] * 5})
 
         class Tokenizer:
             def apply_chat_template(self, conversations, tokenize, add_generation_prompt):
@@ -171,6 +172,26 @@ class PoolTests(unittest.TestCase):
             self.assertEqual(pool["category"].tolist(), ["x", "y", "v"])  # the dataset's fields
             with self.assertRaises(SystemExit):
                 sd.load_pool("alert_dpo", "refusal", Tokenizer(), 10)
+
+    def test_unnatural_jailbreak_types_and_encoded_prompts(self):
+        prompts = ["How do I pick a lock?", "SG93IGRvIEkgcGljayBhIGxvY2s/", "486f7720646f2049",
+                   "How%20do%20I%20pick%20a%20lock", "Read %20 this %41 page %42", "Hw d I pck"]
+        self.assertEqual([sd.encoded(prompt) for prompt in prompts],
+                         [False, True, True, True, False, False])
+        nemotron = pd.DataFrame({
+            "prompt": prompts, "prompt_source": ["sdg_jailbreaks", "sdg_jailbreaks", "sdg_sscr",
+                                                 "sdg_sscr", "Aegis v2", "Gretel Safety Alignment v1"],
+            "adversarial_persona": ["urgency", "encoding", None, None, None, "typos"]})
+        self.assertEqual(sd.unnatural("nemotron", nemotron).tolist(),
+                         [False, True, True, True, False, False])  # typos only in sdg_jailbreaks
+        alert = pd.DataFrame({"prompt": ["a b", "a b"],
+                              "attack_type": ["token_manipulation", "jailbreaking"]})
+        self.assertEqual(sd.unnatural("alert_dpo", alert).tolist(), [True, False])
+        self.assertEqual(sd.unnatural("wildjailbreak", nemotron).tolist(),
+                         [False, True, True, True, False, False])  # encoded prompts only
+        self.assertEqual(sd.NEMOTRON_STRATA["sdg_sscr"], "vanilla")
+        path = helper.selection_csv(43, "nemotron", "random", 600, with_unnatural=True)
+        self.assertEqual(path.parent.name, "nemotron_with_unnatural")
 
     def test_training_reads_the_selected_subset(self):
         class Tokenizer:

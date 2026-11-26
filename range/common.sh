@@ -115,10 +115,11 @@ add_values() {
 }
 
 # setting_setup: from seed, response_label_filter (safe or refusal), selected (stage 2: the
-# selection dataset, or empty), mixed (1: stage 2's mixed-diversity ablation) and num_train
-# (default 1800), sets the folders of a setting. Returns 2 on a bad option.
-#   setting    default or refusal (stage 2: selected_<dataset>[_refusal][_mixed]), plus
-#              _<harmful count> for another size (default_500, selected_wildjailbreak_500)
+# selection dataset, or empty), with_unnatural (1: stage 2's ablation keeping the unnatural
+# jailbreak types), mixed (1: stage 2's mixed-diversity ablation) and num_train (default 1800),
+# sets the folders of a setting. Returns 2 on a bad option.
+#   setting    default or refusal (stage 2: selected_<dataset>[_refusal][_with_unnatural][_mixed]),
+#              plus _<harmful count> for another size (default_500, selected_wildjailbreak_500)
 #   harmful    harmful examples per run (a third, rounded as helper.mixture_counts)
 #   results    the setting's scores folder: results/correlations/<setting> (stage 1, with the
 #              diversity scores in diversity/) or results/selection/<setting without selected_>
@@ -131,9 +132,14 @@ setting_setup() {
     esac
     if [[ -n ${selected:-} ]]; then
         setting=selected_$selected${setting:+_$setting}
+        if (( ${with_unnatural:-0} )); then
+            [[ $selected == alert_dpo || $selected == nemotron ]] ||
+                { echo "--with_unnatural applies to alert_dpo and nemotron" >&2; return 2; }
+            setting+=_with_unnatural
+        fi
         (( ${mixed:-0} )) && setting+=_mixed
-    elif (( ${mixed:-0} )); then
-        echo "--mixed_diversity needs --selected" >&2; return 2
+    elif (( ${mixed:-0} || ${with_unnatural:-0} )); then
+        echo "--mixed_diversity and --with_unnatural need --selected" >&2; return 2
     else
         setting=${setting:-default}
     fi

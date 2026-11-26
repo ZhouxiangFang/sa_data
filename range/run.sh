@@ -6,7 +6,8 @@ source "$RANGE/common.sh"
 
 usage() {
     cat <<'EOF'
-Usage: range/run.sh [--seed SEED] [--selected DATASET [--mixed_diversity]] [--models MODEL...]
+Usage: range/run.sh [--seed SEED] [--selected DATASET [--with_unnatural] [--mixed_diversity]]
+                    [--models MODEL...]
                     [--abbrs GROUP...] [--num_train N] [--response_label_filter safe|refusal]
                     [--skip STAGE...] [--dry_run]
 
@@ -15,7 +16,9 @@ evenly baselines, evaluate them, score the diversity of their training samples a
 with the harmful score. Stage 2 (--selected DATASET: wildguardmix, wildjailbreak, alert_dpo or
 nemotron): select subsets from DATASET with every select_data.py method, then train and
 evaluate them; --mixed_diversity runs the ablation that scores each metric on both strata
-together (metrics only).
+together (metrics only), --with_unnatural the one that keeps the jailbreak types whose prompts
+are not natural language (alert_dpo, nemotron; every method; select_data.py drops them by
+default).
   select     stage 2: select_data.py on 1 x EVAL_GPU (SELECT_CPUS=32, SELECT_MEM=192G,
              SELECT_TIME=1-00:00:00), then a CPU job that reruns this command with
              --skip select once the selection succeeds (training is planned from the subsets)
@@ -41,7 +44,7 @@ EOF
 
 args=("$@")
 seed=43 models=() abbrs=() skip=() dry_run=0 response_label_filter=safe num_train="" selected=""
-mixed=0
+mixed=0 with_unnatural=0
 while (( $# )); do
     case $1 in
         --seed|--response_label_filter|--num_train|--selected)
@@ -54,6 +57,7 @@ while (( $# )); do
             ;;
         --dry_run) dry_run=1; shift ;;
         --mixed_diversity) mixed=1; shift ;;
+        --with_unnatural) with_unnatural=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -82,6 +86,7 @@ if ! skipped select; then
     select_opts=(--dataset "$selected" --seed "$seed" --size "$harmful" --response_label_filter
                  "$response_label_filter" --threads "${SELECT_CPUS:-32}" --num_proc 16)
     (( mixed )) && select_opts+=(--mixed_diversity)
+    (( with_unnatural )) && select_opts+=(--with_unnatural)
     EVAL_CPUS=${SELECT_CPUS:-32} EVAL_MEM=${SELECT_MEM:-192G} EVAL_TIME=${SELECT_TIME:-1-00:00:00} \
         submit_or_echo "select_${selected}_s$seed" python select_data.py "${select_opts[@]}"
     deps=$(paste -sd: "$JOB_IDS_FILE")
@@ -111,6 +116,7 @@ if ! skipped train; then
                 "$response_label_filter" --models "${models[@]}" --eval)
     [[ -n $selected ]] && train_opts+=(--selected "$selected")
     (( mixed )) && train_opts+=(--mixed_diversity)
+    (( with_unnatural )) && train_opts+=(--with_unnatural)
     (( ${#abbrs[@]} )) && train_opts+=(--abbrs "${abbrs[@]}")
     (( dry_run )) && train_opts+=(--dry_run)
     "$RANGE/train.sh" "${train_opts[@]}" || echo "Submitting train/eval failed" >&2
@@ -127,6 +133,7 @@ if ! skipped post; then
                "$response_label_filter")
     [[ -n $selected ]] && post_opts+=(--selected "$selected")
     (( mixed )) && post_opts+=(--mixed_diversity)
+    (( with_unnatural )) && post_opts+=(--with_unnatural)
     deps=$(paste -sd: "$JOB_IDS_FILE")
     DEPENDENCY=${deps:+afterany:$deps} GPUS=0 submit_or_echo "post_s$seed" bash \
         "$RANGE/post.sh" "${post_opts[@]}"

@@ -5,9 +5,13 @@
     python select_data.py --dataset alert_dpo --methods semantic_vendi random
 
 Datasets: harmful prompts with a safe response, split into vanilla and adversarial strata.
-Prompts equal to a test prompt (any of the seven test sets, case and spaces ignored) and prompts
-of --max_length or more tokens are dropped; nothing else is (rows with the same prompt and
-response stay separate rows, and each can be selected once).
+Prompts equal to a test prompt (any of the seven test sets, case and spaces ignored), prompts
+of --max_length or more tokens and the jailbreak types whose prompts are not natural language
+(unnatural: POS tags cannot describe them; --with_unnatural keeps them, an ablation) are dropped;
+nothing else is (rows with the same prompt and response stay separate rows, and each can be
+selected once). Unnatural: ALERT-DPO's token_manipulation; Nemotron sdg_jailbreaks' encoding and
+typos techniques (its adversarial_persona); and in every dataset any prompt wholly hex, base64 or
+URL encoded (only Nemotron's sdg_sscr has some).
   wildguardmix   WildGuardMix train: response labeled unharmful (--response_label_filter
                  refusal: also labeled a refusal); strata from its adversarial flag
   wildjailbreak  WildJailbreak train: vanilla_harmful / adversarial_harmful and their completions
@@ -44,7 +48,11 @@ Methods (--methods, default all):
                     number of random rows from each cluster
 Embeddings: Qwen/Qwen3-Embedding-0.6B in float32 (calculate_diversity.embed), of the prompts
 (semantic_*, baselines) or their spaCy POS strings (structural_pos_vendi, structural_knn_*).
-Tags and embeddings of a dataset are cached in --cache_dir and reused by every seed.
+Tags (calculate_diversity.TAGGER) and embeddings of a dataset are cached in
+--cache_dir/<tagger>/<dataset> and reused by every seed and setting.
+
+Ablation (--with_unnatural, alert_dpo and nemotron): keeps the unnatural rows. Its subsets go to
+<dataset>[_refusal]_with_unnatural/.
 
 Ablation (--mixed_diversity, metrics only): each metric is computed on the whole subset, both
 strata together; each step's pool still comes from one stratum (the one furthest below its
@@ -64,6 +72,7 @@ import argparse
 import json
 import math
 import os
+import re
 import time
 from pathlib import Path
 
@@ -84,11 +93,14 @@ from helper import (DEFAULT_MAX_LENGTH, DEFAULT_SEED, SELECTION_DATASETS, add_po
 METRICS = tuple(metric.rstrip("↑↓") for metric in cd.METRICS)
 BASELINES = ("random", "qdit", "kcenter_greedy", "novelselect", "repr_filter", "kmeans")
 EMBEDDER = "Qwen/Qwen3-Embedding-0.6B"
-# Nemotron prompt sources: Aegis v2 prompts are plain requests; the others are jailbreaks,
-# persona/tactic role-play (Gretel), safe-sounding context (SSCR) or jailbreak templates.
-NEMOTRON_STRATA = {"Aegis v2": "vanilla", "sdg_jailbreaks": "adversarial",
-                   "Gretel Safety Alignment v1": "adversarial", "sdg_sscr": "adversarial",
+# Nemotron prompt sources: Aegis v2 (human-written) and sdg_sscr (synthetic requests in six
+# extreme-harm categories, the card's sdg_sensitive_categories) are plain requests; sdg_jailbreaks
+# applies one of 14 jailbreak techniques (adversarial_persona), Gretel a social-engineering tactic
+# (after the comma of its subcategories) with a persona, HarmfulTasks a jailbreak template.
+NEMOTRON_STRATA = {"Aegis v2": "vanilla", "sdg_sscr": "vanilla",
+                   "sdg_jailbreaks": "adversarial", "Gretel Safety Alignment v1": "adversarial",
                    "HarmfulTasks": "adversarial"}
+UNNATURAL_DATASETS = ("alert_dpo", "nemotron")  # the pools with unnatural jailbreak types
 NEMOTRON_REFUSALS = ("refusal_with_explanation_redirection", "refusal_no_redirection",
                      "hard_refusal_with_helplines")
 
@@ -155,7 +167,30 @@ def normalized(text):
     return " ".join(str(text).lower().split())
 
 
-def load_pool(dataset, response_label_filter, tokenizer, max_length):
+HEX_OR_BASE64 = re.compile(r"[0-9A-Fa-f\s]{16,}|[A-Za-z0-9+/]{16,}={0,2}")
+URL_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def encoded(prompt):
+    """Whether a prompt is wholly hex, base64 or URL encoded (no spaces, 3+ %XX escapes)."""
+    text = str(prompt).strip()
+    return bool(HEX_OR_BASE64.fullmatch(text)) or (
+        not re.search(r"\s", text) and len(URL_ESCAPE.findall(text)) >= 3)
+
+
+def unnatural(dataset, pool):
+    """Rows of the jailbreak types whose prompts are not natural language (see the module doc)."""
+    if dataset == "alert_dpo":
+        typed = pool["attack_type"] == "token_manipulation"
+    elif dataset == "nemotron":
+        typed = ((pool["prompt_source"] == "sdg_jailbreaks")
+                 & pool["adversarial_persona"].isin(["encoding", "typos"]))
+    else:
+        typed = False
+    return pool["prompt"].map(encoded) | typed
+
+
+def load_pool(dataset, response_label_filter, tokenizer, max_length, with_unnatural=False):
     """The dataset's candidate rows (see the module doc), index 0..N-1."""
     if pool_tag(response_label_filter) and dataset != "wildguardmix":
         raise SystemExit(f"--response_label_filter refusal needs refusal labels; {dataset} has none")
@@ -163,6 +198,16 @@ def load_pool(dataset, response_label_filter, tokenizer, max_length):
     pool = loader(response_label_filter) if dataset == "wildguardmix" else loader()
     pool = clean_pairs(pool)
     counts = [len(pool)]
+    if not with_unnatural:
+        dropped = unnatural(dataset, pool)
+        kind = {"alert_dpo": "attack_type", "nemotron": "adversarial_persona"}.get(dataset)
+        kinds = (pool.loc[dropped, kind].fillna("other encoded") if kind
+                 else pd.Series("encoded", index=pool.index[dropped]))
+        print(f"Dropping {dropped.sum():,} unnatural rows of {len(pool):,}"
+              + "".join(f", {name} {size:,}" for name, size in kinds.value_counts().items()),
+              flush=True)
+        pool = pool[~dropped]
+        counts[0] = len(pool)
     tests = {normalized(prompt) for name in safety_test_datasets + overrefusal_test_datasets
              for prompt in load_test_set(name)["prompt"]}
     pool = pool[~pool["prompt"].map(normalized).isin(tests)]
@@ -983,6 +1028,9 @@ def main():
     parser.add_argument("--mixed_diversity", action="store_true",
                         help="Ablation: each metric on the whole subset, both strata together "
                              "(the pools stay per stratum); metrics only")
+    parser.add_argument("--with_unnatural", action="store_true",
+                        help="Ablation (alert_dpo, nemotron): keep the jailbreak types whose prompts "
+                             "are not natural language")
     parser.add_argument("--size", type=int, default=600, help="Subset size (default: 600)")
     parser.add_argument("--init_size", type=int, default=50,
                         help="Random rows every method starts from (default: 50)")
@@ -1003,8 +1051,11 @@ def main():
         args.methods = [method for method in args.methods if method in METRICS]
     set_num_threads(min(args.threads, get_num_threads()))
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.with_unnatural and args.dataset not in UNNATURAL_DATASETS:
+        parser.error(f"--with_unnatural applies to {' and '.join(UNNATURAL_DATASETS)}")
     paths = {method: selection_csv(args.seed, args.dataset, method, args.size,
-                                   args.response_label_filter, args.mixed_diversity)
+                                   args.response_label_filter, args.mixed_diversity,
+                                   args.with_unnatural)
              for method in args.methods}
     pending = [method for method in args.methods if args.overwrite or not paths[method].exists()]
     print(f"{args.dataset}, seed {args.seed}: {len(pending)} of {len(args.methods)} selections "
@@ -1014,7 +1065,8 @@ def main():
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_mapping.get(args.model, args.model))
-    pool = load_pool(args.dataset, args.response_label_filter, tokenizer, args.max_length)
+    pool = load_pool(args.dataset, args.response_label_filter, tokenizer, args.max_length,
+                     args.with_unnatural)
     strata = Strata(pool["stratum"].tolist())
     initial = strata.initial(args.init_size, args.seed)
     print("Strata (pool / initial / subset): " + ", ".join(
@@ -1027,7 +1079,8 @@ def main():
         if start < max(4, quota // cd.EXAMPLES_PER_CLUSTER):
             parser.error(f"--init_size gives {name} {start} initial rows; it needs "
                          f"{max(4, quota // cd.EXAMPLES_PER_CLUSTER)}")
-    features = Features(pool["prompt"].tolist(), args.cache_dir / args.dataset, args.num_proc)
+    features = Features(pool["prompt"].tolist(), args.cache_dir / cd.TAGGER / args.dataset,
+                        args.num_proc)
     for method in pending:
         start = time.time()
         selected, scores, orders = select(method, features, initial, args.size, strata,

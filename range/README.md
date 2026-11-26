@@ -36,8 +36,12 @@ Vanilla and adversarial rows are never mixed: each subset keeps their natural sh
 stratum is selected on its own (a metric's greedy step draws a fresh pool of 5,000 unselected rows
 of the stratum and scores the metric on that stratum's selected rows only). A CPU follow-up job then reruns
 `run.sh ... --skip select` to train and evaluate every subset. Subsets:
-`samples/stage2_selected/seed<seed>/<dataset>[_refusal]/`.
-Tags and embeddings are cached in `/scratch/zf28/selection_cache/<dataset>/`.
+`samples/stage2_selected/seed<seed>/<dataset>[_refusal][_with_unnatural][_mixed]/`. The jailbreak
+types whose prompts are not natural language (ALERT token_manipulation; Nemotron encoding and
+typos, and wholly encoded prompts) are dropped, since POS tags (spaCy en_core_web_trf, on the GPU)
+describe natural language. Ablations: `--with_unnatural` (ALERT-DPO, Nemotron) keeps them;
+`--mixed_diversity` scores each metric on both strata together.
+Tags and embeddings are cached in `/scratch/zf28/selection_cache/<tagger>/<dataset>/`.
 
 Defaults: training on 2 × H200 with ZeRO-2 (`ds_zero2.json`, DeepSpeed ≥ 0.19.6: 0.17.6–0.19.5
 compute wrong ZeRO-2 gradients with accumulation, and `train.sh` refuses them), micro-batch 4 × 4
@@ -58,7 +62,8 @@ Outputs (paths from `~/align`; `eval.py` and `range/common.sh` document them):
   - `correlations/<setting>/` (stage 1: `default`, `refusal`, `refusal_500`, ...):
     `seed<S>/<model>/<group>.csv`, `diversity/<embedder>/seed<S>.csv` and `mean.csv`,
     `correlations.csv`
-  - `selection/<dataset>[_refusal][_mixed]/` (stage 2): `seed<S>/<model>/<method>.csv`
+  - `selection/<dataset>[_refusal][_with_unnatural][_mixed]/` (stage 2):
+    `seed<S>/<model>/<method>.csv`
 - `/scratch/zf28/results/`: the same tree, a folder per model with its responses and
   per-subcategory breakdowns. /scratch purges old files.
 - `figs/`: the same tree, the figures (and the numbers they plot).

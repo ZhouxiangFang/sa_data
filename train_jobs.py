@@ -47,6 +47,8 @@ def main():
                         help="Stage 2: the subsets selected from this dataset")
     parser.add_argument("--mixed_diversity", action="store_true",
                         help="With --selected: the mixed-diversity ablation's subsets")
+    parser.add_argument("--with_unnatural", action="store_true",
+                        help="With --selected: the --with_unnatural ablation's subsets")
     parser.add_argument("--num_train", type=int, default=DEFAULT_NUM_TRAIN)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--ckpt_dir", type=Path, required=True, help="align.py --output_dir")
@@ -62,7 +64,8 @@ def main():
     harmful_count = mixture_counts(args.num_train)[0]
     if args.selected:
         groups = selection_methods(args.seed, args.selected, harmful_count,
-                                   args.response_label_filter, args.mixed_diversity)
+                                   args.response_label_filter, args.mixed_diversity,
+                                   args.with_unnatural)
     else:
         groups = training_groups(load_train(), harmful_count, args.response_label_filter)
         groups += list(BASELINE_ABBRS)
@@ -73,7 +76,8 @@ def main():
                      f" (groups: {' '.join(groups)})")
         groups = [abbr for abbr in groups if abbr in args.abbrs]
     files = {abbr: run_files(abbr, args.seed, args.num_train, args.response_label_filter,
-                             settings["max_length"], args.selected, args.mixed_diversity)
+                             settings["max_length"], args.selected, args.mixed_diversity,
+                             with_unnatural=args.with_unnatural)
              for abbr in groups}
     fingerprints = {(model, abbr): run_fingerprint(model, args.seed, files[abbr], settings)
                     for model in args.models for abbr in groups}

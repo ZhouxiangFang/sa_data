@@ -21,7 +21,8 @@ Metrics (↑: higher = more diverse, ↓: lower = more diverse):
   structural_pos_vendi↑      POS-embedding Vendi: Vendi Score of the POS strings' embeddings
   structural_knn_cosine_1/3↑ POS KNN-1/3: mean cosine distance to the 1/3 nearest POS embeddings
 Words are spaCy tokens without punctuation or spaces, lowercased; POS sequences are spaCy's
-fine-grained tags (en_core_web_sm), joined by spaces for embedding. Embeddings are unit-normalized.
+fine-grained tags (TAGGER: en_core_web_trf, on the GPU), joined by spaces for embedding.
+Embeddings are unit-normalized.
 Tags and embeddings cover the whole eligible pool, so no value depends on which seeds or groups
 are scored together.
 
@@ -53,6 +54,7 @@ from helper import (BASELINE_ABBRS, DATASET, DEFAULT_SEED, SAMPLES_DIR, STAGE1_D
                     training_groups)
 
 EMBEDDING_MODEL_IDS = ("BAAI/bge-m3", "Qwen/Qwen3-Embedding-0.6B")
+TAGGER = "en_core_web_trf"  # the spaCy pipeline of the POS tags (RoBERTa-based)
 EXAMPLES_PER_CLUSTER = 50  # NovelSum's k-means granularity: 12 clusters for 600 prompts
 HDD_DRAWS = 42
 # Every metric column; the arrow is the direction of more diversity.
@@ -194,14 +196,22 @@ def embedding_metrics(semantic, structural, seed):
 
 
 def tag_texts(texts, num_proc=4):
-    """{text: (POS tags, lowercased words without punctuation or spaces)}."""
+    """{text: (POS tags, lowercased words without punctuation or spaces)}, tagged by TAGGER on
+    the GPU in one process (without a GPU, in num_proc processes), shortest texts first: the
+    batches then depend only on the set of texts, and padding stays small."""
     import spacy
 
-    nlp = spacy.load("en_core_web_sm", enable=["tok2vec", "tagger"])
-    docs = nlp.pipe(texts, n_process=num_proc, batch_size=1000)
-    return {text: ([token.tag_ for token in doc],
-                   [token.lower_ for token in doc if not (token.is_punct or token.is_space)])
-            for text, doc in zip(texts, docs)}
+    gpu = spacy.prefer_gpu()
+    nlp = spacy.load(TAGGER, enable=["transformer", "tagger"])
+    texts = sorted(dict.fromkeys(texts), key=lambda text: (len(text), text))
+    docs = nlp.pipe(texts, batch_size=64 if gpu else 256, n_process=1 if gpu else num_proc)
+    tagged = {}
+    for text, doc in zip(texts, docs):
+        tagged[text] = ([token.tag_ for token in doc],
+                        [token.lower_ for token in doc if not (token.is_punct or token.is_space)])
+        if len(tagged) % 20000 == 0:
+            print(f"  tagged {len(tagged):,} of {len(texts):,} texts", flush=True)
+    return tagged
 
 
 def embed(model_id, texts, batch_size=32):
